@@ -830,19 +830,20 @@ fn is_role_address(email: &str) -> bool {
     )
 }
 
+const DISPOSABLE_EMAIL_HINT_DOMAINS: &[&str] = &[
+    "10minutemail.com",
+    "guerrillamail.com",
+    "mailinator.com",
+    "tempmail.com",
+    "throwawaymail.com",
+    "yopmail.com",
+];
+
 fn is_disposable_hint(email: &str) -> bool {
     let Some((_local, domain)) = email.split_once('@') else {
         return false;
     };
-    matches!(
-        domain,
-        "10minutemail.com"
-            | "guerrillamail.com"
-            | "mailinator.com"
-            | "tempmail.com"
-            | "throwawaymail.com"
-            | "yopmail.com"
-    )
+    DISPOSABLE_EMAIL_HINT_DOMAINS.contains(&domain)
 }
 
 fn min_optional_text(left: Option<String>, right: Option<String>) -> Option<String> {
