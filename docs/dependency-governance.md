@@ -70,3 +70,11 @@ Outdated direct dependencies are report-only by default. To make them blocking:
 ```bash
 STRICT_OUTDATED=1 ./scripts/dependency_governance_check.sh
 ```
+
+## Current Exceptions
+
+- `RUSTSEC-2025-0057` (`fxhash`): maintenance-status advisory inherited through
+  `scraper -> selectors`. This is not a known vulnerability, but it is still
+  dependency debt. Keep the exception visible in both `deny.toml` and
+  `scripts/dependency_governance_check.sh`, and revisit it when replacing the
+  HTML parsing stack or when `selectors` moves away from `fxhash`.

@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOOTSTRAP_TOOLS=0
 STRICT_OUTDATED="${STRICT_OUTDATED:-0}"
 WORKSPACES=(".")
+AUDIT_IGNORES=("RUSTSEC-2025-0057")
 
 if [[ -d "${HOME}/.cargo/bin" ]]; then
   export PATH="${HOME}/.cargo/bin:${PATH}"
@@ -110,7 +111,11 @@ run_workspace_checks() {
   echo "[workspace: ${workspace_dir}] [2/3] cargo audit (RustSec)"
   (
     cd "${workspace_path}"
-    run_cmd cargo audit --deny warnings
+    audit_args=(--deny warnings)
+    for advisory in "${AUDIT_IGNORES[@]}"; do
+      audit_args+=(--ignore "${advisory}")
+    done
+    run_cmd cargo audit "${audit_args[@]}"
   )
 
   echo "[workspace: ${workspace_dir}] [3/3] cargo outdated (direct dependency stale-risk)"

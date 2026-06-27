@@ -11,8 +11,8 @@ publish = false
 [dependencies]
 csv = "1.4.0"
 hex = "0.4.3"
-mcp-toolkit = { git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "76aa657e229d51462d98297bc658b66df1b8a191", features = ["server-stdio"] }
-mcp-toolkit-core = { git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "76aa657e229d51462d98297bc658b66df1b8a191" }
+mcp-toolkit = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "76aa657e229d51462d98297bc658b66df1b8a191", features = ["server-stdio"] }
+mcp-toolkit-core = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "76aa657e229d51462d98297bc658b66df1b8a191" }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "cookies", "rustls-tls"] }
 rmcp = { version = "=1.7.0", default-features = false, features = ["macros", "schemars", "server", "transport-io"] }
 roxmltree = "0.21.1"
@@ -27,4 +27,4 @@ tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }
 url = "2.5.7"
 
 [dev-dependencies]
-mcp-toolkit-testing = { git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "76aa657e229d51462d98297bc658b66df1b8a191" }
+mcp-toolkit-testing = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "76aa657e229d51462d98297bc658b66df1b8a191" }
