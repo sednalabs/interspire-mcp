@@ -47,6 +47,9 @@ questions, not for generic administrative access.
 | `interspire_campaign_readback` | Read | Read campaign rows or one campaign edit-page summary. |
 | `interspire_warmup_audience_readiness` | Read | Report specified-list warm-up universe coverage and warnings. |
 | `interspire_audience_hygiene_export` | Private artifact | Export candidate audience artifacts outside git with aggregate MCP output only. |
+| `interspire_audience_hygiene_export_begin` | Private artifact | Start a checkpointed audience export job and advance a bounded number of subscriber queries. |
+| `interspire_audience_hygiene_export_resume` | Private artifact | Resume a checkpointed audience export job without repeating completed shards. |
+| `interspire_audience_hygiene_export_status` | Read | Read aggregate status for a checkpointed audience export job. |
 
 There is intentionally no generic admin URL fetch tool, raw contact dump tool,
 send tool, schedule tool, import tool, unsubscribe mutation tool, suppression
@@ -187,6 +190,30 @@ stay out of git, issue trackers, tickets, and chat.
 
 An audience hygiene export is candidate evidence. It is not validation proof,
 suppression proof, engagement proof, or send authorization.
+
+For large list exports, prefer the checkpointed flow so one MCP call does not
+have to finish the full XML traversal:
+
+```bash
+target/release/interspire-6-mcp audience-hygiene-export-begin \
+  --source-list-ids 7,8 \
+  --output-dir /secure/private/interspire-audience-hygiene \
+  --artifact-prefix example-run \
+  --max-queries-per-call 4
+
+target/release/interspire-6-mcp audience-hygiene-export-status \
+  --job-id iah_123 \
+  --output-dir /secure/private/interspire-audience-hygiene
+
+target/release/interspire-6-mcp audience-hygiene-export-resume \
+  --job-id iah_123 \
+  --output-dir /secure/private/interspire-audience-hygiene \
+  --max-queries-per-call 4
+```
+
+Checkpoint state is written privately under the approved output root and the
+MCP response stays aggregate and redacted. This is a resumable export helper,
+not a background send or task runner.
 
 ## Development
 

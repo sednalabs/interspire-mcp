@@ -6,6 +6,9 @@ fn stdio_initializes_and_lists_tools() {
         env!("CARGO_BIN_EXE_interspire-6-mcp"),
         &[
             "interspire_audience_hygiene_export",
+            "interspire_audience_hygiene_export_begin",
+            "interspire_audience_hygiene_export_resume",
+            "interspire_audience_hygiene_export_status",
             "interspire_campaign_readback",
             "interspire_contact_state",
             "interspire_list_owner_readback",

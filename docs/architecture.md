@@ -24,6 +24,7 @@ Email Marketer 6.2.3 state in typed, redacted, operator-oriented tools.
 | `safety.rs` | URL allowlists for read pages and guarded queue-control routes. |
 | `guarded_write.rs` | Shared plan-id and runtime enablement checks. |
 | `audience_hygiene.rs` | Private audience artifact construction outside git. |
+| `audience_hygiene_checkpoint.rs` | Checkpointed begin/resume/status flow for bounded audience export progress. |
 | `response.rs` | Public response contracts, fixtures, and error serialization. |
 | `redact.rs` | Redaction helpers for emails, hosts, URLs, and secret-shaped text. |
 
@@ -44,6 +45,11 @@ The server does not treat provider delivery events, external validation results,
 or private artifact exports as Interspire state. Those may be useful inputs for
 separate workflows, but Interspire remains the source of list/campaign/contact
 readback in this repository.
+
+The checkpointed audience export flow is deliberately transport-local rather
+than a generic background-task framework. It persists bounded progress under an
+approved private output root, advances only a limited number of subscriber XML
+queries per call, and lets operators resume safely after MCP/client timeouts.
 
 ## Contract Tests
 

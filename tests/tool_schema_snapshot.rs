@@ -1,5 +1,6 @@
 use interspire_6_mcp::{
-    AudienceHygieneExportReport, AudienceHygieneExportRequest, CampaignReadbackReport,
+    AudienceHygieneExportBeginRequest, AudienceHygieneExportReport, AudienceHygieneExportRequest,
+    AudienceHygieneExportResumeRequest, AudienceHygieneExportStatusRequest, CampaignReadbackReport,
     CampaignReadbackRequest, ContactStateReport, ContactStateRequest, InterspireError,
     InterspireMcpServer, InterspireReadBackend, ListOwnerReadbackReport, ListOwnerReadbackRequest,
     ListSummaryReport, ListSummaryRequest, QueueControlApplyReport, QueueControlApplyRequest,
@@ -92,6 +93,27 @@ impl InterspireReadBackend for FixtureBackend {
     fn audience_hygiene_export(
         &self,
         _request: &AudienceHygieneExportRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        Ok(AudienceHygieneExportReport::fixture())
+    }
+
+    fn audience_hygiene_export_begin(
+        &self,
+        _request: &AudienceHygieneExportBeginRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        Ok(AudienceHygieneExportReport::fixture())
+    }
+
+    fn audience_hygiene_export_resume(
+        &self,
+        _request: &AudienceHygieneExportResumeRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        Ok(AudienceHygieneExportReport::fixture())
+    }
+
+    fn audience_hygiene_export_status(
+        &self,
+        _request: &AudienceHygieneExportStatusRequest,
     ) -> Result<AudienceHygieneExportReport, InterspireError> {
         Ok(AudienceHygieneExportReport::fixture())
     }

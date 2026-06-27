@@ -7,20 +7,23 @@
 use crate::{
     admin_html::AdminHtmlClient,
     audience_hygiene::{self, HygieneListInput},
+    audience_hygiene_checkpoint,
     config::InterspireServerConfig,
     error::InterspireError,
     guarded_write, redact,
     response::{
         approved_hygiene_source_list_ids, approved_warmup_source_list_ids,
-        blocked_hygiene_source_list_ids, blocked_operations, AudienceHygieneExportReport,
-        AudienceHygieneExportRequest, CampaignReadbackReport, CampaignReadbackRequest,
-        ContactStateReport, ContactStateRequest, Evidence, ListOwnerReadbackReport,
-        ListOwnerReadbackRequest, ListSummary, ListSummaryReport, ListSummaryRequest,
-        QueueControlApplyReport, QueueControlApplyRequest, QueueControlPreviewReport,
-        QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
-        SettingsAuditReport, SettingsAuditRequest, StatusReport, StatusRequest,
-        UserSmtpReadbackReport, UserSmtpReadbackRequest, WarmupAudienceReadinessReport,
-        WarmupAudienceReadinessRequest, DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
+        blocked_hygiene_source_list_ids, blocked_operations, AudienceHygieneExportBeginRequest,
+        AudienceHygieneExportReport, AudienceHygieneExportRequest,
+        AudienceHygieneExportResumeRequest, AudienceHygieneExportStatusRequest,
+        CampaignReadbackReport, CampaignReadbackRequest, ContactStateReport, ContactStateRequest,
+        Evidence, ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary,
+        ListSummaryReport, ListSummaryRequest, QueueControlApplyReport, QueueControlApplyRequest,
+        QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
+        QueueStatsReadbackRequest, SettingsAuditReport, SettingsAuditRequest, StatusReport,
+        StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest,
+        WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, DEFAULT_LIST_READ_LIMIT,
+        HARD_LIST_READ_LIMIT,
     },
     xml_api::{self, XmlApiClient},
     InterspireReadBackend,
@@ -89,6 +92,9 @@ impl InterspireReadBackend for LiveInterspireBackend {
                 "interspire_campaign_readback".to_string(),
                 "interspire_warmup_audience_readiness".to_string(),
                 "interspire_audience_hygiene_export".to_string(),
+                "interspire_audience_hygiene_export_begin".to_string(),
+                "interspire_audience_hygiene_export_resume".to_string(),
+                "interspire_audience_hygiene_export_status".to_string(),
             ],
             blocked_operations: blocked_operations(),
             warnings,
@@ -555,9 +561,18 @@ impl InterspireReadBackend for LiveInterspireBackend {
             return Ok(AudienceHygieneExportReport {
                 ok: true,
                 configured: true,
+                job_id: None,
+                phase: None,
+                job_dir: None,
                 source_list_ids,
                 processed_list_count: 0,
+                remaining_list_ids: Vec::new(),
                 missing_list_ids: Vec::new(),
+                active_list_id: None,
+                active_list_name: None,
+                queries_processed_this_call: 0,
+                completed_query_count: 0,
+                remaining_query_count: 0,
                 lists: Vec::new(),
                 gross_api_items: 0,
                 eligible_items_before_dedupe: 0,
@@ -569,6 +584,7 @@ impl InterspireReadBackend for LiveInterspireBackend {
                 invalid_syntax_count: 0,
                 role_localpart_count: 0,
                 disposable_domain_hint_count: 0,
+                checkpoint_artifacts: Vec::new(),
                 artifacts: Vec::new(),
                 legacy_lists_mutated: false,
                 production_send_authorized: false,
@@ -586,9 +602,18 @@ impl InterspireReadBackend for LiveInterspireBackend {
             return Ok(AudienceHygieneExportReport {
                 ok: true,
                 configured: false,
+                job_id: None,
+                phase: None,
+                job_dir: None,
                 source_list_ids,
                 processed_list_count: 0,
+                remaining_list_ids: Vec::new(),
                 missing_list_ids,
+                active_list_id: None,
+                active_list_name: None,
+                queries_processed_this_call: 0,
+                completed_query_count: 0,
+                remaining_query_count: 0,
                 lists: Vec::new(),
                 gross_api_items: 0,
                 eligible_items_before_dedupe: 0,
@@ -600,6 +625,7 @@ impl InterspireReadBackend for LiveInterspireBackend {
                 invalid_syntax_count: 0,
                 role_localpart_count: 0,
                 disposable_domain_hint_count: 0,
+                checkpoint_artifacts: Vec::new(),
                 artifacts: Vec::new(),
                 legacy_lists_mutated: false,
                 production_send_authorized: false,
@@ -662,6 +688,29 @@ impl InterspireReadBackend for LiveInterspireBackend {
             ]),
             warnings,
         )
+    }
+
+    fn audience_hygiene_export_begin(
+        &self,
+        request: &AudienceHygieneExportBeginRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        let xml = self.xml_client()?;
+        audience_hygiene_checkpoint::begin_export(&xml, request)
+    }
+
+    fn audience_hygiene_export_resume(
+        &self,
+        request: &AudienceHygieneExportResumeRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        let xml = self.xml_client()?;
+        audience_hygiene_checkpoint::resume_export(&xml, request)
+    }
+
+    fn audience_hygiene_export_status(
+        &self,
+        request: &AudienceHygieneExportStatusRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        audience_hygiene_checkpoint::export_status(request)
     }
 }
 

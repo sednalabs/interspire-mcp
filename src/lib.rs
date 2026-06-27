@@ -33,6 +33,7 @@
 
 mod admin_html;
 mod audience_hygiene;
+mod audience_hygiene_checkpoint;
 mod config;
 mod error;
 mod guarded_write;
@@ -50,15 +51,17 @@ use mcp_toolkit_core::tool_inventory::{
     ToolCapability, ToolDiscoveryMetadata, ToolInventory, ToolInventoryError,
 };
 pub use response::{
-    AudienceHygieneArtifact, AudienceHygieneExportReport, AudienceHygieneExportRequest,
-    AudienceHygieneListSummary, CampaignReadbackReport, CampaignReadbackRequest,
-    ContactStateReport, ContactStateRequest, Evidence, ListOwnerReadbackReport,
-    ListOwnerReadbackRequest, ListSummary, ListSummaryReport, ListSummaryRequest,
-    QueueControlAction, QueueControlApplyReport, QueueControlApplyRequest, QueueControlCandidate,
-    QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
-    QueueStatsReadbackRequest, SettingsAuditReport, SettingsAuditRequest, StatusReport,
-    StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest, WarmupAudienceReadinessReport,
-    WarmupAudienceReadinessRequest, DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
+    AudienceHygieneArtifact, AudienceHygieneExportBeginRequest, AudienceHygieneExportReport,
+    AudienceHygieneExportRequest, AudienceHygieneExportResumeRequest,
+    AudienceHygieneExportStatusRequest, AudienceHygieneListSummary, CampaignReadbackReport,
+    CampaignReadbackRequest, ContactStateReport, ContactStateRequest, Evidence,
+    ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary, ListSummaryReport,
+    ListSummaryRequest, QueueControlAction, QueueControlApplyReport, QueueControlApplyRequest,
+    QueueControlCandidate, QueueControlPreviewReport, QueueControlPreviewRequest,
+    QueueStatsReadbackReport, QueueStatsReadbackRequest, SettingsAuditReport, SettingsAuditRequest,
+    StatusReport, StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest,
+    WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, DEFAULT_HYGIENE_QUERY_BUDGET,
+    DEFAULT_LIST_READ_LIMIT, HARD_HYGIENE_QUERY_BUDGET, HARD_LIST_READ_LIMIT,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -72,6 +75,30 @@ pub fn run_audience_hygiene_export(
 ) -> Result<AudienceHygieneExportReport, InterspireError> {
     let backend = live::LiveInterspireBackend::new(config);
     backend.audience_hygiene_export(request)
+}
+
+pub fn run_audience_hygiene_export_begin(
+    config: InterspireServerConfig,
+    request: &AudienceHygieneExportBeginRequest,
+) -> Result<AudienceHygieneExportReport, InterspireError> {
+    let backend = live::LiveInterspireBackend::new(config);
+    backend.audience_hygiene_export_begin(request)
+}
+
+pub fn run_audience_hygiene_export_resume(
+    config: InterspireServerConfig,
+    request: &AudienceHygieneExportResumeRequest,
+) -> Result<AudienceHygieneExportReport, InterspireError> {
+    let backend = live::LiveInterspireBackend::new(config);
+    backend.audience_hygiene_export_resume(request)
+}
+
+pub fn run_audience_hygiene_export_status(
+    config: InterspireServerConfig,
+    request: &AudienceHygieneExportStatusRequest,
+) -> Result<AudienceHygieneExportReport, InterspireError> {
+    let backend = live::LiveInterspireBackend::new(config);
+    backend.audience_hygiene_export_status(request)
 }
 
 pub trait InterspireReadBackend: Send + Sync {
@@ -119,6 +146,18 @@ pub trait InterspireReadBackend: Send + Sync {
     fn audience_hygiene_export(
         &self,
         request: &AudienceHygieneExportRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError>;
+    fn audience_hygiene_export_begin(
+        &self,
+        request: &AudienceHygieneExportBeginRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError>;
+    fn audience_hygiene_export_resume(
+        &self,
+        request: &AudienceHygieneExportResumeRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError>;
+    fn audience_hygiene_export_status(
+        &self,
+        request: &AudienceHygieneExportStatusRequest,
     ) -> Result<AudienceHygieneExportReport, InterspireError>;
 }
 
@@ -224,6 +263,27 @@ impl InterspireMcpServer {
                     .with_discovery(ToolDiscoveryMetadata::new(
                         "Export explicitly requested Interspire audience hygiene artifacts privately and return aggregate counts only.",
                         ["interspire", "audience", "hygiene", "mailgun", "sqlite"],
+                    )),
+                ToolCapability::new("interspire_audience_hygiene_export_begin")
+                    .with_group("read")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Begin a checkpointed audience hygiene export job and advance a bounded number of XML subscriber queries.",
+                        ["interspire", "audience", "hygiene", "checkpoint", "begin"],
+                    )),
+                ToolCapability::new("interspire_audience_hygiene_export_resume")
+                    .with_group("read")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Resume a checkpointed audience hygiene export job for a bounded number of XML subscriber queries.",
+                        ["interspire", "audience", "hygiene", "checkpoint", "resume"],
+                    )),
+                ToolCapability::new("interspire_audience_hygiene_export_status")
+                    .with_group("read")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Read checkpointed audience hygiene export job status without advancing the export.",
+                        ["interspire", "audience", "hygiene", "checkpoint", "status"],
                     )),
             ])?,
         })
@@ -340,6 +400,36 @@ impl InterspireMcpServer {
     ) -> String {
         response::tool_json(self.backend.audience_hygiene_export(&request))
     }
+
+    #[tool(
+        description = "Begin a checkpointed audience hygiene export job and advance a bounded number of XML subscriber queries."
+    )]
+    fn interspire_audience_hygiene_export_begin(
+        &self,
+        Parameters(request): Parameters<AudienceHygieneExportBeginRequest>,
+    ) -> String {
+        response::tool_json(self.backend.audience_hygiene_export_begin(&request))
+    }
+
+    #[tool(
+        description = "Resume a checkpointed audience hygiene export job for a bounded number of XML subscriber queries."
+    )]
+    fn interspire_audience_hygiene_export_resume(
+        &self,
+        Parameters(request): Parameters<AudienceHygieneExportResumeRequest>,
+    ) -> String {
+        response::tool_json(self.backend.audience_hygiene_export_resume(&request))
+    }
+
+    #[tool(
+        description = "Read checkpointed audience hygiene export job status without advancing the export."
+    )]
+    fn interspire_audience_hygiene_export_status(
+        &self,
+        Parameters(request): Parameters<AudienceHygieneExportStatusRequest>,
+    ) -> String {
+        response::tool_json(self.backend.audience_hygiene_export_status(&request))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -439,6 +529,27 @@ mod tests {
         ) -> Result<AudienceHygieneExportReport, InterspireError> {
             Ok(AudienceHygieneExportReport::fixture())
         }
+
+        fn audience_hygiene_export_begin(
+            &self,
+            _request: &AudienceHygieneExportBeginRequest,
+        ) -> Result<AudienceHygieneExportReport, InterspireError> {
+            Ok(AudienceHygieneExportReport::fixture())
+        }
+
+        fn audience_hygiene_export_resume(
+            &self,
+            _request: &AudienceHygieneExportResumeRequest,
+        ) -> Result<AudienceHygieneExportReport, InterspireError> {
+            Ok(AudienceHygieneExportReport::fixture())
+        }
+
+        fn audience_hygiene_export_status(
+            &self,
+            _request: &AudienceHygieneExportStatusRequest,
+        ) -> Result<AudienceHygieneExportReport, InterspireError> {
+            Ok(AudienceHygieneExportReport::fixture())
+        }
     }
 
     #[test]
@@ -454,6 +565,9 @@ mod tests {
             names,
             vec![
                 "interspire_audience_hygiene_export",
+                "interspire_audience_hygiene_export_begin",
+                "interspire_audience_hygiene_export_resume",
+                "interspire_audience_hygiene_export_status",
                 "interspire_campaign_readback",
                 "interspire_contact_state",
                 "interspire_list_owner_readback",
