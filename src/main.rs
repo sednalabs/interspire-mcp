@@ -15,7 +15,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             return Ok(());
         }
         let request = parse_audience_hygiene_export_args(&args[1..])?;
-        let report = run_audience_hygiene_export(InterspireServerConfig::from_env(), &request)?;
+        let config = InterspireServerConfig::from_env();
+        let request_for_blocking = request.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            run_audience_hygiene_export(config, &request_for_blocking)
+        })
+        .await??;
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
