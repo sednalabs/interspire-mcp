@@ -69,6 +69,114 @@
       "name": "interspire_campaign_readback"
     },
     {
+      "description": "Apply a guarded campaign content or sender metadata edit.",
+      "inputSchema": {
+        "$defs": {
+          "FormFieldUpdate": {
+            "properties": {
+              "checked": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "updates": {
+            "items": {
+              "$ref": "#/$defs/FormFieldUpdate"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "plan_id"
+        ],
+        "title": "CampaignUpdateApplyRequest",
+        "type": "object"
+      },
+      "name": "interspire_campaign_update_apply"
+    },
+    {
+      "description": "Preview guarded campaign content or sender metadata edits.",
+      "inputSchema": {
+        "$defs": {
+          "FormFieldUpdate": {
+            "properties": {
+              "checked": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "updates": {
+            "items": {
+              "$ref": "#/$defs/FormFieldUpdate"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "campaign_id"
+        ],
+        "title": "CampaignUpdatePreviewRequest",
+        "type": "object"
+      },
+      "name": "interspire_campaign_update_preview"
+    },
+    {
       "description": "Check one redacted contact's Interspire XML list presence.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -133,6 +241,114 @@
         "type": "object"
       },
       "name": "interspire_list_summary"
+    },
+    {
+      "description": "Apply a guarded list metadata edit.",
+      "inputSchema": {
+        "$defs": {
+          "FormFieldUpdate": {
+            "properties": {
+              "checked": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "list_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "updates": {
+            "items": {
+              "$ref": "#/$defs/FormFieldUpdate"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "list_id",
+          "plan_id"
+        ],
+        "title": "ListUpdateApplyRequest",
+        "type": "object"
+      },
+      "name": "interspire_list_update_apply"
+    },
+    {
+      "description": "Preview guarded list metadata edits.",
+      "inputSchema": {
+        "$defs": {
+          "FormFieldUpdate": {
+            "properties": {
+              "checked": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "list_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "updates": {
+            "items": {
+              "$ref": "#/$defs/FormFieldUpdate"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "list_id"
+        ],
+        "title": "ListUpdatePreviewRequest",
+        "type": "object"
+      },
+      "name": "interspire_list_update_preview"
     },
     {
       "description": "Apply a previously previewed Interspire scheduled queue cancel/delete plan. Requires guarded write environment flags.",
@@ -222,6 +438,128 @@
       "name": "interspire_settings_audit"
     },
     {
+      "description": "Apply guarded non-secret Interspire settings edits.",
+      "inputSchema": {
+        "$defs": {
+          "FormFieldUpdate": {
+            "properties": {
+              "checked": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          "SettingsSectionName": {
+            "enum": [
+              "application",
+              "email",
+              "bounce",
+              "cron"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "plan_id": {
+            "type": "string"
+          },
+          "section": {
+            "$ref": "#/$defs/SettingsSectionName"
+          },
+          "updates": {
+            "items": {
+              "$ref": "#/$defs/FormFieldUpdate"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "section",
+          "plan_id"
+        ],
+        "title": "SettingsUpdateApplyRequest",
+        "type": "object"
+      },
+      "name": "interspire_settings_update_apply"
+    },
+    {
+      "description": "Preview guarded non-secret Interspire settings edits.",
+      "inputSchema": {
+        "$defs": {
+          "FormFieldUpdate": {
+            "properties": {
+              "checked": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          "SettingsSectionName": {
+            "enum": [
+              "application",
+              "email",
+              "bounce",
+              "cron"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "section": {
+            "$ref": "#/$defs/SettingsSectionName"
+          },
+          "updates": {
+            "items": {
+              "$ref": "#/$defs/FormFieldUpdate"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "section"
+        ],
+        "title": "SettingsUpdatePreviewRequest",
+        "type": "object"
+      },
+      "name": "interspire_settings_update_preview"
+    },
+    {
       "description": "Report Interspire MCP configuration and safe read capability.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -255,6 +593,114 @@
         "type": "object"
       },
       "name": "interspire_user_smtp_readback"
+    },
+    {
+      "description": "Apply a guarded user profile or footer edit.",
+      "inputSchema": {
+        "$defs": {
+          "FormFieldUpdate": {
+            "properties": {
+              "checked": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "plan_id": {
+            "type": "string"
+          },
+          "updates": {
+            "items": {
+              "$ref": "#/$defs/FormFieldUpdate"
+            },
+            "type": "array"
+          },
+          "user_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "user_id",
+          "plan_id"
+        ],
+        "title": "UserUpdateApplyRequest",
+        "type": "object"
+      },
+      "name": "interspire_user_update_apply"
+    },
+    {
+      "description": "Preview guarded user profile or footer edits.",
+      "inputSchema": {
+        "$defs": {
+          "FormFieldUpdate": {
+            "properties": {
+              "checked": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "updates": {
+            "items": {
+              "$ref": "#/$defs/FormFieldUpdate"
+            },
+            "type": "array"
+          },
+          "user_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "title": "UserUpdatePreviewRequest",
+        "type": "object"
+      },
+      "name": "interspire_user_update_preview"
     },
     {
       "description": "Assess a specified-list warm-up audience from Interspire list counts without exporting contacts.",

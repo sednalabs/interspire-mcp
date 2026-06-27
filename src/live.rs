@@ -14,13 +14,17 @@ use crate::{
         approved_hygiene_source_list_ids, approved_warmup_source_list_ids,
         blocked_hygiene_source_list_ids, blocked_operations, AudienceHygieneExportReport,
         AudienceHygieneExportRequest, CampaignReadbackReport, CampaignReadbackRequest,
-        ContactStateReport, ContactStateRequest, Evidence, ListOwnerReadbackReport,
-        ListOwnerReadbackRequest, ListSummary, ListSummaryReport, ListSummaryRequest,
+        CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactStateReport,
+        ContactStateRequest, Evidence, GuardedWriteApplyReport, GuardedWritePreviewReport,
+        ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary, ListSummaryReport,
+        ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
         QueueControlApplyReport, QueueControlApplyRequest, QueueControlPreviewReport,
         QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
-        SettingsAuditReport, SettingsAuditRequest, StatusReport, StatusRequest,
-        UserSmtpReadbackReport, UserSmtpReadbackRequest, WarmupAudienceReadinessReport,
-        WarmupAudienceReadinessRequest, DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
+        SettingsAuditReport, SettingsAuditRequest, SettingsUpdateApplyRequest,
+        SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
+        UserSmtpReadbackRequest, UserUpdateApplyRequest, UserUpdatePreviewRequest,
+        WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, DEFAULT_LIST_READ_LIMIT,
+        HARD_LIST_READ_LIMIT,
     },
     xml_api::{self, XmlApiClient},
     InterspireReadBackend,
@@ -75,6 +79,17 @@ impl InterspireReadBackend for LiveInterspireBackend {
             admin_html_configured,
             guarded_writes_enabled: self.config.guarded_writes.enabled,
             queue_controls_enabled: self.config.guarded_writes.queue_controls_enabled,
+            form_write_controls_enabled: self.config.guarded_writes.form_write_controls_enabled,
+            contact_write_controls_enabled: self
+                .config
+                .guarded_writes
+                .contact_write_controls_enabled,
+            send_controls_enabled: self.config.guarded_writes.send_controls_enabled,
+            production_send_controls_enabled: self
+                .config
+                .guarded_writes
+                .production_send_controls_enabled,
+            write_execution_mode: self.config.guarded_writes.execution_mode,
             safe_mode: true,
             capabilities: vec![
                 "interspire_status".to_string(),
@@ -87,6 +102,14 @@ impl InterspireReadBackend for LiveInterspireBackend {
                 "interspire_queue_control_preview".to_string(),
                 "interspire_queue_control_apply".to_string(),
                 "interspire_campaign_readback".to_string(),
+                "interspire_campaign_update_preview".to_string(),
+                "interspire_campaign_update_apply".to_string(),
+                "interspire_list_update_preview".to_string(),
+                "interspire_list_update_apply".to_string(),
+                "interspire_user_update_preview".to_string(),
+                "interspire_user_update_apply".to_string(),
+                "interspire_settings_update_preview".to_string(),
+                "interspire_settings_update_apply".to_string(),
                 "interspire_warmup_audience_readiness".to_string(),
                 "interspire_audience_hygiene_export".to_string(),
             ],
@@ -100,6 +123,7 @@ impl InterspireReadBackend for LiveInterspireBackend {
                     "admin HTML fallback is limited to login plus explicitly allowlisted GET read pages".to_string(),
                     "audience hygiene export writes private local artifacts only and returns aggregate metadata".to_string(),
                     "queue control apply tools are disabled unless guarded write environment flags are explicitly enabled".to_string(),
+                    "guarded form-write tools are disabled unless guarded write environment flags are explicitly enabled".to_string(),
                 ],
             },
         })
@@ -394,7 +418,7 @@ impl InterspireReadBackend for LiveInterspireBackend {
                 guarded_writes_enabled: self.config.guarded_writes.enabled,
                 queue_controls_enabled: self.config.guarded_writes.queue_controls_enabled,
                 applied: false,
-                plan_id: request.plan_id.clone(),
+                plan_id: Some(request.plan_id.clone()),
                 action: request.action,
                 before_candidate_count: 0,
                 before_row_summary: None,
@@ -420,7 +444,7 @@ impl InterspireReadBackend for LiveInterspireBackend {
             guarded_writes_enabled: self.config.guarded_writes.enabled,
             queue_controls_enabled: self.config.guarded_writes.queue_controls_enabled,
             applied: true,
-            plan_id: request.plan_id.clone(),
+            plan_id: Some(request.plan_id.clone()),
             action: request.action,
             before_candidate_count: evidence.before_candidate_count,
             before_row_summary: evidence.before_row_summary,
@@ -465,6 +489,223 @@ impl InterspireReadBackend for LiveInterspireBackend {
             request.campaign_id,
             cap_usize(request.max_rows.unwrap_or(25), 100),
         )
+    }
+
+    fn campaign_update_preview(
+        &self,
+        request: &CampaignUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        let html = self.html_client()?;
+        if !html.configured() {
+            return Ok(GuardedWritePreviewReport {
+                ok: true,
+                configured: false,
+                guarded_writes_enabled: self.config.guarded_writes.enabled,
+                form_write_controls_enabled: self.config.guarded_writes.form_write_controls_enabled,
+                write_execution_mode: self.config.guarded_writes.execution_mode,
+                target: "campaign".to_string(),
+                target_id: Some(request.campaign_id),
+                section: None,
+                plan_id: String::new(),
+                apply_directly_allowed: false,
+                available_fields: Vec::new(),
+                changes: Vec::new(),
+                warnings: vec![
+                    "admin HTML fallback is not configured; no campaign update preview attempted"
+                        .to_string(),
+                ],
+                evidence: Evidence {
+                    source: "interspire_admin_html".to_string(),
+                    notes: vec!["no request sent".to_string()],
+                },
+            });
+        }
+
+        let mut report = html.campaign_update_preview(request.campaign_id, &request.updates)?;
+        report.guarded_writes_enabled = self.config.guarded_writes.enabled;
+        report.form_write_controls_enabled = self.config.guarded_writes.form_write_controls_enabled;
+        report.write_execution_mode = self.config.guarded_writes.execution_mode;
+        report.apply_directly_allowed = false;
+        Ok(report)
+    }
+
+    fn campaign_update_apply(
+        &self,
+        request: &CampaignUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        guarded_write::require_form_write_controls_enabled(&self.config.guarded_writes)?;
+        let html = self.html_client()?;
+        let mut report = html.campaign_update_apply(
+            request.campaign_id,
+            &request.plan_id,
+            &request.updates,
+            self.config.guarded_writes.execution_mode,
+        )?;
+        report.guarded_writes_enabled = self.config.guarded_writes.enabled;
+        report.form_write_controls_enabled = self.config.guarded_writes.form_write_controls_enabled;
+        Ok(report)
+    }
+
+    fn list_update_preview(
+        &self,
+        request: &ListUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        let html = self.html_client()?;
+        if !html.configured() {
+            return Ok(GuardedWritePreviewReport {
+                ok: true,
+                configured: false,
+                guarded_writes_enabled: self.config.guarded_writes.enabled,
+                form_write_controls_enabled: self.config.guarded_writes.form_write_controls_enabled,
+                write_execution_mode: self.config.guarded_writes.execution_mode,
+                target: "list".to_string(),
+                target_id: Some(request.list_id),
+                section: None,
+                plan_id: String::new(),
+                apply_directly_allowed: false,
+                available_fields: Vec::new(),
+                changes: Vec::new(),
+                warnings: vec![
+                    "admin HTML fallback is not configured; no list update preview attempted"
+                        .to_string(),
+                ],
+                evidence: Evidence {
+                    source: "interspire_admin_html".to_string(),
+                    notes: vec!["no request sent".to_string()],
+                },
+            });
+        }
+        let mut report = html.list_update_preview(request.list_id, &request.updates)?;
+        report.guarded_writes_enabled = self.config.guarded_writes.enabled;
+        report.form_write_controls_enabled = self.config.guarded_writes.form_write_controls_enabled;
+        report.write_execution_mode = self.config.guarded_writes.execution_mode;
+        report.apply_directly_allowed = false;
+        Ok(report)
+    }
+
+    fn list_update_apply(
+        &self,
+        request: &ListUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        guarded_write::require_form_write_controls_enabled(&self.config.guarded_writes)?;
+        let html = self.html_client()?;
+        let mut report = html.list_update_apply(
+            request.list_id,
+            &request.plan_id,
+            &request.updates,
+            self.config.guarded_writes.execution_mode,
+        )?;
+        report.guarded_writes_enabled = self.config.guarded_writes.enabled;
+        report.form_write_controls_enabled = self.config.guarded_writes.form_write_controls_enabled;
+        Ok(report)
+    }
+
+    fn user_update_preview(
+        &self,
+        request: &UserUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        let html = self.html_client()?;
+        if !html.configured() {
+            return Ok(GuardedWritePreviewReport {
+                ok: true,
+                configured: false,
+                guarded_writes_enabled: self.config.guarded_writes.enabled,
+                form_write_controls_enabled: self.config.guarded_writes.form_write_controls_enabled,
+                write_execution_mode: self.config.guarded_writes.execution_mode,
+                target: "user".to_string(),
+                target_id: Some(request.user_id),
+                section: None,
+                plan_id: String::new(),
+                apply_directly_allowed: false,
+                available_fields: Vec::new(),
+                changes: Vec::new(),
+                warnings: vec![
+                    "admin HTML fallback is not configured; no user update preview attempted"
+                        .to_string(),
+                ],
+                evidence: Evidence {
+                    source: "interspire_admin_html".to_string(),
+                    notes: vec!["no request sent".to_string()],
+                },
+            });
+        }
+        let mut report = html.user_update_preview(request.user_id, &request.updates)?;
+        report.guarded_writes_enabled = self.config.guarded_writes.enabled;
+        report.form_write_controls_enabled = self.config.guarded_writes.form_write_controls_enabled;
+        report.write_execution_mode = self.config.guarded_writes.execution_mode;
+        report.apply_directly_allowed = false;
+        Ok(report)
+    }
+
+    fn user_update_apply(
+        &self,
+        request: &UserUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        guarded_write::require_form_write_controls_enabled(&self.config.guarded_writes)?;
+        let html = self.html_client()?;
+        let mut report = html.user_update_apply(
+            request.user_id,
+            &request.plan_id,
+            &request.updates,
+            self.config.guarded_writes.execution_mode,
+        )?;
+        report.guarded_writes_enabled = self.config.guarded_writes.enabled;
+        report.form_write_controls_enabled = self.config.guarded_writes.form_write_controls_enabled;
+        Ok(report)
+    }
+
+    fn settings_update_preview(
+        &self,
+        request: &SettingsUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        let html = self.html_client()?;
+        if !html.configured() {
+            return Ok(GuardedWritePreviewReport {
+                ok: true,
+                configured: false,
+                guarded_writes_enabled: self.config.guarded_writes.enabled,
+                form_write_controls_enabled: self.config.guarded_writes.form_write_controls_enabled,
+                write_execution_mode: self.config.guarded_writes.execution_mode,
+                target: "settings".to_string(),
+                target_id: None,
+                section: Some(request.section.as_str().to_string()),
+                plan_id: String::new(),
+                apply_directly_allowed: false,
+                available_fields: Vec::new(),
+                changes: Vec::new(),
+                warnings: vec![
+                    "admin HTML fallback is not configured; no settings update preview attempted"
+                        .to_string(),
+                ],
+                evidence: Evidence {
+                    source: "interspire_admin_html".to_string(),
+                    notes: vec!["no request sent".to_string()],
+                },
+            });
+        }
+        let mut report = html.settings_update_preview(request.section, &request.updates)?;
+        report.guarded_writes_enabled = self.config.guarded_writes.enabled;
+        report.form_write_controls_enabled = self.config.guarded_writes.form_write_controls_enabled;
+        report.write_execution_mode = self.config.guarded_writes.execution_mode;
+        report.apply_directly_allowed = false;
+        Ok(report)
+    }
+
+    fn settings_update_apply(
+        &self,
+        request: &SettingsUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        guarded_write::require_form_write_controls_enabled(&self.config.guarded_writes)?;
+        let html = self.html_client()?;
+        let mut report = html.settings_update_apply(
+            request.section,
+            &request.plan_id,
+            &request.updates,
+            self.config.guarded_writes.execution_mode,
+        )?;
+        report.guarded_writes_enabled = self.config.guarded_writes.enabled;
+        report.form_write_controls_enabled = self.config.guarded_writes.form_write_controls_enabled;
+        Ok(report)
     }
 
     fn warmup_audience_readiness(

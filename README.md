@@ -15,10 +15,13 @@ before newsletter work goes wrong:
   proof?
 - If something dangerous is queued, can we preview a cancel/delete plan and
   apply only that narrow plan with explicit write gates?
+- Can we stage a no-send campaign, list, user, or non-secret settings edit
+  with preview/apply proof instead of clicking through the brittle admin UI?
 
-The server is read-only by default. Its only write-class capability is a
-guarded queue cancel/delete apply path, disabled unless the runtime explicitly
-enables guarded writes and queue controls.
+The server is read-only by default. Its write-class capabilities are limited to
+guarded queue cancel/delete plus guarded no-send campaign, list, user, and
+non-secret settings edits. All apply paths stay disabled unless the runtime
+explicitly enables guarded writes and the matching control flags.
 
 ## Why This Exists
 
@@ -45,6 +48,14 @@ questions, not for generic administrative access.
 | `interspire_queue_control_preview` | Read preview | Build plan IDs for cancel/delete actions found on the schedule page. |
 | `interspire_queue_control_apply` | Guarded apply | Apply one previously previewed queue cancel/delete plan when write gates are enabled. |
 | `interspire_campaign_readback` | Read | Read campaign rows or one campaign edit-page summary. |
+| `interspire_campaign_update_preview` | Read preview | Preview guarded campaign content or sender-metadata edits. |
+| `interspire_campaign_update_apply` | Guarded apply | Apply one previously previewed campaign edit when guarded form-write gates are enabled. |
+| `interspire_list_update_preview` | Read preview | Preview guarded list metadata edits. |
+| `interspire_list_update_apply` | Guarded apply | Apply one previously previewed list metadata edit when guarded form-write gates are enabled. |
+| `interspire_user_update_preview` | Read preview | Preview guarded user profile, footer, or non-secret SMTP override edits. |
+| `interspire_user_update_apply` | Guarded apply | Apply one previously previewed user edit when guarded form-write gates are enabled. |
+| `interspire_settings_update_preview` | Read preview | Preview guarded non-secret application, email, bounce, or cron settings edits. |
+| `interspire_settings_update_apply` | Guarded apply | Apply one previously previewed non-secret settings edit when guarded form-write gates are enabled. |
 | `interspire_warmup_audience_readiness` | Read | Report specified-list warm-up universe coverage and warnings. |
 | `interspire_audience_hygiene_export` | Private artifact | Export candidate audience artifacts outside git with aggregate MCP output only. |
 
@@ -98,6 +109,8 @@ passing credentials through the client's secret/environment mechanism:
 First smoke test: call `interspire_status`. A healthy default posture should
 report configured read capabilities, `safe_mode: true`,
 `guarded_writes_enabled: false`, and `queue_controls_enabled: false`.
+For a default runtime it should also report `form_write_controls_enabled: false`
+and `write_execution_mode: "preview_apply"`.
 
 For real deployments, load credentials from environment variables or secret
 files outside the repository. Do not commit credentials, cookies, raw exports,
@@ -129,11 +142,15 @@ INTERSPIRE_XML_CREDENTIALS_FILE=/secure/secrets/interspire-xml.env
 INTERSPIRE_ADMIN_CREDENTIALS_FILE=/secure/secrets/interspire-admin.env
 ```
 
-Guarded write variables, both disabled by default:
+Guarded write variables, all disabled by default:
 
 ```bash
 INTERSPIRE_GUARDED_WRITES=1
 INTERSPIRE_QUEUE_WRITE_CONTROLS=1
+INTERSPIRE_FORM_WRITE_CONTROLS=1
+INTERSPIRE_CONTACT_WRITE_CONTROLS=0
+INTERSPIRE_SEND_CONTROLS=0
+INTERSPIRE_PRODUCTION_SEND_CONTROLS=0
 ```
 
 Private audience artifact variables:
@@ -145,21 +162,51 @@ INTERSPIRE_AUDIENCE_HYGIENE_OUTPUT_DIR=/secure/private/interspire-audience-hygie
 
 See [Configuration](docs/configuration.md) for the complete contract.
 
-## Guarded Queue Controls
+## Guarded Write Workflow
 
-Queue controls are a preview/apply workflow.
+All write paths use the same safety pattern:
 
-1. Call `interspire_queue_control_preview`.
-2. Review the returned `plan_id`, action, row summary, and warnings.
-3. Enable both guarded-write environment flags only for the session that should
-   apply the action.
-4. Call `interspire_queue_control_apply` with the exact `plan_id` and action.
-5. Review the before/after queue counts and post-apply evidence.
+1. Read the current state with the matching readback tool.
+2. Call the matching `*_preview` tool with only the intended field changes.
+3. Review the returned `plan_id`, allowed fields, summarized changes, and
+   warnings.
+4. Enable only the matching guarded-write flags for the session that should
+   apply the change.
+5. Call the matching `*_apply` tool with the exact `plan_id`.
+6. Review the post-apply readback evidence before taking any next step.
+
+### Queue Controls
+
+Queue apply remains limited to Schedule-page cancel/delete actions.
 
 The apply route is limited to Interspire Schedule-page cancel/delete actions.
 It does not send, schedule, import, export, edit contacts, edit suppressions,
-change settings, change SMTP, change provider configuration, or authorize any
-later send.
+change provider APIs, DNS, or secrets, or authorize any later send.
+
+### Guarded Form Writes
+
+Campaign, list, user, and settings form writes stay no-send and no-contact by
+design:
+
+- they only target allowlisted edit forms;
+- they require `INTERSPIRE_GUARDED_WRITES=1` and
+  `INTERSPIRE_FORM_WRITE_CONTROLS=1`;
+- they produce a deterministic preview plan before apply;
+- they require the exact preview-generated `plan_id` during apply;
+- they re-fetch the page after apply, verify the requested fields persisted,
+  and then report redacted readback;
+- they omit blank password fields from the submitted payload so unrelated
+  secrets are not cleared by accident.
+
+Within that boundary, the public phase does allow non-secret Interspire
+delivery and cron configuration edits such as SMTP host/username/port, bounce
+host/username/IMAP mode, hourly throttle, and cron toggles. It still does not
+expose provider APIs, DNS, password/secret fields, contact mutations,
+suppression mutations, or send controls.
+
+This phase intentionally does not expose send, schedule, cron-trigger,
+contact-mutation, suppression-mutation, SMTP password, bounce password,
+provider APIs, or DNS tools.
 
 See [Safety Model](docs/safety-model.md).
 

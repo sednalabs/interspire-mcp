@@ -53,6 +53,11 @@ impl InterspireServerConfig {
 pub struct GuardedWriteConfig {
     pub enabled: bool,
     pub queue_controls_enabled: bool,
+    pub form_write_controls_enabled: bool,
+    pub contact_write_controls_enabled: bool,
+    pub send_controls_enabled: bool,
+    pub production_send_controls_enabled: bool,
+    pub execution_mode: WriteExecutionMode,
 }
 
 impl GuardedWriteConfig {
@@ -60,8 +65,25 @@ impl GuardedWriteConfig {
         Self {
             enabled: env_truthy("INTERSPIRE_GUARDED_WRITES"),
             queue_controls_enabled: env_truthy("INTERSPIRE_QUEUE_WRITE_CONTROLS"),
+            form_write_controls_enabled: env_truthy("INTERSPIRE_FORM_WRITE_CONTROLS"),
+            contact_write_controls_enabled: env_truthy("INTERSPIRE_CONTACT_WRITE_CONTROLS"),
+            send_controls_enabled: env_truthy("INTERSPIRE_SEND_CONTROLS"),
+            production_send_controls_enabled: env_truthy("INTERSPIRE_PRODUCTION_SEND_CONTROLS"),
+            execution_mode: write_execution_mode_from_env(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteExecutionMode {
+    #[default]
+    PreviewApply,
+}
+
+fn write_execution_mode_from_env() -> WriteExecutionMode {
+    let _ = env::var("INTERSPIRE_WRITE_EXECUTION_MODE");
+    WriteExecutionMode::PreviewApply
 }
 
 #[derive(Debug, Clone, Default)]
@@ -217,6 +239,14 @@ mod tests {
 
         assert!(!config.enabled);
         assert!(!config.queue_controls_enabled);
+        assert!(!config.form_write_controls_enabled);
+        assert!(!config.contact_write_controls_enabled);
+        assert!(!config.send_controls_enabled);
+        assert!(!config.production_send_controls_enabled);
+        assert_eq!(
+            config.execution_mode,
+            super::WriteExecutionMode::PreviewApply
+        );
     }
 
     #[test]

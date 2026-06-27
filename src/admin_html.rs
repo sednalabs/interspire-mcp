@@ -5,14 +5,17 @@
 //! admitted by `safety`, parses redacted operational fields, and never exposes
 //! raw saved HTML, cookies, passwords, contact exports, or send/cron actions.
 
+mod forms;
+
 use crate::{
-    config::AdminHtmlConfig,
+    config::{AdminHtmlConfig, WriteExecutionMode},
     error::InterspireError,
     guarded_write, redact,
     response::{
-        CampaignReadbackReport, Evidence, ListSummary, QueueControlAction, QueueControlCandidate,
+        CampaignReadbackReport, Evidence, FormFieldUpdate, GuardedWriteApplyReport,
+        GuardedWritePreviewReport, ListSummary, QueueControlAction, QueueControlCandidate,
         QueueStatsReadbackReport, RedactedField, SettingsAuditReport, SettingsSection,
-        UserSmtpReadbackReport, UserSmtpSummary,
+        SettingsSectionName, UserSmtpReadbackReport, UserSmtpSummary,
     },
     safety::{self, AdminReadPage, QueueControlRoute},
 };
@@ -334,6 +337,110 @@ impl AdminHtmlClient {
         })
     }
 
+    pub fn campaign_update_preview(
+        &self,
+        campaign_id: u64,
+        updates: &[FormFieldUpdate],
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        forms::guarded_write_preview(
+            self,
+            forms::GuardedFormTarget::Campaign { campaign_id },
+            updates,
+        )
+    }
+
+    pub fn campaign_update_apply(
+        &self,
+        campaign_id: u64,
+        plan_id: &str,
+        updates: &[FormFieldUpdate],
+        mode: WriteExecutionMode,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        forms::guarded_write_apply(
+            self,
+            forms::GuardedFormTarget::Campaign { campaign_id },
+            plan_id,
+            updates,
+            mode,
+        )
+    }
+
+    pub fn list_update_preview(
+        &self,
+        list_id: u64,
+        updates: &[FormFieldUpdate],
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        forms::guarded_write_preview(self, forms::GuardedFormTarget::List { list_id }, updates)
+    }
+
+    pub fn list_update_apply(
+        &self,
+        list_id: u64,
+        plan_id: &str,
+        updates: &[FormFieldUpdate],
+        mode: WriteExecutionMode,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        forms::guarded_write_apply(
+            self,
+            forms::GuardedFormTarget::List { list_id },
+            plan_id,
+            updates,
+            mode,
+        )
+    }
+
+    pub fn user_update_preview(
+        &self,
+        user_id: u64,
+        updates: &[FormFieldUpdate],
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        forms::guarded_write_preview(self, forms::GuardedFormTarget::User { user_id }, updates)
+    }
+
+    pub fn user_update_apply(
+        &self,
+        user_id: u64,
+        plan_id: &str,
+        updates: &[FormFieldUpdate],
+        mode: WriteExecutionMode,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        forms::guarded_write_apply(
+            self,
+            forms::GuardedFormTarget::User { user_id },
+            plan_id,
+            updates,
+            mode,
+        )
+    }
+
+    pub fn settings_update_preview(
+        &self,
+        section: SettingsSectionName,
+        updates: &[FormFieldUpdate],
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        forms::guarded_write_preview(
+            self,
+            forms::GuardedFormTarget::Settings { section },
+            updates,
+        )
+    }
+
+    pub fn settings_update_apply(
+        &self,
+        section: SettingsSectionName,
+        plan_id: &str,
+        updates: &[FormFieldUpdate],
+        mode: WriteExecutionMode,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        forms::guarded_write_apply(
+            self,
+            forms::GuardedFormTarget::Settings { section },
+            plan_id,
+            updates,
+            mode,
+        )
+    }
+
     fn login(&self) -> Result<(), InterspireError> {
         let base_url = self.config.base_url.as_deref().unwrap_or_default();
         let username = self.config.username.as_deref().unwrap_or_default();
@@ -392,6 +499,36 @@ impl AdminHtmlClient {
             max_rows,
         )
     }
+}
+
+fn summarize_field_value(name: &str, value: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let trimmed = value.trim();
+    if is_large_content_like_field(&lower) {
+        let excerpt = compact_text(&trimmed.chars().take(80).collect::<String>());
+        let digest = Sha256::digest(trimmed.as_bytes());
+        return format!(
+            "[content len={} sha256={} excerpt=\"{}\"]",
+            trimmed.len(),
+            &hex::encode(digest)[..12],
+            redact::redact_sensitive_text(&excerpt)
+        );
+    }
+
+    redact_field_value(&lower, trimmed).unwrap_or_default()
+}
+
+fn is_large_content_like_field(lower: &str) -> bool {
+    lower.contains("html")
+        || lower.contains("body")
+        || lower.contains("footer")
+        || lower.contains("content")
+}
+
+fn looks_like_save_submit(control: &forms::FormControl) -> bool {
+    control.kind == forms::FormControlKind::Submit
+        && (control.lower_name.contains("save")
+            || control.value.to_ascii_lowercase().contains("save"))
 }
 
 fn ensure_authenticated_html(html: &str) -> Result<(), InterspireError> {
@@ -498,7 +635,6 @@ pub fn parse_settings_fields(
             "maxhourlyrate",
             "resend_maximum",
             "force_unsublink",
-            "send_test_mode",
         ][..],
         "bounce" => &[
             "bounce_process",
@@ -848,6 +984,7 @@ fn compact_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use url::Url;
 
     #[test]
@@ -1041,5 +1178,63 @@ mod tests {
         assert!(!serde_json::to_string(&links[0].candidate)
             .unwrap_or_else(|err| panic!("{err}"))
             .contains("index.php"));
+    }
+
+    #[test]
+    fn post_pairs_omit_blank_password_controls() {
+        let snapshot = forms::FormSnapshot {
+            action_url: Url::parse("https://example.test/admin/index.php")
+                .unwrap_or_else(|err| panic!("{err}")),
+            controls: vec![
+                forms::FormControl {
+                    original_name: "name".to_string(),
+                    lower_name: "name".to_string(),
+                    kind: forms::FormControlKind::Text,
+                    value: "List name".to_string(),
+                    checked: true,
+                },
+                forms::FormControl {
+                    original_name: "bounce_password".to_string(),
+                    lower_name: "bounce_password".to_string(),
+                    kind: forms::FormControlKind::Password,
+                    value: String::new(),
+                    checked: true,
+                },
+                forms::FormControl {
+                    original_name: "csrf_token".to_string(),
+                    lower_name: "csrf_token".to_string(),
+                    kind: forms::FormControlKind::Hidden,
+                    value: "safe-token".to_string(),
+                    checked: true,
+                },
+                forms::FormControl {
+                    original_name: "dangerous_hidden_flag".to_string(),
+                    lower_name: "dangerous_hidden_flag".to_string(),
+                    kind: forms::FormControlKind::Hidden,
+                    value: "replay-me".to_string(),
+                    checked: true,
+                },
+                forms::FormControl {
+                    original_name: "SubmitButton1".to_string(),
+                    lower_name: "submitbutton1".to_string(),
+                    kind: forms::FormControlKind::Submit,
+                    value: "Save".to_string(),
+                    checked: true,
+                },
+            ],
+        };
+
+        let requested_fields = BTreeSet::from(["name".to_string(), "bounce_password".to_string()]);
+        let pairs = snapshot.to_post_pairs_for_fields(&requested_fields);
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| name == "name" && value == "List name"));
+        assert!(!pairs.iter().any(|(name, _)| name == "bounce_password"));
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| name == "csrf_token" && value == "safe-token"));
+        assert!(!pairs
+            .iter()
+            .any(|(name, _)| name == "dangerous_hidden_flag"));
     }
 }

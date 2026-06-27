@@ -10,8 +10,8 @@ Email Marketer 6.2.3 state in typed, redacted, operator-oriented tools.
 - Authority order: Interspire XML API first, authenticated admin HTML fallback
   only for explicitly allowlisted pages.
 - Output: compact JSON strings shaped for MCP clients and agent workflows.
-- Safety posture: read-only by default, with one guarded queue cancel/delete
-  apply path.
+- Safety posture: read-only by default, with guarded queue cancel/delete plus
+  guarded no-send campaign, list, user, and non-secret settings apply paths.
 
 ## Module Boundaries
 
@@ -20,11 +20,16 @@ Email Marketer 6.2.3 state in typed, redacted, operator-oriented tools.
 | `lib.rs` | MCP server, tool inventory, trait boundary, tool handlers. |
 | `config.rs` | Environment and secret-file configuration without exposing values. |
 | `xml_api.rs` | Interspire XML API reads and XML parsing. |
-| `admin_html.rs` | Authenticated admin HTML reads, queue-control extraction, and redacted parsing. |
-| `safety.rs` | URL allowlists for read pages and guarded queue-control routes. |
+| `admin_html.rs` | Authenticated admin HTML reads, queue-control extraction, and redacted parsing helpers. |
+| `admin_html/forms.rs` | Guarded form snapshotting, allowlisted field updates, preview/apply plan binding, and field-scoped POST construction. |
+| `safety.rs` | URL allowlists for read pages and guarded queue/form write routes. |
 | `guarded_write.rs` | Shared plan-id and runtime enablement checks. |
 | `audience_hygiene.rs` | Private audience artifact construction outside git. |
-| `response.rs` | Public response contracts, fixtures, and error serialization. |
+| `response/common.rs` | Shared request/response contracts, fixtures, caps, and redacted error serialization. |
+| `response/queue.rs` | Queue preview/apply request and report contracts. |
+| `response/forms.rs` | Guarded campaign/list/user/settings write request and report contracts. |
+| `response/audience.rs` | Warm-up readiness and audience-hygiene request/report contracts. |
+| `response.rs` | Thin re-export module for the response contract tree. |
 | `redact.rs` | Redaction helpers for emails, hosts, URLs, and secret-shaped text. |
 
 ## Source Authority
@@ -38,7 +43,8 @@ missing important operational state:
 - user-level SMTP override state;
 - campaign edit summaries;
 - schedule and stats rows;
-- queue-control preview/action links.
+- queue-control preview/action links;
+- persisted form state for guarded campaign, list, user, and settings edits.
 
 The server does not treat provider delivery events, external validation results,
 or private artifact exports as Interspire state. Those may be useful inputs for
@@ -53,7 +59,7 @@ The test suite protects both the MCP boundary and domain output:
 - stdio runtime smoke test against the real binary;
 - domain contract tests for redaction, caps, no-send flags, and output shape;
 - parser tests for XML and HTML fixtures;
-- safety tests for blocked admin paths and guarded queue-control routes.
+- safety tests for blocked admin paths and guarded queue/form routes.
 
 Tool schema changes should be deliberate and reviewed. Use:
 

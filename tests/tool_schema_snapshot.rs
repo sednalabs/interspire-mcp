@@ -1,12 +1,15 @@
 use interspire_6_mcp::{
     AudienceHygieneExportReport, AudienceHygieneExportRequest, CampaignReadbackReport,
-    CampaignReadbackRequest, ContactStateReport, ContactStateRequest, InterspireError,
-    InterspireMcpServer, InterspireReadBackend, ListOwnerReadbackReport, ListOwnerReadbackRequest,
-    ListSummaryReport, ListSummaryRequest, QueueControlApplyReport, QueueControlApplyRequest,
+    CampaignReadbackRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
+    ContactStateReport, ContactStateRequest, GuardedWriteApplyReport, GuardedWritePreviewReport,
+    InterspireError, InterspireMcpServer, InterspireReadBackend, ListOwnerReadbackReport,
+    ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest,
+    ListUpdatePreviewRequest, QueueControlApplyReport, QueueControlApplyRequest,
     QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
-    QueueStatsReadbackRequest, SettingsAuditReport, SettingsAuditRequest, StatusReport,
-    StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest, WarmupAudienceReadinessReport,
-    WarmupAudienceReadinessRequest,
+    QueueStatsReadbackRequest, SettingsAuditReport, SettingsAuditRequest,
+    SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
+    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
+    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
 };
 use mcp_toolkit_testing::assert_tool_schema_snapshot;
 use std::{path::PathBuf, sync::Arc};
@@ -80,6 +83,94 @@ impl InterspireReadBackend for FixtureBackend {
         _request: &CampaignReadbackRequest,
     ) -> Result<CampaignReadbackReport, InterspireError> {
         Ok(CampaignReadbackReport::fixture())
+    }
+
+    fn campaign_update_preview(
+        &self,
+        request: &CampaignUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "campaign",
+            Some(request.campaign_id),
+            None,
+        ))
+    }
+
+    fn campaign_update_apply(
+        &self,
+        request: &CampaignUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "campaign",
+            Some(request.campaign_id),
+            None,
+        ))
+    }
+
+    fn list_update_preview(
+        &self,
+        request: &ListUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "list",
+            Some(request.list_id),
+            None,
+        ))
+    }
+
+    fn list_update_apply(
+        &self,
+        request: &ListUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "list",
+            Some(request.list_id),
+            None,
+        ))
+    }
+
+    fn user_update_preview(
+        &self,
+        request: &UserUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "user",
+            Some(request.user_id),
+            None,
+        ))
+    }
+
+    fn user_update_apply(
+        &self,
+        request: &UserUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "user",
+            Some(request.user_id),
+            None,
+        ))
+    }
+
+    fn settings_update_preview(
+        &self,
+        request: &SettingsUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "settings",
+            None,
+            Some(request.section.as_str()),
+        ))
+    }
+
+    fn settings_update_apply(
+        &self,
+        request: &SettingsUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "settings",
+            None,
+            Some(request.section.as_str()),
+        ))
     }
 
     fn warmup_audience_readiness(

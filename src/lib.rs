@@ -1,7 +1,7 @@
 //! # Interspire 6.2.3 MCP
 //!
 //! Curated stdio MCP server for safe Interspire Email Marketer 6.2.3
-//! operational readback plus one guarded no-send queue-control path.
+//! operational readback plus guarded no-send queue and form-write paths.
 //!
 //! ## Rationale
 //!
@@ -15,13 +15,14 @@
 //! * Exposes read-only intent tools by default.
 //! * Uses the Interspire XML API first.
 //! * Allows authenticated admin HTML only for login plus explicitly allowlisted
-//!   safe GET pages and the guarded queue cancel/delete apply route.
-//! * Blocks send, schedule, cron, generic import/export, settings save, contact
-//!   mutation, and suppression mutation paths.
+//!   safe GET pages and guarded queue/form apply routes.
+//! * Blocks send, schedule, cron, generic import/export, contact mutation,
+//!   suppression mutation, provider mutation, and raw admin escape paths.
 //! * Allows one narrow, explicit audience-hygiene artifact export that writes
 //!   private local files and returns aggregate metadata only.
-//! * Allows queue cancel/delete only through a deterministic preview/apply plan
-//!   id and explicit runtime write flags.
+//! * Allows queue cancel/delete plus guarded campaign/list/user/settings edits
+//!   only through deterministic preview/apply plan ids and explicit runtime
+//!   write flags.
 //! * Redacts credentials, cookies, raw contacts, private headers, SMTP secrets,
 //!   bounce secrets, and license values from tool output.
 //!
@@ -52,13 +53,18 @@ use mcp_toolkit_core::tool_inventory::{
 pub use response::{
     AudienceHygieneArtifact, AudienceHygieneExportReport, AudienceHygieneExportRequest,
     AudienceHygieneListSummary, CampaignReadbackReport, CampaignReadbackRequest,
-    ContactStateReport, ContactStateRequest, Evidence, ListOwnerReadbackReport,
+    CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactStateReport,
+    ContactStateRequest, Evidence, FormFieldChange, FormFieldDescriptor, FormFieldUpdate,
+    GuardedWriteApplyReport, GuardedWritePreviewReport, ListOwnerReadbackReport,
     ListOwnerReadbackRequest, ListSummary, ListSummaryReport, ListSummaryRequest,
-    QueueControlAction, QueueControlApplyReport, QueueControlApplyRequest, QueueControlCandidate,
-    QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
-    QueueStatsReadbackRequest, SettingsAuditReport, SettingsAuditRequest, StatusReport,
-    StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest, WarmupAudienceReadinessReport,
-    WarmupAudienceReadinessRequest, DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
+    ListUpdateApplyRequest, ListUpdatePreviewRequest, QueueControlAction, QueueControlApplyReport,
+    QueueControlApplyRequest, QueueControlCandidate, QueueControlPreviewReport,
+    QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
+    SettingsAuditReport, SettingsAuditRequest, SettingsSectionName, SettingsUpdateApplyRequest,
+    SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
+    UserSmtpReadbackRequest, UserUpdateApplyRequest, UserUpdatePreviewRequest,
+    WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, DEFAULT_LIST_READ_LIMIT,
+    HARD_LIST_READ_LIMIT,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -112,6 +118,38 @@ pub trait InterspireReadBackend: Send + Sync {
         &self,
         request: &CampaignReadbackRequest,
     ) -> Result<CampaignReadbackReport, InterspireError>;
+    fn campaign_update_preview(
+        &self,
+        request: &CampaignUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError>;
+    fn campaign_update_apply(
+        &self,
+        request: &CampaignUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError>;
+    fn list_update_preview(
+        &self,
+        request: &ListUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError>;
+    fn list_update_apply(
+        &self,
+        request: &ListUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError>;
+    fn user_update_preview(
+        &self,
+        request: &UserUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError>;
+    fn user_update_apply(
+        &self,
+        request: &UserUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError>;
+    fn settings_update_preview(
+        &self,
+        request: &SettingsUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError>;
+    fn settings_update_apply(
+        &self,
+        request: &SettingsUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError>;
     fn warmup_audience_readiness(
         &self,
         request: &WarmupAudienceReadinessRequest,
@@ -210,6 +248,62 @@ impl InterspireMcpServer {
                     .with_discovery(ToolDiscoveryMetadata::new(
                         "Read campaign manage rows or one campaign edit page summary.",
                         ["interspire", "campaign", "readback"],
+                    )),
+                ToolCapability::new("interspire_campaign_update_preview")
+                    .with_group("guarded-write")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Preview guarded campaign content or sender metadata edits.",
+                        ["interspire", "campaign", "preview", "guarded-write"],
+                    )),
+                ToolCapability::new("interspire_campaign_update_apply")
+                    .with_group("guarded-write")
+                    .with_read_only(false)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Apply a guarded campaign content or sender metadata edit.",
+                        ["interspire", "campaign", "apply", "guarded-write"],
+                    )),
+                ToolCapability::new("interspire_list_update_preview")
+                    .with_group("guarded-write")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Preview guarded list metadata edits.",
+                        ["interspire", "list", "preview", "guarded-write"],
+                    )),
+                ToolCapability::new("interspire_list_update_apply")
+                    .with_group("guarded-write")
+                    .with_read_only(false)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Apply a guarded list metadata edit.",
+                        ["interspire", "list", "apply", "guarded-write"],
+                    )),
+                ToolCapability::new("interspire_user_update_preview")
+                    .with_group("guarded-write")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Preview guarded user profile or footer edits.",
+                        ["interspire", "user", "preview", "guarded-write"],
+                    )),
+                ToolCapability::new("interspire_user_update_apply")
+                    .with_group("guarded-write")
+                    .with_read_only(false)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Apply a guarded user profile or footer edit.",
+                        ["interspire", "user", "apply", "guarded-write"],
+                    )),
+                ToolCapability::new("interspire_settings_update_preview")
+                    .with_group("guarded-write")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Preview guarded non-secret Interspire settings edits.",
+                        ["interspire", "settings", "preview", "guarded-write"],
+                    )),
+                ToolCapability::new("interspire_settings_update_apply")
+                    .with_group("guarded-write")
+                    .with_read_only(false)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Apply guarded non-secret Interspire settings edits.",
+                        ["interspire", "settings", "apply", "guarded-write"],
                     )),
                 ToolCapability::new("interspire_warmup_audience_readiness")
                     .with_group("read")
@@ -321,6 +415,70 @@ impl InterspireMcpServer {
         response::tool_json(self.backend.campaign_readback(&request))
     }
 
+    #[tool(description = "Preview guarded campaign content or sender metadata edits.")]
+    fn interspire_campaign_update_preview(
+        &self,
+        Parameters(request): Parameters<CampaignUpdatePreviewRequest>,
+    ) -> String {
+        response::tool_json(self.backend.campaign_update_preview(&request))
+    }
+
+    #[tool(description = "Apply a guarded campaign content or sender metadata edit.")]
+    fn interspire_campaign_update_apply(
+        &self,
+        Parameters(request): Parameters<CampaignUpdateApplyRequest>,
+    ) -> String {
+        response::tool_json(self.backend.campaign_update_apply(&request))
+    }
+
+    #[tool(description = "Preview guarded list metadata edits.")]
+    fn interspire_list_update_preview(
+        &self,
+        Parameters(request): Parameters<ListUpdatePreviewRequest>,
+    ) -> String {
+        response::tool_json(self.backend.list_update_preview(&request))
+    }
+
+    #[tool(description = "Apply a guarded list metadata edit.")]
+    fn interspire_list_update_apply(
+        &self,
+        Parameters(request): Parameters<ListUpdateApplyRequest>,
+    ) -> String {
+        response::tool_json(self.backend.list_update_apply(&request))
+    }
+
+    #[tool(description = "Preview guarded user profile or footer edits.")]
+    fn interspire_user_update_preview(
+        &self,
+        Parameters(request): Parameters<UserUpdatePreviewRequest>,
+    ) -> String {
+        response::tool_json(self.backend.user_update_preview(&request))
+    }
+
+    #[tool(description = "Apply a guarded user profile or footer edit.")]
+    fn interspire_user_update_apply(
+        &self,
+        Parameters(request): Parameters<UserUpdateApplyRequest>,
+    ) -> String {
+        response::tool_json(self.backend.user_update_apply(&request))
+    }
+
+    #[tool(description = "Preview guarded non-secret Interspire settings edits.")]
+    fn interspire_settings_update_preview(
+        &self,
+        Parameters(request): Parameters<SettingsUpdatePreviewRequest>,
+    ) -> String {
+        response::tool_json(self.backend.settings_update_preview(&request))
+    }
+
+    #[tool(description = "Apply guarded non-secret Interspire settings edits.")]
+    fn interspire_settings_update_apply(
+        &self,
+        Parameters(request): Parameters<SettingsUpdateApplyRequest>,
+    ) -> String {
+        response::tool_json(self.backend.settings_update_apply(&request))
+    }
+
     #[tool(
         description = "Assess a specified-list warm-up audience from Interspire list counts without exporting contacts."
     )]
@@ -346,7 +504,7 @@ impl InterspireMcpServer {
 impl ServerHandler for InterspireMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Safe Interspire Email Marketer 6.2.3 evidence tools. Mutations are disabled by default and limited to guarded queue cancel/delete apply plans.")
+            .with_instructions("Safe Interspire Email Marketer 6.2.3 evidence tools. Mutations are disabled by default and limited to guarded queue cancel/delete plus explicitly gated campaign, list, user, and settings apply plans.")
     }
 }
 
@@ -426,6 +584,94 @@ mod tests {
             Ok(CampaignReadbackReport::fixture())
         }
 
+        fn campaign_update_preview(
+            &self,
+            request: &CampaignUpdatePreviewRequest,
+        ) -> Result<GuardedWritePreviewReport, InterspireError> {
+            Ok(GuardedWritePreviewReport::fixture(
+                "campaign",
+                Some(request.campaign_id),
+                None,
+            ))
+        }
+
+        fn campaign_update_apply(
+            &self,
+            request: &CampaignUpdateApplyRequest,
+        ) -> Result<GuardedWriteApplyReport, InterspireError> {
+            Ok(GuardedWriteApplyReport::fixture(
+                "campaign",
+                Some(request.campaign_id),
+                None,
+            ))
+        }
+
+        fn list_update_preview(
+            &self,
+            request: &ListUpdatePreviewRequest,
+        ) -> Result<GuardedWritePreviewReport, InterspireError> {
+            Ok(GuardedWritePreviewReport::fixture(
+                "list",
+                Some(request.list_id),
+                None,
+            ))
+        }
+
+        fn list_update_apply(
+            &self,
+            request: &ListUpdateApplyRequest,
+        ) -> Result<GuardedWriteApplyReport, InterspireError> {
+            Ok(GuardedWriteApplyReport::fixture(
+                "list",
+                Some(request.list_id),
+                None,
+            ))
+        }
+
+        fn user_update_preview(
+            &self,
+            request: &UserUpdatePreviewRequest,
+        ) -> Result<GuardedWritePreviewReport, InterspireError> {
+            Ok(GuardedWritePreviewReport::fixture(
+                "user",
+                Some(request.user_id),
+                None,
+            ))
+        }
+
+        fn user_update_apply(
+            &self,
+            request: &UserUpdateApplyRequest,
+        ) -> Result<GuardedWriteApplyReport, InterspireError> {
+            Ok(GuardedWriteApplyReport::fixture(
+                "user",
+                Some(request.user_id),
+                None,
+            ))
+        }
+
+        fn settings_update_preview(
+            &self,
+            request: &SettingsUpdatePreviewRequest,
+        ) -> Result<GuardedWritePreviewReport, InterspireError> {
+            Ok(GuardedWritePreviewReport::fixture(
+                "settings",
+                None,
+                Some(request.section.as_str()),
+            ))
+        }
+
+        fn settings_update_apply(
+            &self,
+            request: &SettingsUpdateApplyRequest,
+        ) -> Result<GuardedWriteApplyReport, InterspireError> {
+            Ok(GuardedWriteApplyReport::fixture(
+                "settings",
+                None,
+                Some(request.section.as_str()),
+            ))
+        }
+
         fn warmup_audience_readiness(
             &self,
             _request: &WarmupAudienceReadinessRequest,
@@ -455,15 +701,23 @@ mod tests {
             vec![
                 "interspire_audience_hygiene_export",
                 "interspire_campaign_readback",
+                "interspire_campaign_update_apply",
+                "interspire_campaign_update_preview",
                 "interspire_contact_state",
                 "interspire_list_owner_readback",
                 "interspire_list_summary",
+                "interspire_list_update_apply",
+                "interspire_list_update_preview",
                 "interspire_queue_control_apply",
                 "interspire_queue_control_preview",
                 "interspire_queue_stats_readback",
                 "interspire_settings_audit",
+                "interspire_settings_update_apply",
+                "interspire_settings_update_preview",
                 "interspire_status",
                 "interspire_user_smtp_readback",
+                "interspire_user_update_apply",
+                "interspire_user_update_preview",
                 "interspire_warmup_audience_readiness",
             ]
         );

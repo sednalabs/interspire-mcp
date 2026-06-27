@@ -30,6 +30,23 @@ pub struct QueueControlRoute {
     pub identifier_value: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminWriteIntent {
+    ListEdit { id: u64 },
+    UserEdit { id: u64 },
+    NewsletterEdit { id: u64 },
+    Settings { tab: u8 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminWriteRoute {
+    pub page: String,
+    pub action: Option<String>,
+    pub identifier_key: Option<String>,
+    pub identifier_value: Option<u64>,
+    pub tab: Option<u8>,
+}
+
 impl AdminReadPage {
     pub fn path(&self) -> String {
         match self {
@@ -80,6 +97,25 @@ pub fn ensure_allowed_queue_control(
     ensure_admin_front_controller_path(&base, &url)?;
     let route = classify_allowed_queue_control(&url)?;
     Ok((url, route))
+}
+
+pub fn ensure_allowed_admin_post_for(
+    base_url: &str,
+    relative_path: &str,
+    expected: &AdminWriteIntent,
+) -> Result<Url, InterspireError> {
+    let base = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let base = normalize_admin_base(base);
+    let url = base
+        .join(relative_path)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin post path: {err}")))?;
+
+    ensure_admin_base_scope(&base, &url)?;
+    ensure_admin_front_controller_path(&base, &url)?;
+    let route = classify_allowed_admin_write(&url)?;
+    ensure_write_intent_matches(expected, &route)?;
+    Ok(url)
 }
 
 pub fn classify_allowed_admin_get(url: &Url) -> Result<AdminReadPage, InterspireError> {
@@ -217,6 +253,135 @@ pub fn classify_allowed_queue_control(url: &Url) -> Result<QueueControlRoute, In
     })
 }
 
+pub fn classify_allowed_admin_write(url: &Url) -> Result<AdminWriteRoute, InterspireError> {
+    if url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_none_or(|segment| segment != "index.php")
+    {
+        return Err(InterspireError::Safety(
+            "admin write path is not index.php".to_string(),
+        ));
+    }
+
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    ensure_no_duplicate_query_keys(&pairs)?;
+    let page = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Page"))
+        .map(|(_, value)| value.to_string())
+        .ok_or_else(|| InterspireError::Safety("admin write missing Page query".to_string()))?;
+    let action = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Action"))
+        .map(|(_, value)| value.to_string());
+
+    match page.as_str() {
+        "Lists" => {
+            ensure_only_query_keys(
+                &pairs,
+                &[
+                    "Page",
+                    "Action",
+                    "id",
+                    "token",
+                    "csrf",
+                    "csrf_token",
+                    "_token",
+                ],
+            )?;
+            ensure_write_action_allowed(action.as_deref())?;
+            let (key, id) = required_numeric_query_value(&pairs, "id")?;
+            Ok(AdminWriteRoute {
+                page,
+                action,
+                identifier_key: Some(key),
+                identifier_value: Some(id),
+                tab: None,
+            })
+        }
+        "Users" => {
+            ensure_only_query_keys(
+                &pairs,
+                &[
+                    "Page",
+                    "Action",
+                    "UserID",
+                    "token",
+                    "csrf",
+                    "csrf_token",
+                    "_token",
+                ],
+            )?;
+            ensure_write_action_allowed(action.as_deref())?;
+            let (key, id) = required_numeric_query_value(&pairs, "UserID")?;
+            Ok(AdminWriteRoute {
+                page,
+                action,
+                identifier_key: Some(key),
+                identifier_value: Some(id),
+                tab: None,
+            })
+        }
+        "Newsletters" => {
+            ensure_only_query_keys(
+                &pairs,
+                &[
+                    "Page",
+                    "Action",
+                    "id",
+                    "token",
+                    "csrf",
+                    "csrf_token",
+                    "_token",
+                ],
+            )?;
+            ensure_write_action_allowed(action.as_deref())?;
+            let (key, id) = required_numeric_query_value(&pairs, "id")?;
+            Ok(AdminWriteRoute {
+                page,
+                action,
+                identifier_key: Some(key),
+                identifier_value: Some(id),
+                tab: None,
+            })
+        }
+        "Settings" => {
+            ensure_only_query_keys(
+                &pairs,
+                &[
+                    "Page",
+                    "Action",
+                    "Tab",
+                    "token",
+                    "csrf",
+                    "csrf_token",
+                    "_token",
+                ],
+            )?;
+            ensure_write_action_allowed(action.as_deref())?;
+            let tab = optional_numeric_query_value(&pairs, "Tab")?;
+            if let Some(value) = tab {
+                if !matches!(value, 1 | 2 | 4 | 7) {
+                    return Err(InterspireError::Safety(format!(
+                        "settings write tab {value} is not in the guarded allowlist"
+                    )));
+                }
+            }
+            Ok(AdminWriteRoute {
+                page,
+                action,
+                identifier_key: None,
+                identifier_value: None,
+                tab,
+            })
+        }
+        _ => Err(InterspireError::Safety(format!(
+            "admin write is not in the guarded allowlist: Page={page:?} Action={action:?}"
+        ))),
+    }
+}
+
 fn ensure_admin_base_scope(base: &Url, url: &Url) -> Result<(), InterspireError> {
     if url.scheme() != base.scheme()
         || url.host_str() != base.host_str()
@@ -340,6 +505,22 @@ fn ensure_only_queue_control_query_keys(
     ))
 }
 
+fn ensure_write_action_allowed(action: Option<&str>) -> Result<(), InterspireError> {
+    let Some(action) = action else {
+        return Ok(());
+    };
+    if matches!(
+        action.to_ascii_lowercase().as_str(),
+        "save" | "edit" | "update"
+    ) {
+        return Ok(());
+    }
+
+    Err(InterspireError::Safety(format!(
+        "admin write action is not in the guarded allowlist: {action}"
+    )))
+}
+
 fn classify_queue_control_action(raw: &str) -> Option<QueueControlAction> {
     match raw.to_ascii_lowercase().as_str() {
         "cancel" | "canceljob" | "abort" | "abortjob" => Some(QueueControlAction::Cancel),
@@ -379,6 +560,81 @@ fn single_numeric_identifier(
             "queue control route includes multiple queue identifiers".to_string(),
         )),
     }
+}
+
+fn required_numeric_query_value(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+    key_name: &str,
+) -> Result<(String, u64), InterspireError> {
+    pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(key_name))
+        .and_then(|(key, value)| value.parse::<u64>().ok().map(|id| (key.to_string(), id)))
+        .ok_or_else(|| {
+            InterspireError::Safety(format!(
+                "admin write route missing numeric identifier {key_name}"
+            ))
+        })
+}
+
+fn optional_numeric_query_value(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+    key_name: &str,
+) -> Result<Option<u8>, InterspireError> {
+    pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(key_name))
+        .map(|(_, value)| {
+            value.parse::<u8>().map_err(|_| {
+                InterspireError::Safety(format!(
+                    "admin write route has non-numeric {key_name} value"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn ensure_write_intent_matches(
+    expected: &AdminWriteIntent,
+    route: &AdminWriteRoute,
+) -> Result<(), InterspireError> {
+    match expected {
+        AdminWriteIntent::ListEdit { id } => {
+            if route.page != "Lists" || route.identifier_value != Some(*id) {
+                return Err(InterspireError::Safety(
+                    "admin write route does not match the requested list target".to_string(),
+                ));
+            }
+        }
+        AdminWriteIntent::UserEdit { id } => {
+            if route.page != "Users" || route.identifier_value != Some(*id) {
+                return Err(InterspireError::Safety(
+                    "admin write route does not match the requested user target".to_string(),
+                ));
+            }
+        }
+        AdminWriteIntent::NewsletterEdit { id } => {
+            if route.page != "Newsletters" || route.identifier_value != Some(*id) {
+                return Err(InterspireError::Safety(
+                    "admin write route does not match the requested campaign target".to_string(),
+                ));
+            }
+        }
+        AdminWriteIntent::Settings { tab } => {
+            if route.page != "Settings" {
+                return Err(InterspireError::Safety(
+                    "admin write route does not target Settings".to_string(),
+                ));
+            }
+            if route.tab.is_some() && route.tab != Some(*tab) {
+                return Err(InterspireError::Safety(
+                    "admin write route does not match the requested settings tab".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn only_query_keys(
@@ -463,6 +719,49 @@ mod tests {
         .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(delete.action, QueueControlAction::Delete);
         assert_eq!(delete.identifier_value, 99);
+    }
+
+    #[test]
+    fn allows_guarded_form_write_routes_for_expected_targets() {
+        let base_url = "https://example.test/admin/";
+        let list_url = ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Lists&Action=Save&id=7",
+            &AdminWriteIntent::ListEdit { id: 7 },
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(list_url.as_str().contains("Page=Lists"));
+
+        let campaign_url = ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Newsletters&Action=Save&id=9",
+            &AdminWriteIntent::NewsletterEdit { id: 9 },
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(campaign_url.as_str().contains("Page=Newsletters"));
+    }
+
+    #[test]
+    fn guarded_form_write_routes_block_wrong_targets_and_actions() {
+        let base_url = "https://example.test/admin/";
+        assert!(ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Lists&Action=Save&id=8",
+            &AdminWriteIntent::ListEdit { id: 7 },
+        )
+        .is_err());
+        assert!(ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Newsletters&Action=Send&id=9",
+            &AdminWriteIntent::NewsletterEdit { id: 9 },
+        )
+        .is_err());
+        assert!(ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Settings&Action=Save&Tab=3",
+            &AdminWriteIntent::Settings { tab: 2 },
+        )
+        .is_err());
     }
 
     #[test]

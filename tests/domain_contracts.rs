@@ -1,13 +1,16 @@
 use interspire_6_mcp::{
     AudienceHygieneExportReport, AudienceHygieneExportRequest, CampaignReadbackReport,
-    CampaignReadbackRequest, ContactStateReport, ContactStateRequest, Evidence, InterspireError,
-    InterspireMcpServer, InterspireReadBackend, ListOwnerReadbackReport, ListOwnerReadbackRequest,
-    ListSummary, ListSummaryReport, ListSummaryRequest, QueueControlApplyReport,
+    CampaignReadbackRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
+    ContactStateReport, ContactStateRequest, Evidence, GuardedWriteApplyReport,
+    GuardedWritePreviewReport, InterspireError, InterspireMcpServer, InterspireReadBackend,
+    ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary, ListSummaryReport,
+    ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest, QueueControlApplyReport,
     QueueControlApplyRequest, QueueControlPreviewReport, QueueControlPreviewRequest,
     QueueStatsReadbackReport, QueueStatsReadbackRequest, SettingsAuditReport, SettingsAuditRequest,
-    StatusReport, StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest,
-    WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, DEFAULT_LIST_READ_LIMIT,
-    HARD_LIST_READ_LIMIT,
+    SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
+    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
+    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
+    DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
 };
 use std::sync::Arc;
 
@@ -80,6 +83,94 @@ impl InterspireReadBackend for ContractBackend {
         _request: &CampaignReadbackRequest,
     ) -> Result<CampaignReadbackReport, InterspireError> {
         Ok(CampaignReadbackReport::fixture())
+    }
+
+    fn campaign_update_preview(
+        &self,
+        request: &CampaignUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "campaign",
+            Some(request.campaign_id),
+            None,
+        ))
+    }
+
+    fn campaign_update_apply(
+        &self,
+        request: &CampaignUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "campaign",
+            Some(request.campaign_id),
+            None,
+        ))
+    }
+
+    fn list_update_preview(
+        &self,
+        request: &ListUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "list",
+            Some(request.list_id),
+            None,
+        ))
+    }
+
+    fn list_update_apply(
+        &self,
+        request: &ListUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "list",
+            Some(request.list_id),
+            None,
+        ))
+    }
+
+    fn user_update_preview(
+        &self,
+        request: &UserUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "user",
+            Some(request.user_id),
+            None,
+        ))
+    }
+
+    fn user_update_apply(
+        &self,
+        request: &UserUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "user",
+            Some(request.user_id),
+            None,
+        ))
+    }
+
+    fn settings_update_preview(
+        &self,
+        request: &SettingsUpdatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "settings",
+            None,
+            Some(request.section.as_str()),
+        ))
+    }
+
+    fn settings_update_apply(
+        &self,
+        request: &SettingsUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "settings",
+            None,
+            Some(request.section.as_str()),
+        ))
     }
 
     fn warmup_audience_readiness(
@@ -361,7 +452,7 @@ fn queue_control_apply_contract_does_not_mutate_lists_or_authorize_send() {
 fn server_can_be_constructed_with_fixture_backend() {
     let server = InterspireMcpServer::with_backend(Arc::new(ContractBackend))
         .unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(server.tool_schema_snapshot().len(), 12);
+    assert_eq!(server.tool_schema_snapshot().len(), 20);
 }
 
 #[test]

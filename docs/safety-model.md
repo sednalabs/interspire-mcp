@@ -8,6 +8,8 @@ question without creating a new way to send mail or corrupt list state.
 - Read-only tools are enabled by default.
 - Guarded writes are disabled by default.
 - Queue-control writes are separately disabled by default.
+- Form-write controls are separately disabled by default.
+- Guarded apply defaults to `preview_apply`, not direct mutation.
 - Private audience exports require an explicit private artifact root.
 - Tool output is redacted and aggregate wherever raw recipient or credential
   data might appear.
@@ -24,10 +26,14 @@ The MCP server intentionally does not provide tools for:
 - contact delete/edit operations;
 - unsubscribe or resubscribe mutation;
 - suppression mutation;
-- settings save;
-- SMTP credential changes;
-- bounce setting changes;
-- DNS or provider mutation.
+- SMTP password mutation;
+- bounce password mutation;
+- provider API mutation;
+- DNS mutation.
+
+Allowlisted writes are limited to queue cancel/delete plus guarded no-send
+campaign, list, user, and non-secret settings edits. Anything outside those
+targets stays blocked.
 
 ## Admin HTML Allowlist
 
@@ -68,7 +74,40 @@ Apply:
 - returns before/after counts and evidence.
 
 Queue apply does not authorize sending and does not mutate lists, contacts,
-suppression state, settings, SMTP, provider configuration, or DNS.
+suppression state, Interspire settings, provider APIs, DNS, or secrets.
+
+## Guarded Form Writes
+
+Form writes also have preview/apply phases.
+
+Preview:
+
+- reads the allowlisted edit form;
+- captures hidden fields, selected options, and checked state;
+- restricts requested changes to an allowlisted field set for that target;
+- returns a deterministic plan id, available fields, summarized requested
+  changes, and warnings.
+
+Apply:
+
+- requires `INTERSPIRE_GUARDED_WRITES=1`;
+- requires `INTERSPIRE_FORM_WRITE_CONTROLS=1`;
+- requires the exact preview-generated `plan_id`;
+- posts only to an allowlisted campaign, list, user, or settings route;
+- re-reads the edited page after apply;
+- returns redacted field readback evidence.
+
+Blank password controls are omitted from the submitted payload so a routine
+metadata save cannot silently clear an unrelated secret. Secret updates remain
+out of scope for this public phase.
+
+Form apply can change non-secret delivery and cron configuration inside
+Interspire, including SMTP host/username/port, bounce host/username/IMAP mode,
+hourly throttle, and cron toggles. It does not reach provider APIs, DNS,
+password fields, contact state, or suppression state.
+
+Form apply does not authorize sending and does not mutate contacts,
+suppression state, import/export state, provider APIs, or DNS.
 
 ## Private Audience Artifacts
 

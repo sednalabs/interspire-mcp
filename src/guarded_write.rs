@@ -16,7 +16,7 @@
 use crate::{config::GuardedWriteConfig, error::InterspireError};
 use sha2::{Digest, Sha256};
 
-const PLAN_ID_VERSION: &str = "interspire-queue-control-v1";
+const PLAN_ID_VERSION: &str = "interspire-guarded-write-v1";
 
 pub fn stable_plan_id(parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
@@ -39,6 +39,24 @@ pub fn require_queue_controls_enabled(config: &GuardedWriteConfig) -> Result<(),
     if !config.queue_controls_enabled {
         return Err(InterspireError::Safety(
             "queue write controls are disabled; set INTERSPIRE_QUEUE_WRITE_CONTROLS=1 to allow queue apply tools"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn require_form_write_controls_enabled(
+    config: &GuardedWriteConfig,
+) -> Result<(), InterspireError> {
+    if !config.enabled {
+        return Err(InterspireError::Safety(
+            "guarded writes are disabled; set INTERSPIRE_GUARDED_WRITES=1 to allow apply tools"
+                .to_string(),
+        ));
+    }
+    if !config.form_write_controls_enabled {
+        return Err(InterspireError::Safety(
+            "form write controls are disabled; set INTERSPIRE_FORM_WRITE_CONTROLS=1 to allow form apply tools"
                 .to_string(),
         ));
     }

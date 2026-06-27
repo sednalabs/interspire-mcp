@@ -56,15 +56,29 @@ using that format.
 
 ## Guarded Writes
 
-Guarded writes are off unless both flags are set:
+Guarded writes are off unless the runtime enables them explicitly:
 
 ```bash
 INTERSPIRE_GUARDED_WRITES=1
 INTERSPIRE_QUEUE_WRITE_CONTROLS=1
+INTERSPIRE_FORM_WRITE_CONTROLS=1
+INTERSPIRE_CONTACT_WRITE_CONTROLS=0
+INTERSPIRE_SEND_CONTROLS=0
+INTERSPIRE_PRODUCTION_SEND_CONTROLS=0
 ```
 
-Use those flags only for the process that should apply an already-reviewed
-queue-control plan. Preview remains available without them.
+Current public behavior:
+
+- `INTERSPIRE_QUEUE_WRITE_CONTROLS=1` enables guarded queue cancel/delete apply.
+- `INTERSPIRE_FORM_WRITE_CONTROLS=1` enables guarded campaign, list, user, and
+  non-secret settings apply.
+- `INTERSPIRE_CONTACT_WRITE_CONTROLS`, `INTERSPIRE_SEND_CONTROLS`, and
+  `INTERSPIRE_PRODUCTION_SEND_CONTROLS` are reserved for later phases and
+  should remain disabled.
+- The public build always requires preview/apply with an exact `plan_id`.
+
+Use write flags only for the process that should apply an already-reviewed
+plan. Preview remains available without them.
 
 ## Audience Hygiene Artifacts
 
