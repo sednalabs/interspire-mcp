@@ -726,7 +726,7 @@ fn unix_timestamp_nanos() -> Result<u128, InterspireError> {
 
 fn safe_prefix(raw: Option<&str>) -> String {
     let raw = raw.unwrap_or("interspire-audience-hygiene");
-    let mut out = raw
+    let out = raw
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
@@ -736,10 +736,22 @@ fn safe_prefix(raw: Option<&str>) -> String {
             }
         })
         .collect::<String>();
-    while out.contains("--") {
-        out = out.replace("--", "-");
+
+    let mut collapsed = String::with_capacity(out.len());
+    let mut prev_dash = false;
+    for ch in out.chars() {
+        if ch == '-' {
+            if !prev_dash {
+                collapsed.push(ch);
+                prev_dash = true;
+            }
+        } else {
+            collapsed.push(ch);
+            prev_dash = false;
+        }
     }
-    let out = out.trim_matches('-');
+
+    let out = collapsed.trim_matches('-');
     if out.is_empty() {
         "interspire-audience-hygiene".to_string()
     } else {
