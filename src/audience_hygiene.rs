@@ -710,7 +710,10 @@ fn create_private_file(path: &Path, label: &str) -> Result<fs::File, InterspireE
         .mode(0o600)
         .open(path)
         .map_err(|err| {
-            InterspireError::Io(format!("failed to create private {label} artifact: {err}"))
+            InterspireError::Io(format!(
+                "failed to create private {} artifact: {}",
+                label, err
+            ))
         })
 }
 

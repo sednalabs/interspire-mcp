@@ -83,7 +83,7 @@ fn required_value<'a>(args: &'a [String], index: usize, name: &str) -> Result<&'
     args.get(index + 1)
         .map(String::as_str)
         .filter(|value| !value.starts_with("--"))
-        .ok_or_else(|| format!("missing value for {name}"))
+        .ok_or_else(|| format!("missing value for {}", name))
 }
 
 fn audience_hygiene_export_usage() -> String {
