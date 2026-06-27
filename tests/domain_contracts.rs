@@ -1,5 +1,6 @@
 use interspire_6_mcp::{
-    AudienceHygieneExportReport, AudienceHygieneExportRequest, CampaignReadbackReport,
+    AudienceHygieneExportBeginRequest, AudienceHygieneExportReport, AudienceHygieneExportRequest,
+    AudienceHygieneExportResumeRequest, AudienceHygieneExportStatusRequest, CampaignReadbackReport,
     CampaignReadbackRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
     ContactStateReport, ContactStateRequest, Evidence, GuardedWriteApplyReport,
     GuardedWritePreviewReport, InterspireError, InterspireMcpServer, InterspireReadBackend,
@@ -186,6 +187,27 @@ impl InterspireReadBackend for ContractBackend {
     ) -> Result<AudienceHygieneExportReport, InterspireError> {
         Ok(AudienceHygieneExportReport::fixture())
     }
+
+    fn audience_hygiene_export_begin(
+        &self,
+        _request: &AudienceHygieneExportBeginRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        Ok(AudienceHygieneExportReport::fixture())
+    }
+
+    fn audience_hygiene_export_resume(
+        &self,
+        _request: &AudienceHygieneExportResumeRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        Ok(AudienceHygieneExportReport::fixture())
+    }
+
+    fn audience_hygiene_export_status(
+        &self,
+        _request: &AudienceHygieneExportStatusRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        Ok(AudienceHygieneExportReport::fixture())
+    }
 }
 
 fn contract_list_summary(request: &ListSummaryRequest) -> ListSummaryReport {
@@ -257,6 +279,15 @@ fn status_contract_is_redacted_and_read_only() {
     assert!(report
         .capabilities
         .contains(&"interspire_audience_hygiene_export".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_audience_hygiene_export_begin".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_audience_hygiene_export_resume".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_audience_hygiene_export_status".to_string()));
     assert!(report
         .capabilities
         .contains(&"interspire_queue_control_preview".to_string()));
@@ -452,7 +483,7 @@ fn queue_control_apply_contract_does_not_mutate_lists_or_authorize_send() {
 fn server_can_be_constructed_with_fixture_backend() {
     let server = InterspireMcpServer::with_backend(Arc::new(ContractBackend))
         .unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(server.tool_schema_snapshot().len(), 20);
+    assert_eq!(server.tool_schema_snapshot().len(), 23);
 }
 
 #[test]

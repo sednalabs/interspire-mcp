@@ -25,6 +25,38 @@ pub struct AudienceHygieneExportRequest {
     pub include_sqlite: bool,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
+pub struct AudienceHygieneExportBeginRequest {
+    #[serde(default = "default_warmup_source_list_ids")]
+    pub source_list_ids: Vec<u64>,
+    #[serde(default)]
+    pub output_dir: Option<String>,
+    #[serde(default)]
+    pub artifact_prefix: Option<String>,
+    #[serde(default = "default_true")]
+    pub include_sqlite: bool,
+    #[serde(default = "default_hygiene_query_budget")]
+    #[schemars(range(min = 1, max = 25))]
+    pub max_queries_per_call: usize,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
+pub struct AudienceHygieneExportResumeRequest {
+    pub job_id: String,
+    #[serde(default)]
+    pub output_dir: Option<String>,
+    #[serde(default = "default_hygiene_query_budget")]
+    #[schemars(range(min = 1, max = 25))]
+    pub max_queries_per_call: usize,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
+pub struct AudienceHygieneExportStatusRequest {
+    pub job_id: String,
+    #[serde(default)]
+    pub output_dir: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WarmupAudienceReadinessReport {
     pub ok: bool,
@@ -67,9 +99,18 @@ pub struct WarmupTrancheReadiness {
 pub struct AudienceHygieneExportReport {
     pub ok: bool,
     pub configured: bool,
+    pub job_id: Option<String>,
+    pub phase: Option<String>,
+    pub job_dir: Option<String>,
     pub source_list_ids: Vec<u64>,
     pub processed_list_count: u64,
+    pub remaining_list_ids: Vec<u64>,
     pub missing_list_ids: Vec<u64>,
+    pub active_list_id: Option<u64>,
+    pub active_list_name: Option<String>,
+    pub queries_processed_this_call: u64,
+    pub completed_query_count: u64,
+    pub remaining_query_count: u64,
     pub lists: Vec<AudienceHygieneListSummary>,
     pub gross_api_items: u64,
     pub eligible_items_before_dedupe: u64,
@@ -81,6 +122,7 @@ pub struct AudienceHygieneExportReport {
     pub invalid_syntax_count: u64,
     pub role_localpart_count: u64,
     pub disposable_domain_hint_count: u64,
+    pub checkpoint_artifacts: Vec<AudienceHygieneArtifact>,
     pub artifacts: Vec<AudienceHygieneArtifact>,
     pub legacy_lists_mutated: bool,
     pub production_send_authorized: bool,
@@ -88,7 +130,7 @@ pub struct AudienceHygieneExportReport {
     pub evidence: Evidence,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AudienceHygieneListSummary {
     pub list_id: u64,
     pub name: String,
@@ -100,7 +142,7 @@ pub struct AudienceHygieneListSummary {
     pub invalid_syntax: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AudienceHygieneArtifact {
     pub kind: String,
     pub path: String,
@@ -259,9 +301,18 @@ impl AudienceHygieneExportReport {
         Self {
             ok: true,
             configured: true,
+            job_id: None,
+            phase: None,
+            job_dir: None,
             source_list_ids: default_warmup_source_list_ids(),
             processed_list_count: 1,
+            remaining_list_ids: Vec::new(),
             missing_list_ids: Vec::new(),
+            active_list_id: None,
+            active_list_name: None,
+            queries_processed_this_call: 0,
+            completed_query_count: 0,
+            remaining_query_count: 0,
             lists: vec![AudienceHygieneListSummary {
                 list_id: 7,
                 name: "Fixture list".to_string(),
@@ -282,6 +333,7 @@ impl AudienceHygieneExportReport {
             invalid_syntax_count: 0,
             role_localpart_count: 0,
             disposable_domain_hint_count: 0,
+            checkpoint_artifacts: Vec::new(),
             artifacts: vec![AudienceHygieneArtifact {
                 kind: "aggregate_summary_json".to_string(),
                 path: "/tmp/interspire-audience-hygiene-fixture-summary.json".to_string(),
@@ -378,6 +430,13 @@ pub fn default_warmup_priority_list_ids() -> Vec<u64> {
 
 fn default_warmup_tranche_sizes() -> Vec<u64> {
     vec![100, 400, 500]
+}
+
+pub const DEFAULT_HYGIENE_QUERY_BUDGET: usize = 4;
+pub const HARD_HYGIENE_QUERY_BUDGET: usize = 25;
+
+pub fn default_hygiene_query_budget() -> usize {
+    DEFAULT_HYGIENE_QUERY_BUDGET
 }
 
 fn default_true() -> bool {

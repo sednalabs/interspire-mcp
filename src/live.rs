@@ -5,6 +5,7 @@
 //! sources as skipped instead of inventing evidence.
 
 mod audience;
+mod checkpoint;
 mod guarded;
 mod reads;
 mod support;
@@ -14,17 +15,19 @@ use crate::{
     config::InterspireServerConfig,
     error::InterspireError,
     response::{
-        AudienceHygieneExportReport, AudienceHygieneExportRequest, CampaignReadbackReport,
-        CampaignReadbackRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
-        ContactStateReport, ContactStateRequest, GuardedWriteApplyReport,
-        GuardedWritePreviewReport, ListOwnerReadbackReport, ListOwnerReadbackRequest,
-        ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
-        QueueControlApplyReport, QueueControlApplyRequest, QueueControlPreviewReport,
-        QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
-        SettingsAuditReport, SettingsAuditRequest, SettingsUpdateApplyRequest,
-        SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
-        UserSmtpReadbackRequest, UserUpdateApplyRequest, UserUpdatePreviewRequest,
-        WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
+        AudienceHygieneExportBeginRequest, AudienceHygieneExportReport,
+        AudienceHygieneExportRequest, AudienceHygieneExportResumeRequest,
+        AudienceHygieneExportStatusRequest, CampaignReadbackReport, CampaignReadbackRequest,
+        CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactStateReport,
+        ContactStateRequest, GuardedWriteApplyReport, GuardedWritePreviewReport,
+        ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest,
+        ListUpdateApplyRequest, ListUpdatePreviewRequest, QueueControlApplyReport,
+        QueueControlApplyRequest, QueueControlPreviewReport, QueueControlPreviewRequest,
+        QueueStatsReadbackReport, QueueStatsReadbackRequest, SettingsAuditReport,
+        SettingsAuditRequest, SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest,
+        StatusReport, StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest,
+        UserUpdateApplyRequest, UserUpdatePreviewRequest, WarmupAudienceReadinessReport,
+        WarmupAudienceReadinessRequest,
     },
     xml_api::XmlApiClient,
     InterspireReadBackend,
@@ -185,5 +188,26 @@ impl InterspireReadBackend for LiveInterspireBackend {
         request: &AudienceHygieneExportRequest,
     ) -> Result<AudienceHygieneExportReport, InterspireError> {
         self.audience_hygiene_export_impl(request)
+    }
+
+    fn audience_hygiene_export_begin(
+        &self,
+        request: &AudienceHygieneExportBeginRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        self.audience_hygiene_export_begin_impl(request)
+    }
+
+    fn audience_hygiene_export_resume(
+        &self,
+        request: &AudienceHygieneExportResumeRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        self.audience_hygiene_export_resume_impl(request)
+    }
+
+    fn audience_hygiene_export_status(
+        &self,
+        request: &AudienceHygieneExportStatusRequest,
+    ) -> Result<AudienceHygieneExportReport, InterspireError> {
+        self.audience_hygiene_export_status_impl(request)
     }
 }

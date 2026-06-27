@@ -40,7 +40,7 @@ pub struct HygieneListInput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct CandidateRow {
+pub(crate) struct CandidateRow {
     email: String,
     source_list_ids: String,
     source_list_names: String,
@@ -50,24 +50,36 @@ struct CandidateRow {
     disposable_domain_hint: bool,
 }
 
-#[derive(Debug, Default)]
-struct Candidate {
-    source_list_ids: BTreeSet<u64>,
-    source_list_names: BTreeSet<String>,
-    subscriber_ids: BTreeSet<String>,
-    first_subscribe_ts: Option<String>,
-    role_localpart: bool,
-    disposable_domain_hint: bool,
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+pub(crate) struct Candidate {
+    pub(crate) source_list_ids: BTreeSet<u64>,
+    pub(crate) source_list_names: BTreeSet<String>,
+    pub(crate) subscriber_ids: BTreeSet<String>,
+    pub(crate) first_subscribe_ts: Option<String>,
+    pub(crate) role_localpart: bool,
+    pub(crate) disposable_domain_hint: bool,
 }
 
-#[derive(Debug, Default)]
-struct Totals {
-    api_items: u64,
-    eligible_items_before_dedupe: u64,
-    excluded_unconfirmed: u64,
-    excluded_unsubscribed: u64,
-    excluded_bounced: u64,
-    invalid_syntax: u64,
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+pub(crate) struct Totals {
+    pub(crate) api_items: u64,
+    pub(crate) eligible_items_before_dedupe: u64,
+    pub(crate) excluded_unconfirmed: u64,
+    pub(crate) excluded_unsubscribed: u64,
+    pub(crate) excluded_bounced: u64,
+    pub(crate) invalid_syntax: u64,
+}
+
+pub(crate) fn append_base_export_warnings(warnings: &mut Vec<String>) {
+    for warning in [
+        "Private artifacts may contain raw recipient addresses; keep them out of git, issue trackers, tickets, and chat",
+        "This export does not remove provider suppressions or hard bounces yet; that is a separate recovery gate",
+        "This export is not send authorization and does not mutate legacy Interspire lists",
+    ] {
+        if !warnings.iter().any(|existing| existing == warning) {
+            warnings.push(warning.to_string());
+        }
+    }
 }
 
 pub fn build_audience_hygiene_export(
@@ -149,25 +161,23 @@ pub fn build_audience_hygiene_export(
 
     let artifacts = write_artifacts(request, &rows, &list_summaries, &totals, &source_list_ids)?;
 
-    warnings.push(
-        "Private artifacts may contain raw recipient addresses; keep them out of git, issue trackers, tickets, and chat"
-            .to_string(),
-    );
-    warnings.push(
-        "This export does not remove provider suppressions or hard bounces yet; that is a separate recovery gate"
-            .to_string(),
-    );
-    warnings.push(
-        "This export is not send authorization and does not mutate legacy Interspire lists"
-            .to_string(),
-    );
+    append_base_export_warnings(&mut warnings);
 
     Ok(AudienceHygieneExportReport {
         ok: true,
         configured: true,
+        job_id: None,
+        phase: None,
+        job_dir: None,
         source_list_ids,
         processed_list_count: list_summaries.len() as u64,
+        remaining_list_ids: Vec::new(),
         missing_list_ids,
+        active_list_id: None,
+        active_list_name: None,
+        queries_processed_this_call: 0,
+        completed_query_count: 0,
+        remaining_query_count: 0,
         lists: list_summaries,
         gross_api_items: totals.api_items,
         eligible_items_before_dedupe: totals.eligible_items_before_dedupe,
@@ -181,6 +191,7 @@ pub fn build_audience_hygiene_export(
         invalid_syntax_count: totals.invalid_syntax,
         role_localpart_count,
         disposable_domain_hint_count,
+        checkpoint_artifacts: Vec::new(),
         artifacts,
         legacy_lists_mutated: false,
         production_send_authorized: false,
@@ -189,7 +200,7 @@ pub fn build_audience_hygiene_export(
     })
 }
 
-fn append_status_authority_warnings(
+pub(crate) fn append_status_authority_warnings(
     warnings: &mut Vec<String>,
     input: &HygieneListInput,
     list_totals: &Totals,
@@ -221,7 +232,7 @@ fn append_status_authority_warnings(
     }
 }
 
-fn write_artifacts(
+pub(crate) fn write_artifacts(
     request: &AudienceHygieneExportRequest,
     rows: &[CandidateRow],
     lists: &[AudienceHygieneListSummary],
@@ -268,7 +279,7 @@ fn write_artifacts(
     Ok(artifacts)
 }
 
-fn candidate_rows(candidates: &BTreeMap<String, Candidate>) -> Vec<CandidateRow> {
+pub(crate) fn candidate_rows(candidates: &BTreeMap<String, Candidate>) -> Vec<CandidateRow> {
     candidates
         .iter()
         .map(|(email, candidate)| CandidateRow {
@@ -475,7 +486,7 @@ fn write_summary_json(
     set_private_file_permissions(path)
 }
 
-fn artifact(
+pub(crate) fn artifact(
     kind: &str,
     path: &Path,
     contains_raw_recipient_data: bool,
@@ -492,7 +503,7 @@ fn artifact(
     })
 }
 
-fn safe_output_dir(raw: Option<&str>) -> Result<PathBuf, InterspireError> {
+pub(crate) fn safe_output_dir(raw: Option<&str>) -> Result<PathBuf, InterspireError> {
     let raw_path = raw
         .map(ToString::to_string)
         .or_else(|| env::var(OUTPUT_DIR_ENV).ok())
@@ -623,7 +634,7 @@ fn env_output_roots() -> Result<Vec<PathBuf>, InterspireError> {
         .collect()
 }
 
-fn ensure_output_dir_still_approved(path: &Path) -> Result<(), InterspireError> {
+pub(crate) fn ensure_output_dir_still_approved(path: &Path) -> Result<(), InterspireError> {
     let metadata = fs::symlink_metadata(path).map_err(|err| {
         InterspireError::Io(format!(
             "failed to stat private audience export directory: {err}"
@@ -685,7 +696,7 @@ fn canonical_path(path: &Path) -> Result<PathBuf, InterspireError> {
     })
 }
 
-fn set_private_dir_permissions(path: &Path) -> Result<(), InterspireError> {
+pub(crate) fn set_private_dir_permissions(path: &Path) -> Result<(), InterspireError> {
     let mut perms = fs::metadata(path)
         .map_err(|err| InterspireError::Io(format!("failed to stat private directory: {err}")))?
         .permissions();
@@ -717,14 +728,14 @@ fn create_private_file(path: &Path, label: &str) -> Result<fs::File, InterspireE
         })
 }
 
-fn unix_timestamp_nanos() -> Result<u128, InterspireError> {
+pub(crate) fn unix_timestamp_nanos() -> Result<u128, InterspireError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .map_err(|err| InterspireError::Io(format!("system time before unix epoch: {err}")))
 }
 
-fn safe_prefix(raw: Option<&str>) -> String {
+pub(crate) fn safe_prefix(raw: Option<&str>) -> String {
     let raw = raw.unwrap_or("interspire-audience-hygiene");
     let mut out = raw
         .chars()
@@ -747,7 +758,7 @@ fn safe_prefix(raw: Option<&str>) -> String {
     }
 }
 
-fn normalize_email(raw: &str) -> Option<String> {
+pub(crate) fn normalize_email(raw: &str) -> Option<String> {
     let email = raw
         .trim()
         .trim_matches(['<', '>', '"', '\''])
@@ -776,7 +787,7 @@ fn normalize_email(raw: &str) -> Option<String> {
     Some(email)
 }
 
-fn is_role_address(email: &str) -> bool {
+pub(crate) fn is_role_address(email: &str) -> bool {
     let Some((local, _domain)) = email.split_once('@') else {
         return false;
     };
@@ -830,7 +841,7 @@ fn is_role_address(email: &str) -> bool {
     )
 }
 
-fn is_disposable_hint(email: &str) -> bool {
+pub(crate) fn is_disposable_hint(email: &str) -> bool {
     let Some((_local, domain)) = email.split_once('@') else {
         return false;
     };
@@ -845,7 +856,7 @@ fn is_disposable_hint(email: &str) -> bool {
     )
 }
 
-fn min_optional_text(left: Option<String>, right: Option<String>) -> Option<String> {
+pub(crate) fn min_optional_text(left: Option<String>, right: Option<String>) -> Option<String> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.min(right)),
         (Some(left), None) => Some(left),

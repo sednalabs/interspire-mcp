@@ -14,6 +14,10 @@ use std::{thread, time::Duration};
 
 const SHARDED_DOMAIN_PREFIX_STARTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 const MAX_SHARDED_DOMAIN_PREFIX_LEN: usize = 8;
+const DEFAULT_XML_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const CHECKPOINT_XML_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_XML_REQUEST_ATTEMPTS: usize = 3;
+const CHECKPOINT_XML_REQUEST_ATTEMPTS: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct SubscriberRecord {
@@ -35,7 +39,7 @@ impl XmlApiClient {
     pub fn new(config: XmlApiConfig) -> Result<Self, InterspireError> {
         let http = Client::builder()
             .redirect(Policy::none())
-            .timeout(Duration::from_secs(180))
+            .timeout(DEFAULT_XML_REQUEST_TIMEOUT)
             .build()
             .map_err(|err| InterspireError::Http(err.to_string()))?;
         Ok(Self { config, http })
@@ -76,28 +80,35 @@ impl XmlApiClient {
         list_id: u64,
     ) -> Result<Vec<SubscriberRecord>, InterspireError> {
         let mut records = Vec::new();
-        let mut stack = SHARDED_DOMAIN_PREFIX_STARTERS
-            .iter()
-            .rev()
-            .map(|byte| (*byte as char).to_string())
-            .collect::<Vec<_>>();
+        let mut stack = initial_sharded_subscriber_queries();
 
-        while let Some(domain_prefix) = stack.pop() {
-            let query = format!("@{domain_prefix}");
+        while let Some(query) = stack.pop() {
             match self.get_subscribers_for_list_matching(list_id, &query) {
                 Ok(mut shard_records) => records.append(&mut shard_records),
-                Err(err) if can_split_subscriber_shard(&err, &domain_prefix) => {
-                    for byte in SHARDED_DOMAIN_PREFIX_STARTERS.iter().rev() {
-                        let mut child = domain_prefix.clone();
-                        child.push(*byte as char);
-                        stack.push(child);
+                Err(err) => {
+                    if let Some(children) = split_subscriber_query(&query, &err) {
+                        stack.extend(children);
+                        continue;
                     }
+                    return Err(err);
                 }
-                Err(err) => return Err(err),
             }
         }
 
         Ok(records)
+    }
+
+    pub(crate) fn get_subscribers_for_checkpoint_query(
+        &self,
+        list_id: u64,
+        email_query: &str,
+    ) -> Result<Vec<SubscriberRecord>, InterspireError> {
+        self.get_subscribers_for_list_matching_with_policy(
+            list_id,
+            email_query,
+            CHECKPOINT_XML_REQUEST_ATTEMPTS,
+            CHECKPOINT_XML_REQUEST_TIMEOUT,
+        )
     }
 
     pub fn should_retry_subscriber_read_with_shards(err: &InterspireError) -> bool {
@@ -109,8 +120,29 @@ impl XmlApiClient {
         list_id: u64,
         email_query: &str,
     ) -> Result<Vec<SubscriberRecord>, InterspireError> {
+        self.get_subscribers_for_list_matching_with_policy(
+            list_id,
+            email_query,
+            DEFAULT_XML_REQUEST_ATTEMPTS,
+            DEFAULT_XML_REQUEST_TIMEOUT,
+        )
+    }
+
+    fn get_subscribers_for_list_matching_with_policy(
+        &self,
+        list_id: u64,
+        email_query: &str,
+        attempts: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SubscriberRecord>, InterspireError> {
         let details = subscriber_search_details(list_id, email_query);
-        let xml = self.request_xml("subscribers", "GetSubscribers", &details)?;
+        let xml = self.request_xml_with_policy(
+            "subscribers",
+            "GetSubscribers",
+            &details,
+            attempts,
+            timeout,
+        )?;
         parse_get_subscribers_response(&xml)
     }
 
@@ -120,9 +152,27 @@ impl XmlApiClient {
         request_method: &str,
         details: &str,
     ) -> Result<String, InterspireError> {
+        self.request_xml_with_policy(
+            request_type,
+            request_method,
+            details,
+            DEFAULT_XML_REQUEST_ATTEMPTS,
+            DEFAULT_XML_REQUEST_TIMEOUT,
+        )
+    }
+
+    fn request_xml_with_policy(
+        &self,
+        request_type: &str,
+        request_method: &str,
+        details: &str,
+        attempts: usize,
+        timeout: Duration,
+    ) -> Result<String, InterspireError> {
         let mut last_error = None;
-        for attempt in 1..=3 {
-            match self.request_xml_once(request_type, request_method, details) {
+        let attempts = attempts.max(1);
+        for attempt in 1..=attempts {
+            match self.request_xml_once(request_type, request_method, details, timeout) {
                 Ok(text) if !text.trim().is_empty() => return Ok(text),
                 Ok(_) => {
                     last_error = Some(InterspireError::XmlParse(
@@ -132,8 +182,8 @@ impl XmlApiClient {
                 Err(err) => last_error = Some(err),
             }
 
-            if attempt < 3 {
-                thread::sleep(Duration::from_secs(attempt));
+            if attempt < attempts {
+                thread::sleep(Duration::from_secs(attempt as u64));
             }
         }
 
@@ -147,6 +197,7 @@ impl XmlApiClient {
         request_type: &str,
         request_method: &str,
         details: &str,
+        timeout: Duration,
     ) -> Result<String, InterspireError> {
         if !self.config.is_configured() {
             return Err(InterspireError::XmlNotConfigured);
@@ -161,6 +212,7 @@ impl XmlApiClient {
             .http
             .post(endpoint)
             .header("content-type", "text/xml")
+            .timeout(timeout)
             .body(body)
             .send()
             .map_err(|err| InterspireError::Http(err.to_string()))?;
@@ -183,6 +235,45 @@ pub fn xml_evidence(notes: Vec<String>) -> Evidence {
         source: "interspire_xml_api".to_string(),
         notes,
     }
+}
+
+pub(crate) fn initial_subscriber_queries(declared_subscribed_count: Option<u64>) -> Vec<String> {
+    if declared_subscribed_count.unwrap_or_default() > 500 {
+        initial_sharded_subscriber_queries()
+    } else {
+        vec!["@".to_string()]
+    }
+}
+
+pub(crate) fn split_subscriber_query(query: &str, err: &InterspireError) -> Option<Vec<String>> {
+    let domain_prefix = query.strip_prefix('@')?;
+    if domain_prefix.is_empty() {
+        if is_large_subscriber_response_error(err) {
+            return Some(initial_sharded_subscriber_queries());
+        }
+        return None;
+    }
+    if !can_split_subscriber_shard(err, domain_prefix) {
+        return None;
+    }
+
+    let mut children = Vec::new();
+    for byte in SHARDED_DOMAIN_PREFIX_STARTERS.iter() {
+        let mut child = String::from("@");
+        child.push_str(domain_prefix);
+        child.push(*byte as char);
+        children.push(child);
+    }
+    children.reverse();
+    Some(children)
+}
+
+fn initial_sharded_subscriber_queries() -> Vec<String> {
+    SHARDED_DOMAIN_PREFIX_STARTERS
+        .iter()
+        .map(|byte| format!("@{}", *byte as char))
+        .rev()
+        .collect()
 }
 
 pub fn parse_get_lists_response(xml: &str) -> Result<Vec<ListSummary>, InterspireError> {
