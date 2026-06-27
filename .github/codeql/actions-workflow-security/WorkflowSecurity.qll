@@ -257,7 +257,11 @@ predicate jobNeedsWritePermission(Job job, string permissionName) {
   jobUsesActionMatching(job, "(?i)^github/codeql-action.*", _)
   or
   permissionName = "code-quality" and
-  jobUsesActionMatching(job, "(?i)^actions/upload-code-coverage@.*", _)
+  (
+    jobUsesActionMatching(job, "(?i)^actions/upload-code-coverage@.*", _)
+    or
+    job.getId() = "code-quality-upload"
+  )
   or
   permissionName = "actions" and
   exists(string command |
