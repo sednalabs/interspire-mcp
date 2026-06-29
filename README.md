@@ -110,6 +110,12 @@ cd interspire-mcp
 cargo build --release
 ```
 
+Build a Linux release artifact on GitHub Actions:
+
+- Run the manual `binary-build` workflow on the branch or SHA you want.
+- Download the `interspire-mcp-linux-x86_64` artifact from the run.
+- Extract `interspire-mcp` from `interspire-mcp-linux-x86_64.tar.gz`.
+
 Run as a stdio MCP server:
 
 ```bash
