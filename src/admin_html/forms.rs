@@ -301,8 +301,7 @@ pub(super) fn guarded_write_apply(
         .collect::<BTreeSet<_>>();
     let post_fields = staged.to_post_pairs_for_fields(&requested_fields);
     let response = client
-        .http
-        .post(snapshot.action_url.clone())
+        .with_access_headers(client.http.post(snapshot.action_url.clone()))
         .form(&post_fields)
         .send()
         .map_err(|err| InterspireError::Http(err.to_string()))?;

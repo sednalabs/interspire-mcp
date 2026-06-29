@@ -22,7 +22,10 @@ use crate::{
 };
 use mcp_toolkit_observability::redaction::truncate;
 use mcp_toolkit_policy_core::{sensitive_read_policy_decision, Decision, DecisionCode};
-use reqwest::{blocking::Client, redirect::Policy};
+use reqwest::{
+    blocking::{Client, RequestBuilder},
+    redirect::Policy,
+};
 use scraper::{ElementRef, Html, Selector};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, time::Duration};
@@ -451,8 +454,7 @@ impl AdminHtmlClient {
 
         let response = match &selected.execution {
             QueueControlExecution::Get => self
-                .http
-                .get(selected.url.clone())
+                .with_access_headers(self.http.get(selected.url.clone()))
                 .send()
                 .map_err(|err| InterspireError::Http(err.to_string()))?,
             QueueControlExecution::DeletePost {
@@ -465,8 +467,7 @@ impl AdminHtmlClient {
                 let mut post_pairs = hidden_pairs.clone();
                 post_pairs.push((checkbox_name.clone(), identifier_value));
                 post_pairs.push((submit_name.clone(), submit_value.clone()));
-                self.http
-                    .post(selected.url.clone())
+                self.with_access_headers(self.http.post(selected.url.clone()))
                     .form(&post_pairs)
                     .send()
                     .map_err(|err| InterspireError::Http(err.to_string()))?
@@ -676,7 +677,9 @@ impl AdminHtmlClient {
             form.push((token.field_name.as_str(), token.value.clone()));
         }
 
-        let mut request = self.http.post(login_url).form(&form);
+        let mut request = self
+            .with_access_headers(self.http.post(login_url))
+            .form(&form);
         if let Some(token) = csrf_token.as_ref() {
             request = request.header("x-csrf-token", token.value.as_str());
         }
@@ -693,7 +696,10 @@ impl AdminHtmlClient {
     }
 
     fn login_csrf_token(&self, login_url: &Url) -> Result<Option<LoginCsrfToken>, InterspireError> {
-        let response = match self.http.get(login_url.clone()).send() {
+        let response = match self
+            .with_access_headers(self.http.get(login_url.clone()))
+            .send()
+        {
             Ok(response) => response,
             Err(err) if self.config.version == InterspireVersion::V8 => {
                 return Err(InterspireError::Http(err.to_string()));
@@ -727,8 +733,7 @@ impl AdminHtmlClient {
         let base_url = self.config.base_url.as_deref().unwrap_or_default();
         let url = safety::ensure_allowed_admin_get(base_url, path)?;
         let response = self
-            .http
-            .get(url)
+            .with_access_headers(self.http.get(url))
             .send()
             .map_err(|err| InterspireError::Http(err.to_string()))?;
         if !response.status().is_success() {
@@ -754,6 +759,20 @@ impl AdminHtmlClient {
             &schedule_html,
             max_rows,
         )
+    }
+
+    fn with_access_headers(&self, request: RequestBuilder) -> RequestBuilder {
+        let access = &self.config.cloudflare_access;
+        let Some(client_id) = access.client_id() else {
+            return request;
+        };
+        let Some(client_secret) = access.client_secret() else {
+            return request;
+        };
+
+        request
+            .header("CF-Access-Client-Id", client_id)
+            .header("CF-Access-Client-Secret", client_secret)
     }
 }
 
@@ -1900,6 +1919,37 @@ mod tests {
     }
 
     #[test]
+    fn cloudflare_access_headers_are_attached_to_admin_requests() {
+        let server = spawn_sensitive_read_fixture_server();
+        let mut config = test_admin_config(&server.base_url);
+        config.cloudflare_access = crate::config::CloudflareAccessConfig::from_values_for_test(
+            "access-client",
+            "access-secret",
+        );
+        let client = AdminHtmlClient::new(config).unwrap_or_else(|err| panic!("{err}"));
+
+        client
+            .sensitive_field_query(
+                &sensitive_email_settings_request(&["smtp_server"], true),
+                true,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let requests = server.requests();
+        assert!(!requests.is_empty());
+        assert!(requests.iter().all(|request| {
+            request
+                .to_ascii_lowercase()
+                .contains("cf-access-client-id: access-client\r\n")
+        }));
+        assert!(requests.iter().all(|request| {
+            request
+                .to_ascii_lowercase()
+                .contains("cf-access-client-secret: access-secret\r\n")
+        }));
+    }
+
+    #[test]
     fn settings_fields_redact_username_like_values() {
         let email_html = r#"
             <form>
@@ -2030,6 +2080,7 @@ mod tests {
             base_url: Some(base_url.to_string()),
             username: Some("operator".to_string()),
             password: Some("password".to_string()),
+            cloudflare_access: crate::config::CloudflareAccessConfig::default(),
             enrich_limit: 25,
         }
     }

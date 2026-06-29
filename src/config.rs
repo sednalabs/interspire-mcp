@@ -4,11 +4,12 @@
 //! the repository. This module deliberately keeps values opaque and only
 //! reports configured/not-configured state to callers.
 
-use std::{env, fs, path::Path};
+use std::{env, fmt, fs, path::Path};
 
 #[derive(Debug, Clone, Default)]
 pub struct InterspireServerConfig {
     pub version: InterspireVersion,
+    pub cloudflare_access: CloudflareAccessConfig,
     pub xml: XmlApiConfig,
     pub admin_html: AdminHtmlConfig,
     pub guarded_writes: GuardedWriteConfig,
@@ -18,11 +19,20 @@ pub struct InterspireServerConfig {
 impl InterspireServerConfig {
     pub fn from_env() -> Self {
         let version = InterspireVersion::from_env();
+        let mut cloudflare_access = CloudflareAccessConfig {
+            client_id: env_non_blank("INTERSPIRE_CF_ACCESS_CLIENT_ID"),
+            client_secret: env_non_blank("INTERSPIRE_CF_ACCESS_CLIENT_SECRET"),
+        };
+        if let Ok(path) = env::var("INTERSPIRE_CF_ACCESS_CREDENTIALS_FILE") {
+            cloudflare_access.apply_secret_file(Path::new(&path));
+        }
+
         let mut admin_html = AdminHtmlConfig {
             version,
             base_url: env_non_blank("INTERSPIRE_ADMIN_BASE_URL"),
             username: env_non_blank("INTERSPIRE_ADMIN_USERNAME"),
             password: env_non_blank("INTERSPIRE_ADMIN_PASSWORD"),
+            cloudflare_access: cloudflare_access.clone(),
             enrich_limit: env::var("INTERSPIRE_HTML_LIST_ENRICH_LIMIT")
                 .ok()
                 .and_then(|raw| raw.parse::<usize>().ok())
@@ -37,6 +47,7 @@ impl InterspireServerConfig {
             endpoint: env_non_blank("INTERSPIRE_XML_ENDPOINT"),
             username: env_non_blank("INTERSPIRE_XML_USERNAME"),
             token: env_non_blank("INTERSPIRE_XML_TOKEN"),
+            cloudflare_access: cloudflare_access.clone(),
         };
 
         if let Ok(path) = env::var("INTERSPIRE_XML_CREDENTIALS_FILE") {
@@ -48,6 +59,7 @@ impl InterspireServerConfig {
 
         Self {
             version,
+            cloudflare_access,
             xml,
             admin_html,
             guarded_writes,
@@ -82,6 +94,79 @@ impl InterspireVersion {
             value if value.starts_with("8.") => Some(Self::V8),
             value if value.starts_with("6.") => Some(Self::V6_2_3),
             _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct CloudflareAccessConfig {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+}
+
+impl fmt::Debug for CloudflareAccessConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CloudflareAccessConfig")
+            .field(
+                "client_id_configured",
+                &self.client_id.as_deref().is_some_and(not_blank),
+            )
+            .field(
+                "client_secret_configured",
+                &self.client_secret.as_deref().is_some_and(not_blank),
+            )
+            .finish()
+    }
+}
+
+impl CloudflareAccessConfig {
+    #[cfg(test)]
+    pub(crate) fn from_values_for_test(client_id: &str, client_secret: &str) -> Self {
+        Self {
+            client_id: Some(client_id.to_string()),
+            client_secret: Some(client_secret.to_string()),
+        }
+    }
+
+    pub fn is_configured(&self) -> bool {
+        self.client_id.as_deref().is_some_and(not_blank)
+            && self.client_secret.as_deref().is_some_and(not_blank)
+    }
+
+    pub fn client_id(&self) -> Option<&str> {
+        self.client_id.as_deref().filter(|value| not_blank(value))
+    }
+
+    pub fn client_secret(&self) -> Option<&str> {
+        self.client_secret
+            .as_deref()
+            .filter(|value| not_blank(value))
+    }
+
+    fn apply_secret_file(&mut self, path: &Path) {
+        let Ok(contents) = fs::read_to_string(path) else {
+            return;
+        };
+
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            match key.trim() {
+                "INTERSPIRE_CF_ACCESS_CLIENT_ID" if option_blank_or_absent(&self.client_id) => {
+                    self.client_id = Some(normalize_secret_file_value(value));
+                }
+                "INTERSPIRE_CF_ACCESS_CLIENT_SECRET"
+                    if option_blank_or_absent(&self.client_secret) =>
+                {
+                    self.client_secret = Some(normalize_secret_file_value(value));
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -141,6 +226,7 @@ pub struct XmlApiConfig {
     pub endpoint: Option<String>,
     pub username: Option<String>,
     pub token: Option<String>,
+    pub cloudflare_access: CloudflareAccessConfig,
 }
 
 impl XmlApiConfig {
@@ -185,6 +271,7 @@ pub struct AdminHtmlConfig {
     pub base_url: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub cloudflare_access: CloudflareAccessConfig,
     pub enrich_limit: usize,
 }
 
@@ -195,6 +282,7 @@ impl Default for AdminHtmlConfig {
             base_url: None,
             username: None,
             password: None,
+            cloudflare_access: CloudflareAccessConfig::default(),
             enrich_limit: 25,
         }
     }
@@ -245,6 +333,13 @@ impl AdminHtmlConfig {
     }
 }
 
+fn normalize_secret_file_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|ch| ch == '"' || ch == '\'')
+        .to_string()
+}
+
 fn not_blank(value: &str) -> bool {
     !value.trim().is_empty()
 }
@@ -268,7 +363,10 @@ fn env_truthy(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdminHtmlConfig, GuardedWriteConfig, InterspireVersion, XmlApiConfig};
+    use super::{
+        AdminHtmlConfig, CloudflareAccessConfig, GuardedWriteConfig, InterspireVersion,
+        XmlApiConfig,
+    };
     use std::{
         fs,
         path::PathBuf,
@@ -385,6 +483,7 @@ mod tests {
             username: Some("\n\t".to_string()),
             password: Some("env-password".to_string()),
             version: InterspireVersion::Auto,
+            cloudflare_access: CloudflareAccessConfig::default(),
             enrich_limit: 25,
         };
         config.apply_secret_file(&path);
@@ -424,6 +523,7 @@ mod tests {
             endpoint: Some("https://env.example.test/xml.php".to_string()),
             username: None,
             token: Some("env-token".to_string()),
+            cloudflare_access: CloudflareAccessConfig::default(),
         };
         config.apply_secret_file(&path);
         fs::remove_file(&path).expect("remove temp config");
@@ -445,6 +545,7 @@ mod tests {
             endpoint: Some("   ".to_string()),
             username: Some("\n\t".to_string()),
             token: Some("env-token".to_string()),
+            cloudflare_access: CloudflareAccessConfig::default(),
         };
         config.apply_secret_file(&path);
         fs::remove_file(&path).expect("remove temp config");
@@ -455,5 +556,52 @@ mod tests {
         );
         assert_eq!(config.username.as_deref(), Some("file-user"));
         assert_eq!(config.token.as_deref(), Some("env-token"));
+    }
+
+    #[test]
+    fn cloudflare_access_secret_file_configures_headers_without_exposing_values() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("interspire-config-tests")
+            .join("cloudflare-access-values.env");
+        fs::create_dir_all(path.parent().expect("temp config parent"))
+            .expect("create temp config dir");
+        fs::write(
+            &path,
+            "INTERSPIRE_CF_ACCESS_CLIENT_ID=\"client-id\"\nINTERSPIRE_CF_ACCESS_CLIENT_SECRET='client-secret'\n",
+        )
+        .expect("write temp config");
+        let mut config = CloudflareAccessConfig::default();
+        config.apply_secret_file(&path);
+        fs::remove_file(&path).expect("remove temp config");
+
+        assert!(config.is_configured());
+        assert_eq!(config.client_id(), Some("client-id"));
+        assert_eq!(config.client_secret(), Some("client-secret"));
+        assert!(!format!("{config:?}").contains("client-secret"));
+    }
+
+    #[test]
+    fn cloudflare_access_secret_file_preserves_explicit_values() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("interspire-config-tests")
+            .join("cloudflare-access-preserve.env");
+        fs::create_dir_all(path.parent().expect("temp config parent"))
+            .expect("create temp config dir");
+        fs::write(
+            &path,
+            "INTERSPIRE_CF_ACCESS_CLIENT_ID=file-id\nINTERSPIRE_CF_ACCESS_CLIENT_SECRET=file-secret\n",
+        )
+        .expect("write temp config");
+        let mut config = CloudflareAccessConfig {
+            client_id: Some("env-id".to_string()),
+            client_secret: Some(" ".to_string()),
+        };
+        config.apply_secret_file(&path);
+        fs::remove_file(&path).expect("remove temp config");
+
+        assert_eq!(config.client_id(), Some("env-id"));
+        assert_eq!(config.client_secret(), Some("file-secret"));
     }
 }

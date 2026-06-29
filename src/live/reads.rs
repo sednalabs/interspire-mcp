@@ -21,6 +21,7 @@ impl LiveInterspireBackend {
     ) -> Result<StatusReport, InterspireError> {
         let xml_configured = self.config.xml.is_configured();
         let admin_html_configured = self.config.admin_html.is_configured();
+        let cloudflare_access_configured = self.config.cloudflare_access.is_configured();
         let mut warnings = Vec::new();
         if !xml_configured {
             warnings.push(
@@ -46,6 +47,7 @@ impl LiveInterspireBackend {
             interspire_version: self.config.version,
             xml_configured,
             admin_html_configured,
+            cloudflare_access_configured,
             guarded_writes_enabled: self.config.guarded_writes.enabled,
             sensitive_reads_enabled: self.config.sensitive_reads.enabled,
             queue_controls_enabled: self.config.guarded_writes.queue_controls_enabled,
@@ -98,6 +100,7 @@ impl LiveInterspireBackend {
                     "audience hygiene export writes private local artifacts only and returns aggregate metadata".to_string(),
                     "queue control apply tools are disabled unless guarded write environment flags are explicitly enabled".to_string(),
                     "guarded form-write tools are disabled unless guarded write environment flags are explicitly enabled".to_string(),
+                    "Cloudflare Access service-token headers are attached to Interspire HTTP requests when INTERSPIRE_CF_ACCESS_* configuration is present".to_string(),
                 ],
             },
         })

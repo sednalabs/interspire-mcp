@@ -9,7 +9,10 @@ use crate::{
     error::InterspireError,
     response::{Evidence, ListSummary},
 };
-use reqwest::{blocking::Client, redirect::Policy};
+use reqwest::{
+    blocking::{Client, RequestBuilder},
+    redirect::Policy,
+};
 use std::{thread, time::Duration};
 
 const SHARDED_DOMAIN_PREFIX_STARTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
@@ -209,8 +212,7 @@ impl XmlApiClient {
         let body = build_xml_request(username, token, request_type, request_method, details);
 
         let response = self
-            .http
-            .post(endpoint)
+            .with_access_headers(self.http.post(endpoint))
             .header("content-type", "text/xml")
             .timeout(timeout)
             .body(body)
@@ -227,6 +229,20 @@ impl XmlApiClient {
             )));
         }
         Ok(text)
+    }
+
+    fn with_access_headers(&self, request: RequestBuilder) -> RequestBuilder {
+        let access = &self.config.cloudflare_access;
+        let Some(client_id) = access.client_id() else {
+            return request;
+        };
+        let Some(client_secret) = access.client_secret() else {
+            return request;
+        };
+
+        request
+            .header("CF-Access-Client-Id", client_id)
+            .header("CF-Access-Client-Secret", client_secret)
     }
 }
 
@@ -447,6 +463,13 @@ fn escape_xml(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{Arc, Mutex},
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn parses_get_lists_response() {
@@ -483,6 +506,81 @@ mod tests {
         assert!(!records[1].confirmed);
         assert!(records[2].unsubscribed);
         assert!(records[3].bounced);
+    }
+
+    #[test]
+    fn cloudflare_access_headers_are_attached_to_xml_requests() {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 8192];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("test request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while push: {err}")
+                            })
+                            .push(request);
+                        let body = include_str!("../tests/fixtures/get_lists_success.xml");
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/xml; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .unwrap_or_else(|err| panic!("test response write failed: {err}"));
+                        break;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("test server accept failed: {err}"),
+                }
+            }
+        });
+
+        let client = XmlApiClient::new(XmlApiConfig {
+            endpoint: Some(format!("http://{address}/xml.php")),
+            username: Some("xml-user".to_string()),
+            token: Some("xml-token".to_string()),
+            cloudflare_access: crate::config::CloudflareAccessConfig::from_values_for_test(
+                "access-client",
+                "access-secret",
+            ),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        client.get_lists().unwrap_or_else(|err| panic!("{err}"));
+        handle
+            .join()
+            .unwrap_or_else(|_| panic!("test XML server thread panicked"));
+
+        let captured = requests
+            .lock()
+            .unwrap_or_else(|err| panic!("test requests lock poisoned while read: {err}"));
+        assert_eq!(captured.len(), 1);
+        let request = captured[0].to_ascii_lowercase();
+        assert!(request.contains("cf-access-client-id: access-client\r\n"));
+        assert!(request.contains("cf-access-client-secret: access-secret\r\n"));
     }
 
     #[test]

@@ -153,7 +153,9 @@ First smoke test: call `interspire_status`. A healthy default posture should
 report configured read capabilities, `safe_mode: true`,
 `guarded_writes_enabled: false`, and `queue_controls_enabled: false`.
 For a default runtime it should also report `form_write_controls_enabled: false`
-and `write_execution_mode: "preview_apply"`.
+and `write_execution_mode: "preview_apply"`. If the Interspire admin or XML API
+is behind Cloudflare Access, `cloudflare_access_configured: true` confirms that
+the service-token header values were loaded without revealing those values.
 
 For real deployments, load credentials from environment variables or secret
 files outside the repository. Do not commit credentials, cookies, raw exports,
@@ -189,6 +191,19 @@ Secret-file variables:
 INTERSPIRE_XML_CREDENTIALS_FILE=/secure/secrets/interspire-xml.env
 INTERSPIRE_ADMIN_CREDENTIALS_FILE=/secure/secrets/interspire-admin.env
 ```
+
+Cloudflare Access service-token variables for protected admin/XML origins:
+
+```bash
+INTERSPIRE_CF_ACCESS_CLIENT_ID='service-token-client-id'
+INTERSPIRE_CF_ACCESS_CLIENT_SECRET='redacted-service-token-secret'
+INTERSPIRE_CF_ACCESS_CREDENTIALS_FILE=/secure/secrets/interspire-cloudflare-access.env
+```
+
+When both Access values are configured, the MCP attaches
+`CF-Access-Client-Id` and `CF-Access-Client-Secret` to the existing Interspire
+XML and admin HTML requests. These values are never returned by status or
+readback tools.
 
 Guarded write variables, all disabled by default:
 

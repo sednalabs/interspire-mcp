@@ -59,6 +59,30 @@ For compatibility with simple secret stores, it may also contain username on
 line 1 and password on line 2. Set `INTERSPIRE_ADMIN_BASE_URL` separately when
 using that format.
 
+## Cloudflare Access Protected Origins
+
+If the Interspire admin or XML API is protected by Cloudflare Access, provide a
+service token through environment variables or a private secret file:
+
+```bash
+INTERSPIRE_CF_ACCESS_CLIENT_ID='service-token-client-id'
+INTERSPIRE_CF_ACCESS_CLIENT_SECRET='redacted-service-token-secret'
+INTERSPIRE_CF_ACCESS_CREDENTIALS_FILE=/secure/secrets/interspire-cloudflare-access.env
+```
+
+The Access secret file supports:
+
+```text
+INTERSPIRE_CF_ACCESS_CLIENT_ID=service-token-client-id
+INTERSPIRE_CF_ACCESS_CLIENT_SECRET=redacted-service-token-secret
+```
+
+Explicit environment variables take precedence over file values. When both
+values are configured, all Interspire XML and admin HTML HTTP requests include
+the `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers. Status
+readback reports only the boolean `cloudflare_access_configured` value and does
+not expose the token values.
+
 ## Guarded Writes
 
 Guarded writes are off unless the runtime enables them explicitly:
