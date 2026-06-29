@@ -344,12 +344,20 @@ Dependency governance:
 
 Hosted checks include:
 
-- Rust baseline: format, clippy, tests, metadata.
+- Rust baseline: format, clippy, metadata, and test shards run as parallel
+  fanout jobs with a final aggregate `Run Rust baseline` gate.
 - CodeQL Advanced: Rust and GitHub Actions workflow security.
 - Code Quality: Cobertura artifact on every run, with best-effort GitHub Code
   Quality upload when the repository-side feature is enabled.
 - Dependency governance: `cargo-deny`, `cargo-audit`, and direct dependency
-  stale-risk reporting.
+  stale-risk reporting run as parallel fanout jobs with a final aggregate
+  `dependency-governance` gate.
+
+CI uses `.github/actions/setup-rust-ci` for the shared Rust toolchain and Cargo
+cache policy. Keep future CI reruns on this rapid fanout path. Reuse small
+artifacts that shorten later jobs, such as metadata and coverage reports, but do
+not upload large `target/` directories between jobs unless measured evidence
+shows that artifact transfer is faster than the shared Cargo cache.
 
 ## Architecture
 

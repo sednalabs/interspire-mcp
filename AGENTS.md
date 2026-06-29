@@ -33,6 +33,12 @@ This repository contains a public Rust MCP server for Interspire Email Marketer
 - Do not let `admin_html.rs`, `live.rs`, or `response.rs` become catch-all
   files. New capability slices should land in named modules with clear
   ownership boundaries and tests near the seam they protect.
+- Preserve the rapid GitHub Actions fanout model. Rust baseline and dependency
+  governance should stay split into parallel jobs with final aggregate gates,
+  and Rust jobs should use `.github/actions/setup-rust-ci` for shared toolchain
+  and cache policy. Reuse compact artifacts such as metadata and coverage
+  reports; do not pass large `target/` artifacts between jobs unless measured
+  evidence proves it is faster than the shared Cargo cache.
 
 ## Required Checks
 

@@ -35,15 +35,19 @@ jobs:
           persist-credentials: false
 
       - name: Set up CodeQL
-        uses: github/codeql-action/init@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        id: setup-codeql
+        uses: github/codeql-action/setup-codeql@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
         with:
           languages: actions
 
       - name: Install action-workflow CodeQL pack dependencies
-        run: codeql pack install .github/codeql/actions-workflow-security
+        run: |
+          "${{ steps.setup-codeql.outputs.codeql-path }}" pack install .github/codeql/actions-workflow-security
 
       - name: Resolve custom queries
-        run: codeql resolve queries .github/codeql/actions-workflow-security
+        run: |
+          "${{ steps.setup-codeql.outputs.codeql-path }}" resolve queries .github/codeql/actions-workflow-security
 
       - name: Compile custom action-workflow queries
-        run: codeql query compile .github/codeql/actions-workflow-security/*.ql
+        run: |
+          "${{ steps.setup-codeql.outputs.codeql-path }}" query compile .github/codeql/actions-workflow-security/*.ql

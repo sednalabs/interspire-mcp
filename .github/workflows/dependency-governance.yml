@@ -8,6 +8,7 @@ on:
       - "deny.toml"
       - "scripts/dependency_governance_check.sh"
       - "docs/dependency-governance.md"
+      - ".github/actions/setup-rust-ci/action.yml"
       - ".github/workflows/dependency-governance.yml"
   push:
     branches:
@@ -18,6 +19,7 @@ on:
       - "deny.toml"
       - "scripts/dependency_governance_check.sh"
       - "docs/dependency-governance.md"
+      - ".github/actions/setup-rust-ci/action.yml"
       - ".github/workflows/dependency-governance.yml"
   workflow_dispatch:
 
@@ -28,32 +30,110 @@ concurrency:
   group: dependency-governance::${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_CACHE_SAVE: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
 jobs:
-  dependency-governance:
+  cargo-deny:
+    name: cargo-deny policy
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        # actions/checkout v6
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        # dtolnay/rust-toolchain stable
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-
-      - name: Cache cargo artifacts
-        # swatinem/rust-cache v2
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-
-      - name: Install governance tools
-        # taiki-e/install-action v2
-        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
         with:
-          tool: cargo-deny,cargo-audit,cargo-outdated
+          cache-key: dependency-governance
+          cache-targets: "false"
+          save-cache: ${{ env.RUST_CACHE_SAVE }}
 
-      - name: Run dependency governance checks
-        env:
-          STRICT_OUTDATED: "0"
-        run: ./scripts/dependency_governance_check.sh
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285 # v2.67.22
+        with:
+          tool: cargo-deny
+
+      - name: Run cargo-deny policy checks
+        run: cargo deny check advisories licenses bans sources
+
+  cargo-audit:
+    name: cargo-audit RustSec
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: dependency-governance
+          cache-targets: "false"
+          save-cache: ${{ env.RUST_CACHE_SAVE }}
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285 # v2.67.22
+        with:
+          tool: cargo-audit
+
+      - name: Run RustSec audit
+        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0057
+
+  cargo-outdated:
+    name: cargo-outdated direct dependency report
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: dependency-governance
+          cache-targets: "false"
+          save-cache: ${{ env.RUST_CACHE_SAVE }}
+
+      - name: Install cargo-outdated
+        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285 # v2.67.22
+        with:
+          tool: cargo-outdated
+
+      - name: Run direct dependency stale-risk report
+        run: |
+          set -euo pipefail
+          if ! cargo outdated --root-deps-only --depth 1; then
+            echo "warning: cargo outdated report failed; stale-risk reporting is non-blocking unless STRICT_OUTDATED=1" >&2
+          fi
+
+  dependency-governance:
+    name: dependency-governance
+    needs:
+      - cargo-deny
+      - cargo-audit
+      - cargo-outdated
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Summarize fanout
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "cargo-deny: ${{ needs.cargo-deny.result }}"
+          echo "cargo-audit: ${{ needs.cargo-audit.result }}"
+          echo "cargo-outdated: ${{ needs.cargo-outdated.result }}"
+          if [[ '${{ needs.cargo-deny.result }}' != 'success' ||
+            '${{ needs.cargo-audit.result }}' != 'success' ||
+            '${{ needs.cargo-outdated.result }}' != 'success' ]]; then
+            echo 'One or more dependency governance fanout jobs failed.'
+            exit 1
+          fi
