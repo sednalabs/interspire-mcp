@@ -39,6 +39,10 @@ This repository contains a public Rust MCP server for Interspire Email Marketer
   and cache policy. Reuse compact artifacts such as metadata and coverage
   reports; do not pass large `target/` artifacts between jobs unless measured
   evidence proves it is faster than the shared Cargo cache.
+- Keep the manual `binary-build` workflow lean and predictable. It should
+  produce a release binary artifact plus checksum for operator installation,
+  use the shared Rust setup action, and avoid turning a one-off install lane
+  into another broad validation workflow.
 
 ## Required Checks
 
