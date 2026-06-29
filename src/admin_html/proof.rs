@@ -224,29 +224,20 @@ impl AdminHtmlClient {
                 request.campaign_id
             ));
         }
-        if report.selected_campaign_id != Some(request.campaign_id)
-            && report.requested_campaign_available
-        {
-            report.warnings.push(
-                "requested campaign is available in the Interspire Step2 campaign dropdown, but the dropdown is not selected until the next send-wizard step"
-                    .to_string(),
-            );
-        }
         report.requested_list_ids_proven_by_recipient_count = report.selected_list_ids.is_empty()
             && request.expected_recipient_count.is_some()
             && report.recipient_count == request.expected_recipient_count;
-        if report.selected_list_ids.is_empty()
-            && !report.requested_list_ids_proven_by_recipient_count
-        {
-            report.warnings.push(
-                "selected list ids could not be proven from final wizard page or recipient-count echo"
-                    .to_string(),
-            );
-        } else if !ids_match(&report.selected_list_ids, &request.list_ids) {
-            report.warnings.push(format!(
-                "selected list ids {:?} did not match requested list ids {:?}",
-                report.selected_list_ids, request.list_ids
-            ));
+        if report.requested_list_ids_proven_by_recipient_count {
+            report.warnings.retain(|warning| {
+                warning != "final send wizard page did not expose selected list ids"
+            });
+        }
+        if let Some(warning) = list_ids_warning(
+            &report.selected_list_ids,
+            &request.list_ids,
+            report.requested_list_ids_proven_by_recipient_count,
+        ) {
+            report.warnings.push(warning);
         }
         if let Some(expected) = request.expected_recipient_count {
             if report.recipient_count != Some(expected) {
@@ -450,6 +441,26 @@ fn gate(name: &str, passed: bool, severity: &str, detail: String) -> SeedReadine
         severity: severity.to_string(),
         detail: redact::redact_sensitive_text(&detail),
     }
+}
+
+fn list_ids_warning(
+    selected_list_ids: &[u64],
+    requested_list_ids: &[u64],
+    recipient_count_proof: bool,
+) -> Option<String> {
+    if ids_match(selected_list_ids, requested_list_ids) || recipient_count_proof {
+        return None;
+    }
+    if selected_list_ids.is_empty() {
+        return Some(
+            "selected list ids could not be proven from final wizard page or recipient-count echo"
+                .to_string(),
+        );
+    }
+    Some(format!(
+        "selected list ids {:?} did not match requested list ids {:?}",
+        selected_list_ids, requested_list_ids
+    ))
 }
 
 fn campaign_body_audit_from_html(
@@ -1100,7 +1111,7 @@ fn sha256_hex(input: &str) -> String {
 mod tests {
     use super::{
         append_csrf_pair_if_missing, campaign_body_audit_from_html, campaign_body_step1_pairs,
-        campaign_body_step2_action_path, csrf_pair, parse_send_wizard_final_page,
+        campaign_body_step2_action_path, csrf_pair, list_ids_warning, parse_send_wizard_final_page,
         recipient_count_marker, selected_or_hidden_list_ids, send_step2_action_path,
     };
 
@@ -1297,6 +1308,18 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("did not expose selected list ids")));
+    }
+
+    #[test]
+    fn list_ids_warning_accepts_recipient_count_proof() {
+        assert!(list_ids_warning(&[], &[1], true).is_none());
+        assert!(list_ids_warning(&[1], &[1], false).is_none());
+
+        let missing = list_ids_warning(&[], &[1], false).expect("missing warning");
+        assert!(missing.contains("could not be proven"));
+
+        let mismatch = list_ids_warning(&[2], &[1], false).expect("mismatch warning");
+        assert!(mismatch.contains("did not match"));
     }
 
     #[test]
