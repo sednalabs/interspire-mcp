@@ -137,12 +137,23 @@ Apply:
 - requires `INTERSPIRE_FORM_WRITE_CONTROLS=1`;
 - requires the exact preview-generated `plan_id`;
 - posts only to an allowlisted campaign, list, user, or settings route;
+- mutates the requested controls in the captured form snapshot, then submits
+  the resulting current form state plus safe hidden controls and the save submit
+  control;
 - re-reads the edited page after apply;
 - returns redacted field readback evidence.
 
-Blank password controls are omitted from the submitted payload so a routine
-metadata save cannot silently clear an unrelated secret. Secret updates remain
-out of scope for this public phase.
+For Interspire 8.x campaign body forms, campaign preview/readback may first
+render the campaign editor's Step2 body form through the same allowlisted
+no-save Step1 POST used by body audit. The actual apply route remains separate:
+only the matching campaign edit Complete/save form is accepted as a guarded
+campaign write route.
+
+Unchanged ordinary controls are replayed to preserve Interspire edit-form
+semantics, including campaign subject lines and checked tracking flags. Blank
+password controls are omitted so a routine metadata save cannot silently clear
+or echo an unrelated secret. Secret updates remain out of scope for this public
+phase.
 
 Form apply can change non-secret delivery and cron configuration inside
 Interspire, including SMTP host/username/port, bounce host/username/IMAP mode,
@@ -198,8 +209,13 @@ enabled.
 The semantic template tools are wrappers over the guarded campaign form-write
 surface. They provide easier fields for EDM work, but still preserve the
 preview/apply plan-id model, current-form readback, approved field allowlist,
-hidden control preservation, and post-apply verification used by the generic
-campaign apply tools.
+current-form preservation, hidden control preservation, and post-apply
+verification used by the generic campaign apply tools.
+
+On Interspire 8.x, semantic `html_body` and `text_body` updates resolve against
+the editor controls exposed on the Step2 body form, such as
+`myDevEditControl_html`, instead of assuming those fields exist on the initial
+campaign metadata page.
 
 `interspire_campaign_render_artifact` is read-only against Interspire and writes
 private local artifacts outside the repository. Its output is artifact

@@ -239,9 +239,7 @@ pub(super) fn guarded_write_preview(
     }
     client.login()?;
 
-    let read_page = target.read_page();
-    let read_path = read_page.path();
-    let html = client.get_allowed(&read_path)?;
+    let (read_path, html, mut evidence_notes) = guarded_form_html(client, target)?;
     let snapshot = capture_form_snapshot(
         client.config.base_url.as_deref().unwrap_or_default(),
         &read_path,
@@ -268,10 +266,16 @@ pub(super) fn guarded_write_preview(
         warnings: vec![
             "preview only; apply requires INTERSPIRE_GUARDED_WRITES=1 and INTERSPIRE_FORM_WRITE_CONTROLS=1".to_string(),
         ],
-        evidence: admin_evidence(vec![format!(
-            "allowlisted {} form GET read for guarded write preview",
-            target.label()
-        )]),
+        evidence: admin_evidence({
+            evidence_notes.insert(
+                0,
+                format!(
+                    "allowlisted {} form read for guarded write preview",
+                    target.label()
+                ),
+            );
+            evidence_notes
+        }),
     })
 }
 
@@ -287,9 +291,7 @@ pub(super) fn guarded_write_apply(
     }
     client.login()?;
 
-    let read_page = target.read_page();
-    let read_path = read_page.path();
-    let html = client.get_allowed(&read_path)?;
+    let (read_path, html, mut evidence_notes) = guarded_form_html(client, target)?;
     let snapshot = capture_form_snapshot(
         client.config.base_url.as_deref().unwrap_or_default(),
         &read_path,
@@ -308,7 +310,7 @@ pub(super) fn guarded_write_apply(
 
     let requested_fields = changes
         .iter()
-        .map(|change| change.name.clone())
+        .map(|change| applied_control_name(&change.name))
         .collect::<BTreeSet<_>>();
     let post_fields = staged.to_post_pairs_for_fields(&requested_fields);
     let response = client
@@ -323,7 +325,7 @@ pub(super) fn guarded_write_apply(
         )));
     }
 
-    let after_html = client.get_allowed(&read_path)?;
+    let (_, after_html, mut after_evidence_notes) = guarded_form_html(client, target)?;
     let after_snapshot = capture_form_snapshot(
         client.config.base_url.as_deref().unwrap_or_default(),
         &read_path,
@@ -333,9 +335,9 @@ pub(super) fn guarded_write_apply(
     let mismatched_fields = changes
         .iter()
         .filter_map(|change| {
-            (staged.field_fingerprint(&change.name)
-                != after_snapshot.field_fingerprint(&change.name))
-            .then_some(change.name.clone())
+            let field_name = applied_control_name(&change.name);
+            (staged.field_fingerprint(&field_name) != after_snapshot.field_fingerprint(&field_name))
+                .then_some(change.name.clone())
         })
         .collect::<Vec<_>>();
     if !mismatched_fields.is_empty() {
@@ -361,11 +363,47 @@ pub(super) fn guarded_write_apply(
         warnings: vec![
             "guarded form write applied; verify downstream queue or delivery state separately before any send decision".to_string(),
         ],
-        evidence: admin_evidence(vec![
-            format!("allowlisted {} form POST apply succeeded", target.label()),
-            format!("allowlisted {} form GET readback succeeded", target.label()),
-        ]),
+        evidence: admin_evidence({
+            let mut notes = vec![format!(
+                "allowlisted {} form POST apply succeeded",
+                target.label()
+            )];
+            notes.append(&mut evidence_notes);
+            notes.append(&mut after_evidence_notes);
+            notes.push(format!(
+                "allowlisted {} form readback succeeded",
+                target.label()
+            ));
+            notes
+        }),
     })
+}
+
+fn guarded_form_html(
+    client: &AdminHtmlClient,
+    target: GuardedFormTarget,
+) -> Result<(String, String, Vec<String>), InterspireError> {
+    let read_path = target.read_page().path();
+    match target {
+        GuardedFormTarget::Campaign { campaign_id } => {
+            let resolved = client.resolve_campaign_body_html(campaign_id)?;
+            let mut notes = vec![format!(
+                "allowlisted campaign edit GET read for campaign {campaign_id}"
+            )];
+            if resolved.used_step2 {
+                notes.push(
+                    "allowlisted campaign Step1 POST rendered Interspire 8 Step2 form; Complete/save form was not posted during preview/readback"
+                        .to_string(),
+                );
+            }
+            Ok((read_path, resolved.html, notes))
+        }
+        _ => Ok((
+            read_path.clone(),
+            client.get_allowed(&read_path)?,
+            Vec::new(),
+        )),
+    }
 }
 
 impl FormSnapshot {
@@ -466,7 +504,7 @@ impl FormSnapshot {
                     }
                 }
                 FormControlKind::Checkbox | FormControlKind::Radio => {
-                    if requested_fields.contains(&control.lower_name) && control.checked {
+                    if control.checked {
                         pairs.push((control.original_name.clone(), control.value.clone()));
                     }
                 }
@@ -476,9 +514,7 @@ impl FormSnapshot {
                     }
                 }
                 _ => {
-                    if requested_fields.contains(&control.lower_name) {
-                        pairs.push((control.original_name.clone(), control.value.clone()));
-                    }
+                    pairs.push((control.original_name.clone(), control.value.clone()));
                 }
             }
         }
@@ -798,6 +834,13 @@ fn resolve_semantic_field_name(snapshot: &FormSnapshot, lower_name: &str) -> Str
         .to_string()
 }
 
+fn applied_control_name(change_name: &str) -> String {
+    change_name
+        .rsplit_once("->")
+        .map(|(_, actual)| actual.to_string())
+        .unwrap_or_else(|| change_name.to_string())
+}
+
 fn preview_requested_value(update: &FormFieldUpdate, control: &FormControl) -> Option<String> {
     if let Some(checked) = update.checked {
         return Some(if checked {
@@ -996,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn post_pairs_only_include_requested_fields_plus_safe_hidden_controls() {
+    fn post_pairs_preserve_current_form_state_plus_safe_hidden_controls() {
         let snapshot = FormSnapshot {
             action_url: Url::parse("https://example.test/admin/index.php")
                 .unwrap_or_else(|err| panic!("{err}")),
@@ -1056,7 +1099,9 @@ mod tests {
         let requested_fields = BTreeSet::from(["replytoemail".to_string(), "format".to_string()]);
         let pairs = snapshot.to_post_pairs_for_fields(&requested_fields);
 
-        assert!(!pairs.iter().any(|(name, _)| name == "name"));
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| name == "name" && value == "Primary list"));
         assert!(pairs
             .iter()
             .any(|(name, value)| name == "replytoemail" && value == "reply@example.test"));

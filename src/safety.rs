@@ -610,6 +610,7 @@ pub fn classify_allowed_admin_write(url: &Url) -> Result<AdminWriteRoute, Inters
                 &[
                     "Page",
                     "Action",
+                    "SubAction",
                     "id",
                     "token",
                     "csrf",
@@ -618,6 +619,7 @@ pub fn classify_allowed_admin_write(url: &Url) -> Result<AdminWriteRoute, Inters
                 ],
             )?;
             ensure_write_action_allowed(action.as_deref())?;
+            ensure_newsletter_write_subaction_allowed(query_value(&pairs, "SubAction").as_deref())?;
             let (key, id) = required_numeric_query_value(&pairs, "id")?;
             Ok(AdminWriteRoute {
                 page,
@@ -802,6 +804,24 @@ fn ensure_write_action_allowed(action: Option<&str>) -> Result<(), InterspireErr
     )))
 }
 
+fn ensure_newsletter_write_subaction_allowed(
+    sub_action: Option<&str>,
+) -> Result<(), InterspireError> {
+    let Some(sub_action) = sub_action else {
+        return Ok(());
+    };
+    if matches!(
+        sub_action.to_ascii_lowercase().as_str(),
+        "complete" | "save"
+    ) {
+        return Ok(());
+    }
+
+    Err(InterspireError::Safety(format!(
+        "campaign write SubAction is not in the guarded allowlist: {sub_action}"
+    )))
+}
+
 fn classify_queue_control_action(raw: &str) -> Option<QueueControlAction> {
     match raw.to_ascii_lowercase().as_str() {
         "cancel" | "canceljob" | "abort" | "abortjob" => Some(QueueControlAction::Cancel),
@@ -856,6 +876,16 @@ fn required_numeric_query_value(
                 "admin write route missing numeric identifier {key_name}"
             ))
         })
+}
+
+fn query_value(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+    key_name: &str,
+) -> Option<String> {
+    pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(key_name))
+        .map(|(_, value)| value.to_string())
 }
 
 fn optional_numeric_query_value(
@@ -1111,6 +1141,16 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("{err}"));
         assert!(campaign_url.as_str().contains("Page=Newsletters"));
+
+        let campaign_step2_complete_url = ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=9",
+            &AdminWriteIntent::NewsletterEdit { id: 9 },
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(campaign_step2_complete_url
+            .as_str()
+            .contains("SubAction=Complete"));
     }
 
     #[test]
@@ -1125,6 +1165,18 @@ mod tests {
         assert!(ensure_allowed_admin_post_for(
             base_url,
             "index.php?Page=Newsletters&Action=Send&id=9",
+            &AdminWriteIntent::NewsletterEdit { id: 9 },
+        )
+        .is_err());
+        assert!(ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=9",
+            &AdminWriteIntent::NewsletterEdit { id: 9 },
+        )
+        .is_err());
+        assert!(ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=10",
             &AdminWriteIntent::NewsletterEdit { id: 9 },
         )
         .is_err());

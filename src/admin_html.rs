@@ -2104,6 +2104,109 @@ mod tests {
     }
 
     #[test]
+    fn campaign_render_artifact_uses_interspire_8_step2_body_page() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let output_dir = std::env::temp_dir().join(format!(
+            "interspire-render-artifact-test-{}",
+            std::process::id()
+        ));
+
+        let report = client
+            .campaign_render_artifact(&crate::response::CampaignRenderArtifactRequest {
+                campaign_id: 7,
+                output_dir: Some(output_dir.display().to_string()),
+                artifact_prefix: Some("fixture-step2".to_string()),
+                include_image_blocked_variant: true,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.ok);
+        assert_eq!(report.subject.as_deref(), Some("Original subject"));
+        assert!(report.html_bytes > 0);
+        assert_eq!(report.artifacts.len(), 3);
+        assert!(report
+            .evidence
+            .notes
+            .iter()
+            .any(|note| { note.contains("Step1 POST rendered Interspire 8 Step2 body page") }));
+    }
+
+    #[test]
+    fn campaign_template_preview_uses_interspire_8_step2_body_form() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = client
+            .campaign_update_preview(
+                7,
+                &[FormFieldUpdate {
+                    name: "html_body".to_string(),
+                    value: Some("<p>Updated body %%UNSUBSCRIBELINK%%</p>".to_string()),
+                    checked: None,
+                }],
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.ok);
+        assert!(report
+            .available_fields
+            .iter()
+            .any(|field| field.name == "mydeveditcontrol_html"));
+        assert_eq!(report.changes.len(), 1);
+        assert_eq!(report.changes[0].name, "html_body->mydeveditcontrol_html");
+        assert!(report
+            .evidence
+            .notes
+            .iter()
+            .any(|note| { note.contains("Step1 POST rendered Interspire 8 Step2 form") }));
+    }
+
+    #[test]
+    fn campaign_template_apply_posts_step2_body_and_preserves_tracking_flags() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [FormFieldUpdate {
+            name: "html_body".to_string(),
+            value: Some("<p>Applied body %%UNSUBSCRIBELINK%%</p>".to_string()),
+            checked: None,
+        }];
+        let preview = client
+            .campaign_update_preview(7, &updates)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let apply = client
+            .campaign_update_apply(
+                7,
+                &preview.plan_id,
+                &updates,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(apply.ok);
+        assert!(apply.applied);
+        assert_eq!(apply.changes.len(), 1);
+        assert_eq!(apply.changes[0].name, "html_body->mydeveditcontrol_html");
+        let requests = server.requests();
+        let complete_post = requests
+            .iter()
+            .find(|request| {
+                request.starts_with(
+                    "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7 ",
+                )
+            })
+            .unwrap_or_else(|| panic!("Complete/save request should be posted"));
+        assert!(complete_post.contains("myDevEditControl_html=%3Cp%3EApplied+body"));
+        assert!(complete_post.contains("Subject=Original+subject"));
+        assert!(complete_post.contains("trackopens=1"));
+        assert!(complete_post.contains("tracklinks=1"));
+    }
+
+    #[test]
     fn login_form_html_is_rejected_as_unauthenticated() {
         let html = r#"
             <form>
@@ -2224,6 +2327,144 @@ mod tests {
             requests,
             handle: Some(handle),
         }
+    }
+
+    fn spawn_campaign_step2_fixture_server() -> TestAdminServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+        let body_html = Arc::new(Mutex::new(
+            r#"<p>Original body <a href="https://example.invalid">Read</a><img src="x.png" alt="Logo">%%UNSUBSCRIBELINK%%</p>"#
+                .to_string(),
+        ));
+        let thread_body_html = Arc::clone(&body_html);
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 8192];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("test request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while push: {err}")
+                            })
+                            .push(request.clone());
+                        write_campaign_step2_fixture_response(
+                            &mut stream,
+                            &request,
+                            &thread_body_html,
+                        );
+                        if thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while count: {err}")
+                            })
+                            .len()
+                            >= 12
+                        {
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("test server accept failed: {err}"),
+                }
+            }
+        });
+
+        TestAdminServer {
+            base_url: format!("http://{address}/admin/"),
+            requests,
+            handle: Some(handle),
+        }
+    }
+
+    fn write_campaign_step2_fixture_response(
+        stream: &mut std::net::TcpStream,
+        request: &str,
+        body_html: &Arc<Mutex<String>>,
+    ) {
+        let body = if request.starts_with("GET /admin/index.php?Page=Login&Action=Login ") {
+            r#"<form method="post" action="index.php?Page=Login&Action=Login">
+                <input type="hidden" name="csrf_token" value="fixture-csrf">
+                <input name="ss_username">
+                <input name="ss_password">
+              </form>"#
+                .to_string()
+        } else if request.starts_with("POST /admin/index.php?Page=Login&Action=Login ") {
+            "<html><body>logged in</body></html>".to_string()
+        } else if request.starts_with("GET /admin/index.php?Page=Newsletters&Action=Edit&id=7 ") {
+            r#"<form action="index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7">
+                <input type="hidden" name="csrf_token" value="fixture-csrf">
+                <input name="Name" value="Fixture campaign">
+                <input type="radio" name="Format" value="t">
+                <input type="radio" name="Format" value="h" checked>
+                <input type="hidden" name="usewysiwyg" value="3">
+                <input type="submit" name="NextButton" value="Next &gt;&gt;">
+              </form>"#
+                .to_string()
+        } else if request
+            .starts_with("POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7 ")
+        {
+            let html = body_html
+                .lock()
+                .unwrap_or_else(|err| panic!("body html lock poisoned: {err}"))
+                .clone();
+            format!(
+                r#"<form action="index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7">
+                <input type="hidden" name="csrf_token" value="fixture-csrf">
+                <input name="Subject" value="Original subject">
+                <textarea name="myDevEditControl_html">{html}</textarea>
+                <textarea name="myDevEditControl_text">Original text</textarea>
+                <input type="checkbox" name="trackopens" value="1" checked>
+                <input type="checkbox" name="tracklinks" value="1" checked>
+                <input type="submit" name="SaveButton" value="Save">
+              </form>"#
+            )
+        } else if request.starts_with(
+            "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7 ",
+        ) {
+            let request_body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body)
+                .unwrap_or_default();
+            if let Some((_, value)) = url::form_urlencoded::parse(request_body.as_bytes())
+                .find(|(name, _)| name == "myDevEditControl_html")
+            {
+                *body_html
+                    .lock()
+                    .unwrap_or_else(|err| panic!("body html lock poisoned while update: {err}")) =
+                    value.into_owned();
+            }
+            "<html><body>saved</body></html>".to_string()
+        } else {
+            "<html><body>unexpected request</body></html>".to_string()
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .unwrap_or_else(|err| panic!("test response write failed: {err}"));
     }
 
     fn write_fixture_response(stream: &mut std::net::TcpStream, request: &str) {

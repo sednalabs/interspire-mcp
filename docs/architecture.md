@@ -119,14 +119,26 @@ checkpoint read or write.
 Sensitive field reads use the MCP Toolkit sensitive-read posture and policy
 decision helper for the generic runtime/acknowledgement/boundary checks.
 Interspire-specific route selection and field allowlists stay in
-`admin_html.rs`. The current allowlist is intentionally limited to setup
-settings plus list sender/reply/bounce email fields; normal readback tools
-continue to redact values.
+`admin_html.rs`. Guarded form writes remain target-specific for campaign, list,
+user, and setup sections; normal readback tools continue to redact values.
 
 No-mutation Send proof uses the MCP Toolkit no-mutation-proof posture and
 Interspire route allowlists together. The generic toolkit metadata describes
 the proof boundary for MCP clients, while this repository owns the Step2-only
 route classifier, parser, queue/stat invariant checks, and negative send flags.
+
+Campaign body resolution uses the same approach for Interspire 8 editor
+screens: the initial campaign edit page is read first, and if body controls are
+absent the adapter can render the Step2 body form through an allowlisted
+no-save Step1 POST. Render artifacts and semantic template preview share that
+resolver. Template apply still uses a separate guarded campaign Complete/save
+route and the preview/apply plan-id model.
+
+Guarded form apply mutates the requested controls in a captured form snapshot,
+then replays the resulting current form state through the matched save route.
+Blank password controls are still omitted. This preserves ordinary unchanged
+fields such as subject lines and tracking checkboxes while keeping the requested
+change list, route classifier, plan id, and post-apply readback narrow.
 
 Guarded send apply tools deliberately sit outside the no-mutation proof family.
 They re-run the same campaign-body and Send wizard proof immediately, capture

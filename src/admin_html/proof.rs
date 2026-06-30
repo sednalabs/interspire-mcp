@@ -84,47 +84,21 @@ impl AdminHtmlClient {
         }
         self.login()?;
 
-        let step1_path = AdminReadPage::NewsletterEdit { id: campaign_id }.path();
-        let step1_html = self.get_allowed(&step1_path)?;
-        let mut report = campaign_body_audit_from_html(campaign_id, &step1_html)?;
-        if report.html_bytes > 0 || report.text_bytes > 0 {
-            return Ok(report);
+        let resolved = self.resolve_campaign_body_html(campaign_id)?;
+        let mut report = campaign_body_audit_from_html(campaign_id, &resolved.html)?;
+        if report.name.is_none() {
+            report.name = resolved
+                .step1_name
+                .map(|value| redact::redact_sensitive_text(&value));
         }
-
-        let Some(step2_path) = campaign_body_step2_action_path(campaign_id, &step1_html)? else {
+        if resolved.missing_step2 && report.html_bytes == 0 && report.text_bytes == 0 {
             report.warnings.push(
                 "campaign edit page did not expose Interspire 8 Step2 body form; body audit is incomplete"
                     .to_string(),
             );
-            return Ok(report);
-        };
-        let step2_url = safety::ensure_allowed_campaign_body_step2_post(
-            self.config.base_url.as_deref().unwrap_or_default(),
-            &step2_path,
-            campaign_id,
-        )?;
-        let mut post_pairs = campaign_body_step1_pairs(campaign_id, &step1_html)?;
-        append_csrf_pair_if_missing(&mut post_pairs, &step1_html);
-        let response = self
-            .proof_post_with_page_context(step2_url, &post_pairs, &step1_path)?
-            .send()
-            .map_err(|err| InterspireError::Http(err.to_string()))?;
-        if !response.status().is_success() {
-            return Err(InterspireError::Http(format!(
-                "campaign body no-save Step2 render returned HTTP {}",
-                response.status().as_u16()
-            )));
         }
-        let step2_html = response
-            .text()
-            .map_err(|err| InterspireError::Http(err.to_string()))?;
-        ensure_authenticated_html(&step2_html)?;
-
-        report = campaign_body_audit_from_html(campaign_id, &step2_html)?;
-        let step1_fields = parse_form_values_exact(&step1_html)?;
-        if report.name.is_none() {
-            report.name = first_present(&step1_fields, &["name"])
-                .map(|value| redact::redact_sensitive_text(&value));
+        if !resolved.used_step2 {
+            return Ok(report);
         }
         report.evidence.notes.push(
             "allowlisted Newsletter edit Step1 POST rendered Interspire 8 Step2 body page; Complete/save form was not posted"
@@ -159,17 +133,12 @@ impl AdminHtmlClient {
         }
 
         self.login()?;
-        let html = self.get_allowed(
-            &AdminReadPage::NewsletterEdit {
-                id: request.campaign_id,
-            }
-            .path(),
-        )?;
-        let parts = campaign_body_parts_from_html(&html)?;
+        let resolved = self.resolve_campaign_body_html(request.campaign_id)?;
+        let parts = campaign_body_parts_from_html(&resolved.html)?;
         let body_audit = campaign_body_audit_from_parts(request.campaign_id, parts.clone())?;
         if parts.html_body.trim().is_empty() {
             return Err(InterspireError::HtmlParse(
-                "campaign edit page did not expose a non-empty HTML body".to_string(),
+                "campaign body resolver did not expose a non-empty HTML body".to_string(),
             ));
         }
 
@@ -224,13 +193,74 @@ impl AdminHtmlClient {
                 "render artifacts are private local files; this tool does not send, schedule, or mutate the campaign".to_string(),
                 "open the preview_index_html artifact rather than treating artifact paths or hashes as visual signoff".to_string(),
             ],
-            evidence: admin_evidence(vec![
-                format!(
+            evidence: admin_evidence({
+                let mut notes = vec![format!(
                     "allowlisted Newsletter edit GET read for campaign {}",
                     request.campaign_id
-                ),
-                "persisted campaign HTML was written to private render artifacts".to_string(),
-            ]),
+                )];
+                if resolved.used_step2 {
+                    notes.push(
+                        "allowlisted Newsletter edit Step1 POST rendered Interspire 8 Step2 body page; Complete/save form was not posted"
+                            .to_string(),
+                    );
+                }
+                notes.push("persisted campaign HTML was written to private render artifacts".to_string());
+                notes
+            }),
+        })
+    }
+
+    pub(super) fn resolve_campaign_body_html(
+        &self,
+        campaign_id: u64,
+    ) -> Result<ResolvedCampaignBodyHtml, InterspireError> {
+        let step1_path = AdminReadPage::NewsletterEdit { id: campaign_id }.path();
+        let step1_html = self.get_allowed(&step1_path)?;
+        let step1_parts = campaign_body_parts_from_html(&step1_html)?;
+        if !step1_parts.html_body.trim().is_empty() || !step1_parts.text_body.trim().is_empty() {
+            return Ok(ResolvedCampaignBodyHtml {
+                html: step1_html,
+                used_step2: false,
+                step1_name: step1_parts.name,
+                missing_step2: false,
+            });
+        }
+
+        let Some(step2_path) = campaign_body_step2_action_path(campaign_id, &step1_html)? else {
+            return Ok(ResolvedCampaignBodyHtml {
+                html: step1_html,
+                used_step2: false,
+                step1_name: step1_parts.name,
+                missing_step2: true,
+            });
+        };
+        let step2_url = safety::ensure_allowed_campaign_body_step2_post(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &step2_path,
+            campaign_id,
+        )?;
+        let mut post_pairs = campaign_body_step1_pairs(campaign_id, &step1_html)?;
+        append_csrf_pair_if_missing(&mut post_pairs, &step1_html);
+        let response = self
+            .proof_post_with_page_context(step2_url, &post_pairs, &step1_path)?
+            .send()
+            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        if !response.status().is_success() {
+            return Err(InterspireError::Http(format!(
+                "campaign body no-save Step2 render returned HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        let step2_html = response
+            .text()
+            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        ensure_authenticated_html(&step2_html)?;
+
+        Ok(ResolvedCampaignBodyHtml {
+            html: step2_html,
+            used_step2: true,
+            step1_name: step1_parts.name,
+            missing_step2: false,
         })
     }
 
@@ -1304,6 +1334,14 @@ struct CampaignBodyParts {
     subject: Option<String>,
     html_body: String,
     text_body: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ResolvedCampaignBodyHtml {
+    pub(super) html: String,
+    pub(super) used_step2: bool,
+    pub(super) step1_name: Option<String>,
+    pub(super) missing_step2: bool,
 }
 
 fn campaign_body_parts_from_html(html: &str) -> Result<CampaignBodyParts, InterspireError> {
