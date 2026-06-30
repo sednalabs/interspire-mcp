@@ -204,9 +204,9 @@ or send action. A `xml_auth_error` means the XML username, XML token, XML API
 enablement, or admin-only policy should be fixed before relying on XML list or
 contact evidence.
 
-For real deployments, load credentials from environment variables or secret
-files outside the repository. Do not commit credentials, cookies, raw exports,
-saved admin HTML, provider payloads, or recipient artifacts.
+For real deployments, load credentials through environment variables populated
+outside the repository. Do not commit credentials, cookies, raw exports, saved
+admin HTML, provider payloads, or recipient artifacts.
 
 ## Configuration
 
@@ -225,7 +225,7 @@ surfaces that expose JavaScript CSRF tokens such as `IEM_CSRF_TOKEN`.
 The supported XML request profile is documented in
 [`docs/interspire-xml-compatibility.md`](docs/interspire-xml-compatibility.md).
 Use the Interspire XML API token for `INTERSPIRE_XML_TOKEN`; it is not the
-admin-login password. Keep a separate XML credentials file per Interspire
+admin-login password. Keep a separate XML credential set per Interspire
 instance so a legacy install and a new install cannot silently share the wrong
 token.
 
@@ -238,23 +238,16 @@ INTERSPIRE_ADMIN_PASSWORD='redacted-password'
 INTERSPIRE_HTML_LIST_ENRICH_LIMIT=25
 ```
 
-Secret-file variables:
-
-```bash
-INTERSPIRE_XML_CREDENTIALS_FILE=interspire-xml.env
-INTERSPIRE_ADMIN_CREDENTIALS_FILE=interspire-admin.env
-```
-
-Credential-file values are the documented file names only. The MCP reads them
-from `/run/secrets/interspire-mcp/`; absolute paths, nested paths, traversal
-paths, and alternate file names are ignored.
+The MCP reads credentials from direct environment variables only. If an
+installation stores secrets in files, keep that file handling in a private
+launcher or secrets manager that exports these environment variables before
+starting the MCP binary.
 
 Cloudflare Access service-token variables for protected admin/XML origins:
 
 ```bash
 INTERSPIRE_CF_ACCESS_CLIENT_ID='service-token-client-id'
 INTERSPIRE_CF_ACCESS_CLIENT_SECRET='redacted-service-token-secret'
-INTERSPIRE_CF_ACCESS_CREDENTIALS_FILE=interspire-cloudflare-access.env
 ```
 
 When both Access values are configured, the MCP attaches

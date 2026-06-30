@@ -16,30 +16,14 @@ INTERSPIRE_XML_TOKEN='redacted-token'
 `auto`. Use `6.2.3` for older installations and `8.x` for newer admin login
 surfaces that emit JavaScript CSRF tokens.
 
-Supported secret file:
-
-```bash
-INTERSPIRE_XML_CREDENTIALS_FILE=interspire-xml.env
-```
-
-Credential-file values are the documented file names only. The MCP reads them
-from the host-controlled `/run/secrets/interspire-mcp/` directory and ignores
-absolute paths, nested paths, traversal paths, and alternate file names.
-
-The XML secret file supports:
-
-```text
-INTERSPIRE_XML_ENDPOINT=https://example.invalid/xml.php
-INTERSPIRE_XML_USERNAME=xml-user
-INTERSPIRE_XML_TOKEN=redacted-token
-```
-
-Explicit environment variables take precedence over file values.
+The MCP reads credentials from direct environment variables only. If an
+installation stores these values in files, use a private launcher or secrets
+manager to export the variables before starting the MCP binary.
 
 `INTERSPIRE_XML_TOKEN` is the user's XML API token, not the admin-login
 password. Keep XML credentials separate from admin HTML credentials, and keep
-one XML credentials file per Interspire instance. Reusing a new-instance XML
-token against an older installation can make list/contact reads fail at the
+one XML credential set per Interspire instance. Reusing a new-instance XML token
+against an older installation can make list/contact reads fail at the
 authentication layer before the requested method is reached.
 
 The supported XML calls are documented in
@@ -56,55 +40,24 @@ INTERSPIRE_ADMIN_PASSWORD='redacted-password'
 INTERSPIRE_HTML_LIST_ENRICH_LIMIT=25
 ```
 
-Supported secret file:
-
-```bash
-INTERSPIRE_ADMIN_CREDENTIALS_FILE=interspire-admin.env
-```
-
-Credential-file values are the documented file names only. The MCP reads them
-from the host-controlled `/run/secrets/interspire-mcp/` directory and ignores
-absolute paths, nested paths, traversal paths, and alternate file names.
-
-The admin secret file supports key/value format:
-
-```text
-INTERSPIRE_ADMIN_BASE_URL=https://example.invalid/admin/
-INTERSPIRE_ADMIN_USERNAME=admin-user
-INTERSPIRE_ADMIN_PASSWORD=redacted-password
-```
-
-For compatibility with simple secret stores, it may also contain username on
-line 1 and password on line 2. Set `INTERSPIRE_ADMIN_BASE_URL` separately when
-using that format.
+The MCP reads credentials from direct environment variables only. If an
+installation stores these values in files, use a private launcher or secrets
+manager to export the variables before starting the MCP binary.
 
 ## Cloudflare Access Protected Origins
 
 If the Interspire admin or XML API is protected by Cloudflare Access, provide a
-service token through environment variables or a private secret file:
+service token through environment variables:
 
 ```bash
 INTERSPIRE_CF_ACCESS_CLIENT_ID='service-token-client-id'
 INTERSPIRE_CF_ACCESS_CLIENT_SECRET='redacted-service-token-secret'
-INTERSPIRE_CF_ACCESS_CREDENTIALS_FILE=interspire-cloudflare-access.env
 ```
 
-Credential-file values are the documented file names only. The MCP reads them
-from the host-controlled `/run/secrets/interspire-mcp/` directory and ignores
-absolute paths, nested paths, traversal paths, and alternate file names.
-
-The Access secret file supports:
-
-```text
-INTERSPIRE_CF_ACCESS_CLIENT_ID=service-token-client-id
-INTERSPIRE_CF_ACCESS_CLIENT_SECRET=redacted-service-token-secret
-```
-
-Explicit environment variables take precedence over file values. When both
-values are configured, all Interspire XML and admin HTML HTTP requests include
-the `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers. Status
-readback reports only the boolean `cloudflare_access_configured` value and does
-not expose the token values.
+When both values are configured, all Interspire XML and admin HTML HTTP
+requests include the `CF-Access-Client-Id` and `CF-Access-Client-Secret`
+headers. Status readback reports only the boolean
+`cloudflare_access_configured` value and does not expose the token values.
 
 ## Guarded Writes
 
