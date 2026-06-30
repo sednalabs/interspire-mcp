@@ -19,6 +19,8 @@ fn stdio_initializes_and_lists_tools() {
             "interspire_campaign_template_artifact_update_preview",
             "interspire_campaign_template_update_apply",
             "interspire_campaign_template_update_preview",
+            "interspire_campaign_test_send_apply",
+            "interspire_campaign_test_send_preview",
             "interspire_campaign_update_apply",
             "interspire_campaign_update_preview",
             "interspire_contact_import_preflight",

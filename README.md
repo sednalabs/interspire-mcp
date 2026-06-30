@@ -26,6 +26,8 @@ before newsletter work goes wrong:
   a cleaned CSV candidate without importing contacts?
 - Can we update EDM body fields, generate private render artifacts, and inspect
   desktop/mobile previews before sending?
+- Can we send a one-recipient Interspire campaign preview to a reviewer without
+  creating a seed list, while clearly marking what that preview does not prove?
 - Can we apply a seed or production send only after fresh proof, exact expected
   values, runtime send gates, and explicit acknowledgement?
 - When server setup requires a saved admin value, can we query one exact
@@ -109,6 +111,8 @@ than proprietary Interspire source snippets.
 | `interspire_campaign_copy_preview` | Read preview | Preview a guarded copy plan for creating a draft from a known campaign. |
 | `interspire_campaign_copy_apply` | Guarded apply | Apply one previously previewed campaign-copy plan and return the detected new draft id. |
 | `interspire_campaign_render_artifact` | Private artifact | Write private persisted-campaign render artifacts for native-browser screenshot inspection without returning raw HTML. |
+| `interspire_campaign_test_send_preview` | No-mutation proof | Preview a one-recipient Interspire campaign preview/test send without posting the SendPreview route. |
+| `interspire_campaign_test_send_apply` | Guarded test send | Apply one explicitly acknowledged campaign preview/test send to one recipient after exact preview digest, public preview subject, HTML hash, and send-control runtime gates. The digest also binds raw subject, text/preheader hashes, and the caller-supplied preview sender. |
 | `interspire_send_wizard_readback` | No-mutation proof | Render the Send wizard through the no-send proof boundary and verify queue/stat invariants, including Interspire 8 wizard shapes that echo recipient count rather than selected list ids. |
 | `interspire_seed_readiness_gate` | No-mutation proof | Combine campaign body audit and Send wizard readback into seed-readiness gates. |
 | `interspire_seed_send_apply` | Guarded send | Apply one explicitly acknowledged bounded seed send after immediate readiness proof and send-control runtime gates. |
@@ -387,6 +391,20 @@ writes private local files outside the repository. The response contains file
 paths, hashes, byte counts, and a native-browser next step; it does not return
 raw campaign HTML. Visual signoff still requires opening the preview artifact
 with a browser and inspecting desktop/mobile screenshots.
+
+`interspire_campaign_test_send_preview` and
+`interspire_campaign_test_send_apply` use Interspire's native campaign preview
+route for one explicit recipient. Preview reads the persisted campaign subject
+and body hashes, binds them to one exact recipient and the caller-supplied
+preview sender, verifies queue/stat invariants without sending, then returns a
+preview digest. Apply requires `INTERSPIRE_GUARDED_WRITES=1`,
+`INTERSPIRE_SEND_CONTROLS=1`, `acknowledge_test_send=true`, the exact preview
+digest, the preview report's public subject, and the exact preview HTML SHA-256 before
+posting `Newsletters/SendPreview`. It does not create seed lists, import
+contacts, schedule mail, trigger cron, or authorize production mail. It also
+does not prove list-specific unsubscribe, custom fields, contact merge
+behavior, tracking behavior, or production audience metadata; use a seed-list
+send when those properties are the proof target.
 
 `interspire_campaign_template_artifact_update_preview` and
 `interspire_campaign_template_artifact_update_apply` transfer campaign HTML from

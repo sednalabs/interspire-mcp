@@ -233,6 +233,19 @@ guarded writes:
   evidence while still treating the next form as a blocked send boundary.
 - `interspire_seed_readiness_gate` combines campaign-body and wizard evidence
   into review gates without approving a seed or production send.
+- `interspire_campaign_test_send_preview` and
+  `interspire_campaign_test_send_apply` use Interspire's native
+  `Newsletters/SendPreview` route for one explicit reviewer address. Preview
+  reads the persisted campaign subject and body hashes, binds them to the exact
+  recipient and caller-supplied preview sender, and verifies queue/stat
+  invariants without posting, then returns a preview digest.
+  Apply requires guarded writes, send controls, `acknowledge_test_send=true`,
+  the exact preview digest, the preview report's public subject, and the exact
+  preview HTML SHA-256. The digest binds the raw subject without returning it.
+  This path does not create lists, import contacts, schedule mail, trigger cron,
+  or authorize production mail. It also does not prove list-specific
+  unsubscribe, custom fields, contact merge behavior, tracking behavior, or
+  production audience metadata.
 - `interspire_seed_send_apply` repeats those gates immediately before posting
   the final send form and is bounded to an acknowledged seed-recipient count
   of 1-20.

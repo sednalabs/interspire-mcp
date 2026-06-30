@@ -73,21 +73,23 @@ pub use response::{
     CampaignTemplateArtifactUpdateApplyReport, CampaignTemplateArtifactUpdateApplyRequest,
     CampaignTemplateArtifactUpdatePreviewReport, CampaignTemplateArtifactUpdatePreviewRequest,
     CampaignTemplateUpdateApplyRequest, CampaignTemplateUpdatePreviewRequest,
-    CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactImportPreflightReport,
-    ContactImportPreflightRequest, ContactStateReport, ContactStateRequest, Evidence,
-    FormFieldChange, FormFieldDescriptor, FormFieldUpdate, GuardedWriteApplyReport,
-    GuardedWritePreviewReport, ListCreateApplyRequest, ListCreatePreviewRequest,
-    ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary, ListSummaryReport,
-    ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest, OciLedgerPreflightReport,
-    OciLedgerPreflightRequest, ProductionSendApplyReport, ProductionSendApplyRequest,
-    QueueControlAction, QueueControlApplyReport, QueueControlApplyRequest, QueueControlCandidate,
-    QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
-    QueueStatsReadbackRequest, RenderArtifact, SeedReadinessGate, SeedReadinessGateReport,
-    SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus,
-    SendReconciliationReport, SendWizardReadbackReport, SendWizardReadbackRequest,
-    SensitiveFieldDenial, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
-    SensitiveFieldTarget, SensitiveFieldValue, SensitiveToolMetadata, SettingsAuditReport,
-    SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest, SettingsSectionName,
+    CampaignTestSendApplyReport, CampaignTestSendApplyRequest, CampaignTestSendPreviewReport,
+    CampaignTestSendPreviewRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
+    ContactImportPreflightReport, ContactImportPreflightRequest, ContactStateReport,
+    ContactStateRequest, Evidence, FormFieldChange, FormFieldDescriptor, FormFieldUpdate,
+    GuardedWriteApplyReport, GuardedWritePreviewReport, ListCreateApplyRequest,
+    ListCreatePreviewRequest, ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary,
+    ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
+    OciLedgerPreflightReport, OciLedgerPreflightRequest, ProductionSendApplyReport,
+    ProductionSendApplyRequest, QueueControlAction, QueueControlApplyReport,
+    QueueControlApplyRequest, QueueControlCandidate, QueueControlPreviewReport,
+    QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
+    RenderArtifact, SeedReadinessGate, SeedReadinessGateReport, SeedReadinessGateRequest,
+    SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus, SendReconciliationReport,
+    SendWizardReadbackReport, SendWizardReadbackRequest, SensitiveFieldDenial,
+    SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SensitiveFieldTarget,
+    SensitiveFieldValue, SensitiveToolMetadata, SettingsAuditReport, SettingsAuditRequest,
+    SettingsInventoryReport, SettingsInventoryRequest, SettingsSectionName,
     SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
     UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
     UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
@@ -194,6 +196,14 @@ pub trait InterspireReadBackend: Send + Sync {
         &self,
         request: &CampaignRenderArtifactRequest,
     ) -> Result<CampaignRenderArtifactReport, InterspireError>;
+    fn campaign_test_send_preview(
+        &self,
+        request: &CampaignTestSendPreviewRequest,
+    ) -> Result<CampaignTestSendPreviewReport, InterspireError>;
+    fn campaign_test_send_apply(
+        &self,
+        request: &CampaignTestSendApplyRequest,
+    ) -> Result<CampaignTestSendApplyReport, InterspireError>;
     fn send_wizard_readback(
         &self,
         request: &SendWizardReadbackRequest,
@@ -416,6 +426,27 @@ impl InterspireMcpServer {
                             "render",
                             "artifact",
                             "native-browser",
+                        ],
+                    )),
+                ToolCapability::new("interspire_campaign_test_send_preview")
+                    .with_group("guarded-send")
+                    .with_risk_posture(GuardedActionPosture::no_mutation_proof())
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Preview a one-recipient Interspire campaign preview/test send without sending or mutating lists.",
+                        ["interspire", "campaign", "test", "preview", "send"],
+                    )),
+                ToolCapability::new("interspire_campaign_test_send_apply")
+                    .with_group("guarded-send")
+                    .with_read_only(false)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Apply one explicitly acknowledged Interspire campaign preview/test send to a single recipient.",
+                        [
+                            "interspire",
+                            "campaign",
+                            "test",
+                            "send",
+                            "apply",
+                            "guarded-send",
                         ],
                     )),
                 ToolCapability::new("interspire_send_wizard_readback")
@@ -1006,6 +1037,26 @@ impl InterspireMcpServer {
     }
 
     #[tool(
+        description = "Preview a one-recipient Interspire campaign preview/test send without sending, scheduling, queueing, importing contacts, or mutating lists."
+    )]
+    fn interspire_campaign_test_send_preview(
+        &self,
+        Parameters(request): Parameters<CampaignTestSendPreviewRequest>,
+    ) -> String {
+        response::tool_json(self.backend.campaign_test_send_preview(&request))
+    }
+
+    #[tool(
+        description = "Apply one explicitly acknowledged Interspire campaign preview/test send to a single recipient. Requires guarded writes, send controls, acknowledge_test_send=true, and exact subject/HTML hash from preview; this does not prove list-specific unsubscribe or merge behavior."
+    )]
+    fn interspire_campaign_test_send_apply(
+        &self,
+        Parameters(request): Parameters<CampaignTestSendApplyRequest>,
+    ) -> String {
+        response::tool_json(self.backend.campaign_test_send_apply(&request))
+    }
+
+    #[tool(
         description = "Render the send wizard through the no-send preview boundary and verify queue/stat invariants."
     )]
     fn interspire_send_wizard_readback(
@@ -1346,6 +1397,27 @@ fn with_interspire_tool_metadata(tool: Tool) -> Tool {
             )
             .with_meta(meta)
         }
+        "interspire_campaign_test_send_preview" => {
+            let meta = with_mcp_apps_no_mutation_proof_metadata(
+                Some(Meta::new()),
+                "read persisted campaign content and prepare one-recipient preview-send proof without posting the preview route",
+            );
+            tool.with_annotations(
+                ToolAnnotations::with_title("Campaign test-send preview")
+                    .read_only(true)
+                    .destructive(false)
+                    .idempotent(true)
+                    .open_world(false),
+            )
+            .with_meta(meta)
+        }
+        "interspire_campaign_test_send_apply" => tool.with_annotations(
+            ToolAnnotations::with_title("Campaign test-send apply")
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
         "interspire_seed_send_apply" => tool.with_annotations(
             ToolAnnotations::with_title("Seed send apply")
                 .read_only(false)
@@ -1514,6 +1586,20 @@ mod tests {
             _request: &CampaignRenderArtifactRequest,
         ) -> Result<CampaignRenderArtifactReport, InterspireError> {
             Ok(CampaignRenderArtifactReport::fixture())
+        }
+
+        fn campaign_test_send_preview(
+            &self,
+            _request: &CampaignTestSendPreviewRequest,
+        ) -> Result<CampaignTestSendPreviewReport, InterspireError> {
+            Ok(CampaignTestSendPreviewReport::fixture())
+        }
+
+        fn campaign_test_send_apply(
+            &self,
+            _request: &CampaignTestSendApplyRequest,
+        ) -> Result<CampaignTestSendApplyReport, InterspireError> {
+            Ok(CampaignTestSendApplyReport::fixture())
         }
 
         fn send_wizard_readback(
@@ -1744,6 +1830,8 @@ mod tests {
                 "interspire_campaign_template_artifact_update_preview",
                 "interspire_campaign_template_update_apply",
                 "interspire_campaign_template_update_preview",
+                "interspire_campaign_test_send_apply",
+                "interspire_campaign_test_send_preview",
                 "interspire_campaign_update_apply",
                 "interspire_campaign_update_preview",
                 "interspire_contact_import_preflight",

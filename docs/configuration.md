@@ -79,8 +79,9 @@ Current public behavior:
 - `INTERSPIRE_QUEUE_WRITE_CONTROLS=1` enables guarded queue cancel/delete apply.
 - `INTERSPIRE_FORM_WRITE_CONTROLS=1` enables guarded campaign, list, user,
   non-secret settings, list-create, and campaign-copy apply.
-- `INTERSPIRE_SEND_CONTROLS=1` enables explicitly acknowledged bounded seed
-  sends through `interspire_seed_send_apply`.
+- `INTERSPIRE_SEND_CONTROLS=1` enables explicitly acknowledged one-recipient
+  campaign preview/test sends through `interspire_campaign_test_send_apply`
+  and bounded seed sends through `interspire_seed_send_apply`.
 - `INTERSPIRE_PRODUCTION_SEND_CONTROLS=1` additionally enables
   `interspire_production_send_apply`, which requires exact expected recipient
   count, From, Reply-To, subject, HTML SHA-256, and confirmation phrase.

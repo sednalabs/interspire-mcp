@@ -23,22 +23,23 @@ use crate::{
         CampaignBodyAuditReport, CampaignBodyAuditRequest, CampaignCopyApplyReport,
         CampaignCopyApplyRequest, CampaignCopyPreviewReport, CampaignCopyPreviewRequest,
         CampaignReadbackReport, CampaignReadbackRequest, CampaignRenderArtifactReport,
-        CampaignRenderArtifactRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
-        ContactImportPreflightReport, ContactImportPreflightRequest, ContactStateReport,
-        ContactStateRequest, GuardedWriteApplyReport, GuardedWritePreviewReport,
-        ListCreateApplyRequest, ListCreatePreviewRequest, ListOwnerReadbackReport,
-        ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest,
-        ListUpdatePreviewRequest, ProductionSendApplyReport, ProductionSendApplyRequest,
-        QueueControlApplyReport, QueueControlApplyRequest, QueueControlPreviewReport,
-        QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
-        SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport,
-        SeedSendApplyRequest, SendWizardReadbackReport, SendWizardReadbackRequest,
-        SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SettingsAuditReport,
-        SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
-        SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
-        UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
-        UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
-        XmlAuthProbeReport, XmlAuthProbeRequest,
+        CampaignRenderArtifactRequest, CampaignTestSendApplyReport, CampaignTestSendApplyRequest,
+        CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest, CampaignUpdateApplyRequest,
+        CampaignUpdatePreviewRequest, ContactImportPreflightReport, ContactImportPreflightRequest,
+        ContactStateReport, ContactStateRequest, GuardedWriteApplyReport,
+        GuardedWritePreviewReport, ListCreateApplyRequest, ListCreatePreviewRequest,
+        ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest,
+        ListUpdateApplyRequest, ListUpdatePreviewRequest, ProductionSendApplyReport,
+        ProductionSendApplyRequest, QueueControlApplyReport, QueueControlApplyRequest,
+        QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
+        QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
+        SeedSendApplyReport, SeedSendApplyRequest, SendWizardReadbackReport,
+        SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
+        SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport,
+        SettingsInventoryRequest, SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest,
+        StatusReport, StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest,
+        UserUpdateApplyRequest, UserUpdatePreviewRequest, WarmupAudienceReadinessReport,
+        WarmupAudienceReadinessRequest, XmlAuthProbeReport, XmlAuthProbeRequest,
     },
     xml_api::XmlApiClient,
     InterspireReadBackend,
@@ -167,6 +168,21 @@ impl InterspireReadBackend for LiveInterspireBackend {
     ) -> Result<CampaignRenderArtifactReport, InterspireError> {
         let html = self.html_client()?;
         html.campaign_render_artifact(request)
+    }
+
+    fn campaign_test_send_preview(
+        &self,
+        request: &CampaignTestSendPreviewRequest,
+    ) -> Result<CampaignTestSendPreviewReport, InterspireError> {
+        let html = self.html_client()?;
+        html.campaign_test_send_preview(request)
+    }
+
+    fn campaign_test_send_apply(
+        &self,
+        request: &CampaignTestSendApplyRequest,
+    ) -> Result<CampaignTestSendApplyReport, InterspireError> {
+        self.campaign_test_send_apply_impl(request)
     }
 
     fn send_wizard_readback(

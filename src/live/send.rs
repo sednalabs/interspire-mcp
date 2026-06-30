@@ -3,12 +3,22 @@ use crate::{
     error::InterspireError,
     guarded_write, oci_ledger,
     response::{
-        OciLedgerPreflightReport, ProductionSendApplyReport, ProductionSendApplyRequest,
-        SeedSendApplyReport, SeedSendApplyRequest,
+        CampaignTestSendApplyReport, CampaignTestSendApplyRequest, OciLedgerPreflightReport,
+        ProductionSendApplyReport, ProductionSendApplyRequest, SeedSendApplyReport,
+        SeedSendApplyRequest,
     },
 };
 
 impl LiveInterspireBackend {
+    pub(super) fn campaign_test_send_apply_impl(
+        &self,
+        request: &CampaignTestSendApplyRequest,
+    ) -> Result<CampaignTestSendApplyReport, InterspireError> {
+        guarded_write::require_send_controls_enabled(&self.config.guarded_writes)?;
+        let html = self.html_client()?;
+        html.campaign_test_send_apply(request)
+    }
+
     pub(super) fn seed_send_apply_impl(
         &self,
         request: &SeedSendApplyRequest,

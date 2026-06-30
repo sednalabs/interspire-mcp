@@ -4,23 +4,25 @@ use interspire_mcp::{
     AudienceHygieneExportStatusRequest, CampaignBodyAuditReport, CampaignBodyAuditRequest,
     CampaignCopyApplyReport, CampaignCopyApplyRequest, CampaignCopyPreviewReport,
     CampaignCopyPreviewRequest, CampaignReadbackReport, CampaignReadbackRequest,
-    CampaignRenderArtifactReport, CampaignRenderArtifactRequest, CampaignUpdateApplyRequest,
-    CampaignUpdatePreviewRequest, ContactImportPreflightReport, ContactImportPreflightRequest,
-    ContactStateReport, ContactStateRequest, Evidence, GuardedWriteApplyReport,
-    GuardedWritePreviewReport, InterspireError, InterspireMcpServer, InterspireReadBackend,
-    ListCreateApplyRequest, ListCreatePreviewRequest, ListOwnerReadbackReport,
-    ListOwnerReadbackRequest, ListSummary, ListSummaryReport, ListSummaryRequest,
-    ListUpdateApplyRequest, ListUpdatePreviewRequest, ProductionSendApplyReport,
-    ProductionSendApplyRequest, QueueControlApplyReport, QueueControlApplyRequest,
-    QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
-    QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
-    SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus, SendWizardReadbackReport,
-    SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
-    SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
-    SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
-    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
-    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
-    XmlAuthProbeReport, XmlAuthProbeRequest, DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
+    CampaignRenderArtifactReport, CampaignRenderArtifactRequest, CampaignTestSendApplyReport,
+    CampaignTestSendApplyRequest, CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest,
+    CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactImportPreflightReport,
+    ContactImportPreflightRequest, ContactStateReport, ContactStateRequest, Evidence,
+    GuardedWriteApplyReport, GuardedWritePreviewReport, InterspireError, InterspireMcpServer,
+    InterspireReadBackend, ListCreateApplyRequest, ListCreatePreviewRequest,
+    ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary, ListSummaryReport,
+    ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
+    ProductionSendApplyReport, ProductionSendApplyRequest, QueueControlApplyReport,
+    QueueControlApplyRequest, QueueControlPreviewReport, QueueControlPreviewRequest,
+    QueueStatsReadbackReport, QueueStatsReadbackRequest, SeedReadinessGateReport,
+    SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus,
+    SendWizardReadbackReport, SendWizardReadbackRequest, SensitiveFieldQueryReport,
+    SensitiveFieldQueryRequest, SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport,
+    SettingsInventoryRequest, SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest,
+    StatusReport, StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest,
+    UserUpdateApplyRequest, UserUpdatePreviewRequest, WarmupAudienceReadinessReport,
+    WarmupAudienceReadinessRequest, XmlAuthProbeReport, XmlAuthProbeRequest,
+    DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
 };
 use mcp_toolkit_testing::response_safety_contract::{
     assert_json_bool_field_false, assert_payload_excludes_substrings,
@@ -131,6 +133,20 @@ impl InterspireReadBackend for ContractBackend {
         _request: &CampaignRenderArtifactRequest,
     ) -> Result<CampaignRenderArtifactReport, InterspireError> {
         Ok(CampaignRenderArtifactReport::fixture())
+    }
+
+    fn campaign_test_send_preview(
+        &self,
+        _request: &CampaignTestSendPreviewRequest,
+    ) -> Result<CampaignTestSendPreviewReport, InterspireError> {
+        Ok(CampaignTestSendPreviewReport::fixture())
+    }
+
+    fn campaign_test_send_apply(
+        &self,
+        _request: &CampaignTestSendApplyRequest,
+    ) -> Result<CampaignTestSendApplyReport, InterspireError> {
+        Ok(CampaignTestSendApplyReport::fixture())
     }
 
     fn send_wizard_readback(
@@ -761,6 +777,69 @@ fn campaign_render_artifact_contract_points_to_private_visual_artifacts() {
 }
 
 #[test]
+fn campaign_test_send_preview_contract_is_no_send_and_warns_about_limitations() {
+    let report = ContractBackend
+        .campaign_test_send_preview(&CampaignTestSendPreviewRequest {
+            campaign_id: 7,
+            recipient_email: "reviewer@example.invalid".to_string(),
+            from_preview_email: "sender@example.invalid".to_string(),
+            max_queue_rows: Some(25),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    assert!(report.ok);
+    assert!(!report.send_performed);
+    assert!(report.queue_unchanged);
+    assert!(report.stats_unchanged);
+    assert_json_bool_field_false(&report, "production_send_authorized");
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("do not prove list-specific unsubscribe")));
+    assert_payload_excludes_substrings(
+        &report,
+        &[
+            "reviewer@example.invalid",
+            "sender@example.invalid",
+            "<html",
+        ],
+    );
+}
+
+#[test]
+fn campaign_test_send_apply_contract_is_single_preview_send_only_and_redacted() {
+    let report = ContractBackend
+        .campaign_test_send_apply(&CampaignTestSendApplyRequest {
+            campaign_id: 7,
+            recipient_email: "reviewer@example.invalid".to_string(),
+            from_preview_email: "sender@example.invalid".to_string(),
+            expected_preview_digest:
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            expected_subject: "Launch subject".to_string(),
+            expected_html_sha256:
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            max_queue_rows: Some(25),
+            acknowledge_test_send: true,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    assert!(report.ok);
+    assert!(report.sent);
+    assert!(report.queue_unchanged);
+    assert!(report.stats_unchanged);
+    assert_json_bool_field_false(&report, "production_send_authorized");
+    assert_payload_excludes_substrings(
+        &report,
+        &[
+            "reviewer@example.invalid",
+            "sender@example.invalid",
+            "bounces@example.invalid",
+            "<html",
+        ],
+    );
+}
+
+#[test]
 fn contact_import_preflight_contract_is_aggregate_only() {
     let report = ContractBackend
         .contact_import_preflight(&ContactImportPreflightRequest {
@@ -913,7 +992,7 @@ fn production_send_apply_contract_requires_explicit_authorization_and_redacts() 
 fn server_can_be_constructed_with_fixture_backend() {
     let server = InterspireMcpServer::with_backend(Arc::new(ContractBackend))
         .unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(server.tool_schema_snapshot().len(), 42);
+    assert_eq!(server.tool_schema_snapshot().len(), 44);
 }
 
 #[test]

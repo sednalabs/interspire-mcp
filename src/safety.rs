@@ -179,6 +179,23 @@ pub fn ensure_allowed_campaign_body_step2_post(
     Ok(url)
 }
 
+pub fn ensure_allowed_campaign_test_send_post(
+    base_url: &str,
+    relative_path: &str,
+) -> Result<Url, InterspireError> {
+    let base = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let base = normalize_admin_base(base);
+    let url = base.join(relative_path).map_err(|err| {
+        InterspireError::Safety(format!("invalid campaign test-send path: {err}"))
+    })?;
+
+    ensure_admin_base_scope(&base, &url)?;
+    ensure_admin_front_controller_path(&base, &url)?;
+    classify_allowed_campaign_test_send_post(&url)?;
+    Ok(url)
+}
+
 pub fn ensure_allowed_guarded_send_final_post(
     base_url: &str,
     relative_path: &str,
@@ -547,6 +564,55 @@ pub fn classify_allowed_campaign_body_step2_post(
         return Err(InterspireError::Safety(
             "campaign body proof post id does not match the requested campaign".to_string(),
         ));
+    }
+
+    Ok(())
+}
+
+pub fn classify_allowed_campaign_test_send_post(url: &Url) -> Result<(), InterspireError> {
+    if url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_none_or(|segment| segment != "index.php")
+    {
+        return Err(InterspireError::Safety(
+            "campaign test-send post path is not index.php".to_string(),
+        ));
+    }
+
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    ensure_no_duplicate_query_keys(&pairs)?;
+    ensure_only_query_keys(
+        &pairs,
+        &[
+            "Page",
+            "Action",
+            "token",
+            "csrf",
+            "csrfToken",
+            "csrf_token",
+            "_token",
+        ],
+    )?;
+
+    let page = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Page"))
+        .map(|(_, value)| value.to_string());
+    let action = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Action"))
+        .map(|(_, value)| value.to_string());
+
+    if !matches!(page.as_deref(), Some("Newsletters")) {
+        return Err(InterspireError::Safety(
+            "campaign test-send post must target the Newsletters page".to_string(),
+        ));
+    }
+    if !matches!(action.as_deref(), Some("SendPreview")) {
+        return Err(InterspireError::Safety(format!(
+            "campaign test-send post action is not SendPreview: {action:?}"
+        )));
     }
 
     Ok(())
@@ -1669,6 +1735,35 @@ mod tests {
         ] {
             assert!(
                 ensure_allowed_campaign_body_step2_post(base_url, path, 9).is_err(),
+                "{path} should be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_only_campaign_test_send_preview_post() {
+        let base_url = "https://example.test/admin/";
+        let route = ensure_allowed_campaign_test_send_post(
+            base_url,
+            "index.php?Page=Newsletters&Action=SendPreview&csrfToken=abc",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            route.as_str(),
+            "https://example.test/admin/index.php?Page=Newsletters&Action=SendPreview&csrfToken=abc"
+        );
+
+        for path in [
+            "index.php?Page=Send&Action=SendPreview",
+            "index.php?Page=Newsletters&Action=SendPreview&id=9",
+            "index.php?Page=Newsletters&Action=SendPreview&PreviewEmail=person%40example.invalid",
+            "index.php?Page=Newsletters&Action=Edit&id=9",
+            "xml.php?Page=Newsletters&Action=SendPreview",
+            "../index.php?Page=Newsletters&Action=SendPreview",
+            "https://evil.example/index.php?Page=Newsletters&Action=SendPreview",
+        ] {
+            assert!(
+                ensure_allowed_campaign_test_send_post(base_url, path).is_err(),
                 "{path} should be blocked"
             );
         }

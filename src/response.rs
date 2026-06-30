@@ -17,6 +17,7 @@ mod seed_send;
 mod send_outcome;
 mod send_wizard;
 mod template;
+mod test_send;
 
 pub use audience::*;
 pub use common::*;
@@ -30,6 +31,7 @@ pub use seed_send::*;
 pub use send_outcome::*;
 pub use send_wizard::*;
 pub use template::*;
+pub use test_send::*;
 
 pub fn sensitive_field_query_metadata() -> SensitiveToolMetadata {
     let meta = mcp_toolkit_core::mcp_apps::with_mcp_apps_sensitive_output_metadata(

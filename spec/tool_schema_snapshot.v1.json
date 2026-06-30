@@ -688,6 +688,126 @@
       "name": "interspire_campaign_template_update_preview"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Campaign test-send apply"
+      },
+      "description": "Apply one explicitly acknowledged Interspire campaign preview/test send to a single recipient. Requires guarded writes, send controls, acknowledge_test_send=true, and exact subject/HTML hash from preview; this does not prove list-specific unsubscribe or merge behavior.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "acknowledge_test_send": {
+            "type": "boolean"
+          },
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_html_sha256": {
+            "type": "string"
+          },
+          "expected_preview_digest": {
+            "type": "string"
+          },
+          "expected_subject": {
+            "type": "string"
+          },
+          "from_preview_email": {
+            "type": "string"
+          },
+          "max_queue_rows": {
+            "default": null,
+            "format": "uint",
+            "maximum": 100,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "recipient_email": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "recipient_email",
+          "from_preview_email",
+          "expected_preview_digest",
+          "expected_subject",
+          "expected_html_sha256",
+          "acknowledge_test_send"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_test_send_apply"
+    },
+    {
+      "_meta": {
+        "approval_required": false,
+        "mutation_prohibited": true,
+        "openai/widgetAccessible": false,
+        "operation_class": "no_mutation_proof",
+        "production_action_authorized": false,
+        "proof_boundary": "read persisted campaign content and prepare one-recipient preview-send proof without posting the preview route",
+        "securitySchemes": [
+          {
+            "type": "noauth"
+          }
+        ],
+        "ui": {
+          "visibility": [
+            "model"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Campaign test-send preview"
+      },
+      "description": "Preview a one-recipient Interspire campaign preview/test send without sending, scheduling, queueing, importing contacts, or mutating lists.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "from_preview_email": {
+            "type": "string"
+          },
+          "max_queue_rows": {
+            "default": null,
+            "format": "uint",
+            "maximum": 100,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "recipient_email": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "recipient_email",
+          "from_preview_email"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_test_send_preview"
+    },
+    {
       "description": "Apply a guarded campaign content or sender metadata edit.",
       "inputSchema": {
         "$defs": {

@@ -4,18 +4,20 @@ use interspire_mcp::{
     AudienceHygieneExportStatusRequest, CampaignBodyAuditReport, CampaignBodyAuditRequest,
     CampaignCopyApplyReport, CampaignCopyApplyRequest, CampaignCopyPreviewReport,
     CampaignCopyPreviewRequest, CampaignReadbackReport, CampaignReadbackRequest,
-    CampaignRenderArtifactReport, CampaignRenderArtifactRequest, CampaignUpdateApplyRequest,
-    CampaignUpdatePreviewRequest, ContactImportPreflightReport, ContactImportPreflightRequest,
-    ContactStateReport, ContactStateRequest, GuardedWriteApplyReport, GuardedWritePreviewReport,
-    InterspireError, InterspireMcpServer, InterspireReadBackend, ListCreateApplyRequest,
-    ListCreatePreviewRequest, ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport,
-    ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
-    ProductionSendApplyReport, ProductionSendApplyRequest, QueueControlApplyReport,
-    QueueControlApplyRequest, QueueControlPreviewReport, QueueControlPreviewRequest,
-    QueueStatsReadbackReport, QueueStatsReadbackRequest, SeedReadinessGateReport,
-    SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest, SendWizardReadbackReport,
-    SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
-    SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
+    CampaignRenderArtifactReport, CampaignRenderArtifactRequest, CampaignTestSendApplyReport,
+    CampaignTestSendApplyRequest, CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest,
+    CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactImportPreflightReport,
+    ContactImportPreflightRequest, ContactStateReport, ContactStateRequest,
+    GuardedWriteApplyReport, GuardedWritePreviewReport, InterspireError, InterspireMcpServer,
+    InterspireReadBackend, ListCreateApplyRequest, ListCreatePreviewRequest,
+    ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest,
+    ListUpdateApplyRequest, ListUpdatePreviewRequest, ProductionSendApplyReport,
+    ProductionSendApplyRequest, QueueControlApplyReport, QueueControlApplyRequest,
+    QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
+    QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
+    SeedSendApplyReport, SeedSendApplyRequest, SendWizardReadbackReport, SendWizardReadbackRequest,
+    SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SettingsAuditReport,
+    SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
     SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
     UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
     UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
@@ -128,6 +130,20 @@ impl InterspireReadBackend for FixtureBackend {
         _request: &CampaignRenderArtifactRequest,
     ) -> Result<CampaignRenderArtifactReport, InterspireError> {
         Ok(CampaignRenderArtifactReport::fixture())
+    }
+
+    fn campaign_test_send_preview(
+        &self,
+        _request: &CampaignTestSendPreviewRequest,
+    ) -> Result<CampaignTestSendPreviewReport, InterspireError> {
+        Ok(CampaignTestSendPreviewReport::fixture())
+    }
+
+    fn campaign_test_send_apply(
+        &self,
+        _request: &CampaignTestSendApplyRequest,
+    ) -> Result<CampaignTestSendApplyReport, InterspireError> {
+        Ok(CampaignTestSendApplyReport::fixture())
     }
 
     fn send_wizard_readback(

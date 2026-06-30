@@ -7,11 +7,12 @@ use crate::{
     private_artifacts, redact,
     response::{
         AdminSessionProbeReport, CampaignBodyAuditReport, CampaignRenderArtifactReport,
-        CampaignRenderArtifactRequest, OciLedgerPreflightReport, ProductionSendApplyReport,
-        ProductionSendApplyRequest, RenderArtifact, SeedReadinessGate, SeedReadinessGateReport,
-        SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus,
-        SendReconciliationReport, SendWizardReadbackReport, SendWizardReadbackRequest,
-        MAX_SEED_SEND_RECIPIENTS, PRODUCTION_SEND_CONFIRMATION_PHRASE,
+        CampaignRenderArtifactRequest, CampaignTestSendApplyReport, CampaignTestSendApplyRequest,
+        CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest, OciLedgerPreflightReport,
+        ProductionSendApplyReport, ProductionSendApplyRequest, RenderArtifact, SeedReadinessGate,
+        SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport,
+        SeedSendApplyRequest, SendApplyStatus, SendReconciliationReport, SendWizardReadbackReport,
+        SendWizardReadbackRequest, MAX_SEED_SEND_RECIPIENTS, PRODUCTION_SEND_CONFIRMATION_PHRASE,
     },
     safety::{self, AdminReadPage},
 };
@@ -227,6 +228,334 @@ impl AdminHtmlClient {
                 notes
             }),
         })
+    }
+
+    pub fn campaign_test_send_preview(
+        &self,
+        request: &CampaignTestSendPreviewRequest,
+    ) -> Result<CampaignTestSendPreviewReport, InterspireError> {
+        validate_single_preview_email(&request.recipient_email, "recipient_email")?;
+        validate_single_preview_email(&request.from_preview_email, "from_preview_email")?;
+        if !self.config.is_configured() {
+            return Ok(CampaignTestSendPreviewReport {
+                ok: false,
+                configured: false,
+                campaign_id: request.campaign_id,
+                recipient_email_redacted: redact::redact_email(&request.recipient_email),
+                from_preview_email_redacted: redact::redact_email(&request.from_preview_email),
+                preview_digest: None,
+                subject: None,
+                html_sha256: None,
+                html_bytes: 0,
+                text_bytes: 0,
+                preheader_present: false,
+                route_fingerprint: None,
+                campaign_body: CampaignBodyAuditReport::fixture(),
+                send_performed: false,
+                queue_rows_before: 0,
+                queue_rows_after: 0,
+                stats_rows_before: 0,
+                stats_rows_after: 0,
+                queue_unchanged: true,
+                stats_unchanged: true,
+                production_send_authorized: false,
+                warnings: vec![
+                    "admin HTML fallback is not configured; no campaign test-send preview attempted"
+                        .to_string(),
+                ],
+                evidence: admin_evidence(vec!["no request sent".to_string()]),
+            });
+        }
+
+        self.login()?;
+        let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
+        let queue_before = parse_table_rows(
+            &self.get_allowed(&AdminReadPage::Schedule.path())?,
+            max_rows,
+        )?;
+        let stats_before =
+            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let resolved = self.resolve_campaign_body_html(request.campaign_id)?;
+        let parts = campaign_body_parts_from_html(&resolved.html)?;
+        let campaign_body = campaign_body_audit_from_parts(request.campaign_id, parts.clone())?;
+        let has_applyable_html = campaign_test_send_has_applyable_html(&parts, &campaign_body);
+        let preview_digest = has_applyable_html.then(|| {
+            let preheader_sha256 = optional_nonempty_sha256(parts.preheader.as_deref());
+            campaign_test_send_digest(
+                request.campaign_id,
+                &request.recipient_email,
+                &request.from_preview_email,
+                parts.subject.as_deref().unwrap_or_default(),
+                campaign_body.html_sha256.as_deref().unwrap_or_default(),
+                campaign_body.text_sha256.as_deref(),
+                preheader_sha256.as_deref(),
+            )
+        });
+        let queue_after = parse_table_rows(
+            &self.get_allowed(&AdminReadPage::Schedule.path())?,
+            max_rows,
+        )?;
+        let stats_after =
+            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let route = safety::ensure_allowed_campaign_test_send_post(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            "index.php?Page=Newsletters&Action=SendPreview",
+        )?;
+        let queue_unchanged = queue_before == queue_after;
+        let stats_unchanged = stats_before == stats_after;
+        let mut warnings = campaign_test_send_limitations();
+        if parts.html_body.trim().is_empty() && parts.text_body.trim().is_empty() {
+            warnings.push("campaign test-send preview found no HTML or text body".to_string());
+        }
+        if !has_applyable_html {
+            warnings.push(
+                "campaign test-send apply requires a non-empty HTML body and HTML SHA-256; text-only campaigns are not applyable by this tool"
+                    .to_string(),
+            );
+        }
+        if !queue_unchanged {
+            warnings.push(
+                "Schedule queue rows changed during campaign test-send preview proof".to_string(),
+            );
+        }
+        if !stats_unchanged {
+            warnings.push("Stats rows changed during campaign test-send preview proof".to_string());
+        }
+
+        Ok(CampaignTestSendPreviewReport {
+            ok: campaign_body.ok && has_applyable_html && queue_unchanged && stats_unchanged,
+            configured: true,
+            campaign_id: request.campaign_id,
+            recipient_email_redacted: redact::redact_email(&request.recipient_email),
+            from_preview_email_redacted: redact::redact_email(&request.from_preview_email),
+            preview_digest,
+            subject: campaign_body.subject.clone(),
+            html_sha256: campaign_body.html_sha256.clone(),
+            html_bytes: campaign_body.html_bytes,
+            text_bytes: campaign_body.text_bytes,
+            preheader_present: parts
+                .preheader
+                .as_deref()
+                .is_some_and(|value| !value.is_empty()),
+            route_fingerprint: Some(route_fingerprint(route.as_str())),
+            campaign_body,
+            send_performed: false,
+            queue_rows_before: queue_before.len(),
+            queue_rows_after: queue_after.len(),
+            stats_rows_before: stats_before.len(),
+            stats_rows_after: stats_after.len(),
+            queue_unchanged,
+            stats_unchanged,
+            production_send_authorized: false,
+            warnings,
+            evidence: admin_evidence(vec![
+                "persisted campaign body was read privately for Interspire SendPreview parameters"
+                    .to_string(),
+                "native Interspire Newsletters SendPreview route was classified but not posted"
+                    .to_string(),
+                "Schedule and Stats rows were compared before/after preview proof".to_string(),
+            ]),
+        })
+    }
+
+    pub fn campaign_test_send_apply(
+        &self,
+        request: &CampaignTestSendApplyRequest,
+    ) -> Result<CampaignTestSendApplyReport, InterspireError> {
+        validate_single_preview_email(&request.recipient_email, "recipient_email")?;
+        validate_single_preview_email(&request.from_preview_email, "from_preview_email")?;
+        if !self.config.is_configured() {
+            return Ok(CampaignTestSendApplyReport::denied_with_configured(
+                request,
+                "admin HTML fallback is not configured; no campaign test-send attempted",
+                false,
+            ));
+        }
+        if !request.acknowledge_test_send {
+            return Ok(CampaignTestSendApplyReport::denied(
+                request,
+                "campaign test send refused because acknowledge_test_send was not true",
+            ));
+        }
+
+        self.login()?;
+        let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
+        let queue_before = parse_table_rows(
+            &self.get_allowed(&AdminReadPage::Schedule.path())?,
+            max_rows,
+        )?;
+        let stats_before =
+            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let step1_path = AdminReadPage::NewsletterEdit {
+            id: request.campaign_id,
+        }
+        .path();
+        let resolved = self.resolve_campaign_body_html(request.campaign_id)?;
+        let parts = campaign_body_parts_from_html(&resolved.html)?;
+        let campaign_body = campaign_body_audit_from_parts(request.campaign_id, parts.clone())?;
+        let raw_subject = parts.subject.clone().unwrap_or_default();
+        let html_sha256 = campaign_body.html_sha256.clone().unwrap_or_default();
+        let preheader_sha256 = optional_nonempty_sha256(parts.preheader.as_deref());
+        let preview_digest = (!html_sha256.is_empty()).then(|| {
+            campaign_test_send_digest(
+                request.campaign_id,
+                &request.recipient_email,
+                &request.from_preview_email,
+                &raw_subject,
+                &html_sha256,
+                campaign_body.text_sha256.as_deref(),
+                preheader_sha256.as_deref(),
+            )
+        });
+        let mut warnings = campaign_test_send_limitations();
+        if !expected_public_subject_matches(
+            campaign_body.subject.as_deref(),
+            &request.expected_subject,
+        ) {
+            warnings.push(
+                "campaign test send refused because subject did not match expected_subject"
+                    .to_string(),
+            );
+        }
+        if campaign_body.html_sha256.as_deref() != Some(request.expected_html_sha256.as_str()) {
+            warnings.push(
+                "campaign test send refused because HTML SHA-256 did not match expected_html_sha256"
+                    .to_string(),
+            );
+        }
+        if preview_digest.as_deref() != Some(request.expected_preview_digest.as_str()) {
+            warnings.push(
+                "campaign test send refused because preview digest did not match expected_preview_digest"
+                    .to_string(),
+            );
+        }
+        if !campaign_test_send_has_applyable_html(&parts, &campaign_body) {
+            warnings.push(
+                "campaign test send refused because campaign HTML body or HTML SHA-256 was missing"
+                    .to_string(),
+            );
+        }
+        if warnings
+            .iter()
+            .any(|warning| warning.contains("refused because"))
+        {
+            let queue_after = parse_table_rows(
+                &self.get_allowed(&AdminReadPage::Schedule.path())?,
+                max_rows,
+            )?;
+            let stats_after =
+                parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+            let queue_unchanged = queue_before == queue_after;
+            let stats_unchanged = stats_before == stats_after;
+            if !queue_unchanged {
+                warnings.push(
+                    "Schedule queue rows changed during campaign test-send refusal proof"
+                        .to_string(),
+                );
+            }
+            if !stats_unchanged {
+                warnings
+                    .push("Stats rows changed during campaign test-send refusal proof".to_string());
+            }
+            return Ok(campaign_test_send_report(
+                request,
+                false,
+                None,
+                None,
+                campaign_body,
+                preview_digest,
+                parts
+                    .preheader
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty()),
+                queue_before.len(),
+                queue_after.len(),
+                stats_before.len(),
+                stats_after.len(),
+                queue_unchanged,
+                stats_unchanged,
+                warnings,
+                false,
+            ));
+        }
+
+        let mut post_pairs = vec![
+            ("subject".to_string(), raw_subject),
+            ("myDevEditControl_html".to_string(), parts.html_body.clone()),
+            ("TextContent".to_string(), parts.text_body.clone()),
+            ("PreviewEmail".to_string(), request.recipient_email.clone()),
+            (
+                "FromPreviewEmail".to_string(),
+                request.from_preview_email.clone(),
+            ),
+            (
+                "PreHeader".to_string(),
+                parts.preheader.clone().unwrap_or_default(),
+            ),
+            ("id".to_string(), request.campaign_id.to_string()),
+        ];
+        append_csrf_pair_if_missing(&mut post_pairs, &resolved.html);
+        let post_url = safety::ensure_allowed_campaign_test_send_post(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            "index.php?Page=Newsletters&Action=SendPreview",
+        )?;
+        let response = self
+            .proof_post_with_page_context(post_url, &post_pairs, &step1_path)?
+            .send()
+            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        let status_code = response.status().as_u16();
+        if !response.status().is_success() {
+            return Err(InterspireError::Http(format!(
+                "campaign test-send route returned HTTP {status_code}"
+            )));
+        }
+        let response_html = response
+            .text()
+            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        ensure_authenticated_html(&response_html)?;
+
+        let queue_after = parse_table_rows(
+            &self.get_allowed(&AdminReadPage::Schedule.path())?,
+            max_rows,
+        )?;
+        let stats_after =
+            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let queue_unchanged = queue_before == queue_after;
+        let stats_unchanged = stats_before == stats_after;
+        if !queue_unchanged {
+            warnings.push("Schedule queue rows changed during campaign test send".to_string());
+        }
+        if !stats_unchanged {
+            warnings.push("Stats rows changed during campaign test send".to_string());
+        }
+        let message = preview_send_response_message(&response_html);
+        let sent =
+            preview_send_response_success(&response_html) && queue_unchanged && stats_unchanged;
+        if !sent {
+            warnings
+                .push("Interspire did not return a successful preview-send response".to_string());
+        }
+
+        Ok(campaign_test_send_report(
+            request,
+            sent,
+            Some(status_code),
+            message,
+            campaign_body,
+            preview_digest,
+            parts
+                .preheader
+                .as_deref()
+                .is_some_and(|value| !value.is_empty()),
+            queue_before.len(),
+            queue_after.len(),
+            stats_before.len(),
+            stats_after.len(),
+            queue_unchanged,
+            stats_unchanged,
+            warnings,
+            true,
+        ))
     }
 
     pub(super) fn resolve_campaign_body_html(
@@ -1543,6 +1872,162 @@ fn list_ids_warning(
     ))
 }
 
+fn validate_single_preview_email(value: &str, field_name: &str) -> Result<(), InterspireError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || !trimmed.contains('@')
+        || trimmed.contains(',')
+        || trimmed.contains(';')
+        || trimmed.split_whitespace().count() != 1
+    {
+        return Err(InterspireError::Safety(format!(
+            "{field_name} must be exactly one email address"
+        )));
+    }
+    Ok(())
+}
+
+fn expected_public_subject_matches(
+    current_public_subject: Option<&str>,
+    expected_subject: &str,
+) -> bool {
+    current_public_subject.unwrap_or_default() == expected_subject
+}
+
+fn campaign_test_send_limitations() -> Vec<String> {
+    vec![
+        "Interspire preview sends do not prove list-specific unsubscribe, custom fields, contact merge fields, or production audience behavior".to_string(),
+        "Use a seed-list send when the required proof is production-path unsubscribe/tracking/list metadata behavior".to_string(),
+    ]
+}
+
+fn campaign_test_send_has_applyable_html(
+    parts: &CampaignBodyParts,
+    campaign_body: &CampaignBodyAuditReport,
+) -> bool {
+    !parts.html_body.trim().is_empty() && campaign_body.html_sha256.is_some()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn campaign_test_send_report(
+    request: &CampaignTestSendApplyRequest,
+    sent: bool,
+    post_status_code: Option<u16>,
+    response_message: Option<String>,
+    campaign_body: CampaignBodyAuditReport,
+    preview_digest: Option<String>,
+    preheader_present: bool,
+    queue_rows_before: usize,
+    queue_rows_after: usize,
+    stats_rows_before: usize,
+    stats_rows_after: usize,
+    queue_unchanged: bool,
+    stats_unchanged: bool,
+    warnings: Vec<String>,
+    route_posted: bool,
+) -> CampaignTestSendApplyReport {
+    let evidence_notes = if route_posted {
+        vec![
+            "campaign test-send apply requires INTERSPIRE_GUARDED_WRITES=1 and INTERSPIRE_SEND_CONTROLS=1".to_string(),
+            "current persisted campaign subject/body hashes, exact recipient, and caller-supplied preview sender matched apply expectations before posting Interspire SendPreview".to_string(),
+            "native Interspire Newsletters SendPreview route was posted for one explicit recipient".to_string(),
+            "Schedule and Stats rows were compared before/after the preview send".to_string(),
+        ]
+    } else {
+        vec![
+            "campaign test-send apply requires INTERSPIRE_GUARDED_WRITES=1 and INTERSPIRE_SEND_CONTROLS=1".to_string(),
+            "current persisted campaign subject/body hashes, exact recipient, and caller-supplied preview sender were checked before apply refusal".to_string(),
+            "no Interspire SendPreview route was posted".to_string(),
+            "Schedule and Stats rows were compared after campaign-body proof before apply refusal".to_string(),
+        ]
+    };
+    CampaignTestSendApplyReport {
+        ok: sent,
+        configured: true,
+        sent,
+        campaign_id: request.campaign_id,
+        recipient_email_redacted: redact::redact_email(&request.recipient_email),
+        from_preview_email_redacted: redact::redact_email(&request.from_preview_email),
+        preview_digest,
+        subject: campaign_body.subject.clone(),
+        html_sha256: campaign_body.html_sha256.clone(),
+        html_bytes: campaign_body.html_bytes,
+        text_bytes: campaign_body.text_bytes,
+        preheader_present,
+        post_status_code,
+        response_message: response_message.map(|message| redact::redact_sensitive_text(&message)),
+        campaign_body,
+        queue_rows_before,
+        queue_rows_after,
+        stats_rows_before,
+        stats_rows_after,
+        queue_unchanged,
+        stats_unchanged,
+        production_send_authorized: false,
+        warnings: warnings
+            .into_iter()
+            .map(|warning| redact::redact_sensitive_text(&warning))
+            .collect(),
+        evidence: admin_evidence(evidence_notes),
+    }
+}
+
+fn preview_send_response_message(html: &str) -> Option<String> {
+    let text = compact_text(
+        &Html::parse_document(html)
+            .root_element()
+            .text()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("a preview has been sent to the email address") && text.len() <= 500 {
+        return Some("Interspire reported that the preview email was sent.".to_string());
+    }
+    if lower.contains("a preview couldn't be sent")
+        || lower.contains("no preview email has been sent")
+        || lower.contains("no email address was supplied")
+    {
+        return Some("Interspire reported that the preview email was not sent.".to_string());
+    }
+    (!text.is_empty()).then(|| truncate("[unrecognized Interspire preview response]", 400))
+}
+
+fn preview_send_response_success(html: &str) -> bool {
+    let text = compact_text(
+        &Html::parse_document(html)
+            .root_element()
+            .text()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let lower = text.to_ascii_lowercase();
+    lower.contains("a preview has been sent to the email address") && text.len() <= 500
+}
+
+fn campaign_test_send_digest(
+    campaign_id: u64,
+    recipient_email: &str,
+    from_preview_email: &str,
+    subject: &str,
+    html_sha256: &str,
+    text_sha256: Option<&str>,
+    preheader_sha256: Option<&str>,
+) -> String {
+    let normalized = format!(
+        "campaign_id={campaign_id}\nrecipient={}\nfrom={}\nsubject={subject}\nhtml_sha256={html_sha256}\ntext_sha256={}\npreheader_sha256={}\n",
+        recipient_email.trim().to_ascii_lowercase(),
+        from_preview_email.trim().to_ascii_lowercase(),
+        text_sha256.unwrap_or("<empty>"),
+        preheader_sha256.unwrap_or("<empty>"),
+    );
+    sha256_hex(&normalized)
+}
+
+fn optional_nonempty_sha256(value: Option<&str>) -> Option<String> {
+    value.filter(|value| !value.is_empty()).map(sha256_hex)
+}
+
 fn campaign_body_audit_from_html(
     campaign_id: u64,
     html: &str,
@@ -1554,6 +2039,7 @@ fn campaign_body_audit_from_html(
 struct CampaignBodyParts {
     name: Option<String>,
     subject: Option<String>,
+    preheader: Option<String>,
     html_body: String,
     text_body: String,
 }
@@ -1592,12 +2078,13 @@ fn campaign_body_parts_from_html(html: &str) -> Result<CampaignBodyParts, Inters
         ],
     )
     .unwrap_or_default();
-    let name = first_present(&fields, &["name"]).map(|value| redact::redact_sensitive_text(&value));
-    let subject =
-        first_present(&fields, &["subject"]).map(|value| redact::redact_sensitive_text(&value));
+    let name = first_present(&fields, &["name"]);
+    let subject = first_present(&fields, &["subject"]);
+    let preheader = first_present(&fields, &["preheader"]);
     Ok(CampaignBodyParts {
         name,
         subject,
+        preheader,
         html_body,
         text_body,
     })
@@ -1634,8 +2121,12 @@ fn campaign_body_audit_from_parts(
         ok: true,
         configured: true,
         campaign_id,
-        name: parts.name,
-        subject: parts.subject,
+        name: parts
+            .name
+            .map(|value| redact::redact_sensitive_text(&value)),
+        subject: parts
+            .subject
+            .map(|value| redact::redact_sensitive_text(&value)),
         html_sha256: (!html_body.is_empty()).then(|| sha256_hex(&html_body)),
         html_bytes: html_body.len(),
         text_sha256: (!text_body.is_empty()).then(|| sha256_hex(&text_body)),
@@ -1726,18 +2217,18 @@ fn render_preview_index(
 </body>
 </html>
 "#,
-        html_escape(
+        html_escape(&redact::redact_sensitive_text(
             parts
                 .subject
                 .as_deref()
-                .unwrap_or("Interspire campaign preview")
-        ),
-        html_escape(
+                .unwrap_or("Interspire campaign preview"),
+        )),
+        html_escape(&redact::redact_sensitive_text(
             parts
                 .subject
                 .as_deref()
-                .unwrap_or("Interspire campaign preview")
-        ),
+                .unwrap_or("Interspire campaign preview"),
+        )),
         frames
     ))
 }
@@ -2487,11 +2978,18 @@ fn sha256_hex(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_csrf_pair_if_missing, campaign_body_audit_from_html, campaign_body_step1_pairs,
-        campaign_body_step2_action_path, csrf_pair, guarded_send_final_form_post,
-        guarded_send_popup_url, list_ids_warning, parse_send_wizard_final_page,
-        recipient_count_marker, selected_or_hidden_list_ids, send_step2_action_path,
-        transport_failure_reason,
+        append_csrf_pair_if_missing, campaign_body_audit_from_html, campaign_body_parts_from_html,
+        campaign_body_step1_pairs, campaign_body_step2_action_path, campaign_test_send_digest,
+        campaign_test_send_has_applyable_html, campaign_test_send_report, csrf_pair,
+        expected_public_subject_matches, guarded_send_final_form_post, guarded_send_popup_url,
+        list_ids_warning, optional_nonempty_sha256, parse_send_wizard_final_page,
+        preview_send_response_success, recipient_count_marker, selected_or_hidden_list_ids,
+        send_step2_action_path, sha256_hex, transport_failure_reason,
+        validate_single_preview_email,
+    };
+    use crate::{
+        redact,
+        response::{CampaignBodyAuditReport, CampaignTestSendApplyRequest},
     };
 
     #[test]
@@ -2539,6 +3037,158 @@ mod tests {
         assert_eq!(report.missing_alt_image_count, 0);
         assert!(!serialized.contains("myDevEditControl_html"));
         assert!(!serialized.contains("%%UNSUBSCRIBELINK%%"));
+    }
+
+    #[test]
+    fn campaign_test_send_preview_requires_html_hash_not_text_only_body() {
+        let html = r#"
+            <form action="index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7">
+              <input name="subject" value="Subject">
+              <textarea name="myDevEditControl_text">Plain text %%UNSUBSCRIBELINK%%</textarea>
+            </form>
+        "#;
+        let parts = campaign_body_parts_from_html(html).expect("campaign body parts");
+        let report =
+            super::campaign_body_audit_from_parts(7, parts.clone()).expect("campaign body audit");
+
+        assert!(parts.html_body.is_empty());
+        assert!(report.html_sha256.is_none());
+        assert!(!campaign_test_send_has_applyable_html(&parts, &report));
+    }
+
+    #[test]
+    fn campaign_test_send_digest_binds_text_and_preheader_hashes() {
+        let text_sha256 = sha256_hex("plain text");
+        let preheader_sha256 = optional_nonempty_sha256(Some("preheader"));
+        let digest = campaign_test_send_digest(
+            7,
+            "recipient@example.invalid",
+            "sender@example.invalid",
+            "Subject",
+            &sha256_hex("<p>html</p>"),
+            Some(&text_sha256),
+            preheader_sha256.as_deref(),
+        );
+        let changed_text = campaign_test_send_digest(
+            7,
+            "recipient@example.invalid",
+            "sender@example.invalid",
+            "Subject",
+            &sha256_hex("<p>html</p>"),
+            Some(&sha256_hex("changed text")),
+            preheader_sha256.as_deref(),
+        );
+        let changed_preheader = campaign_test_send_digest(
+            7,
+            "recipient@example.invalid",
+            "sender@example.invalid",
+            "Subject",
+            &sha256_hex("<p>html</p>"),
+            Some(&text_sha256),
+            optional_nonempty_sha256(Some("changed preheader")).as_deref(),
+        );
+
+        assert_ne!(digest, changed_text);
+        assert_ne!(digest, changed_preheader);
+    }
+
+    #[test]
+    fn campaign_test_send_report_uses_row_equality_not_row_counts() {
+        let request = CampaignTestSendApplyRequest {
+            campaign_id: 7,
+            recipient_email: "recipient@example.invalid".to_string(),
+            from_preview_email: "sender@example.invalid".to_string(),
+            expected_preview_digest: "0".repeat(64),
+            expected_subject: "Subject".to_string(),
+            expected_html_sha256: "0".repeat(64),
+            max_queue_rows: Some(25),
+            acknowledge_test_send: true,
+        };
+        let mut campaign_body = CampaignBodyAuditReport::fixture();
+        campaign_body.campaign_id = request.campaign_id;
+
+        let report = campaign_test_send_report(
+            &request,
+            false,
+            Some(200),
+            Some("Interspire reported that the preview email was sent.".to_string()),
+            campaign_body,
+            Some(request.expected_preview_digest.clone()),
+            false,
+            1,
+            1,
+            1,
+            1,
+            false,
+            false,
+            vec!["Schedule queue rows changed during campaign test send".to_string()],
+            true,
+        );
+
+        assert!(!report.ok);
+        assert!(!report.queue_unchanged);
+        assert!(!report.stats_unchanged);
+        assert_eq!(report.queue_rows_before, report.queue_rows_after);
+        assert_eq!(report.stats_rows_before, report.stats_rows_after);
+    }
+
+    #[test]
+    fn campaign_test_send_expected_subject_accepts_public_preview_value() {
+        let raw_subject = "Update from editor@example.invalid";
+        let public_subject = redact::redact_sensitive_text(raw_subject);
+
+        assert!(expected_public_subject_matches(
+            Some(&public_subject),
+            &public_subject
+        ));
+        assert!(!expected_public_subject_matches(
+            Some(&public_subject),
+            raw_subject
+        ));
+        assert!(!expected_public_subject_matches(
+            Some(&public_subject),
+            "Different subject"
+        ));
+    }
+
+    #[test]
+    fn preview_test_send_email_guard_requires_exactly_one_address() {
+        assert!(validate_single_preview_email("person@example.invalid", "recipient_email").is_ok());
+        for value in [
+            "",
+            "person",
+            "one@example.invalid,two@example.invalid",
+            "one@example.invalid;two@example.invalid",
+            "one@example.invalid two@example.invalid",
+        ] {
+            assert!(
+                validate_single_preview_email(value, "recipient_email").is_err(),
+                "{value:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_send_response_parser_distinguishes_success_from_failure() {
+        assert!(preview_send_response_success(
+            "<html><body>A preview has been sent to the email address [redacted].</body></html>"
+        ));
+        let echoed_page = format!(
+            "<html><body>{} A preview has been sent to the email address [redacted].</body></html>",
+            "campaign body ".repeat(80)
+        );
+        assert!(!preview_send_response_success(&echoed_page));
+        for html in [
+            "<html><body>Preview email was not sent.</body></html>",
+            "<html><body>Permission denied.</body></html>",
+            "<html><body>Could not send preview email.</body></html>",
+            "<html><body>Send preview form</body></html>",
+        ] {
+            assert!(
+                !preview_send_response_success(html),
+                "{html:?} should not be treated as success"
+            );
+        }
     }
 
     #[test]
