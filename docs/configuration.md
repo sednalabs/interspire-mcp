@@ -32,6 +32,11 @@ INTERSPIRE_XML_TOKEN=redacted-token
 
 Explicit environment variables take precedence over file values.
 
+The supported XML calls are documented in
+[`interspire-xml-compatibility.md`](interspire-xml-compatibility.md). In
+particular, list summary reads use `lists/GetLists`; subscriber reads use the
+`subscribers` request type.
+
 ## Admin HTML
 
 ```bash

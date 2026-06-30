@@ -129,7 +129,7 @@ pub(crate) fn begin_export(
         candidates: BTreeMap::new(),
         warnings,
         evidence_notes: vec![
-            "user/GetLists XML API read".to_string(),
+            "lists/GetLists XML API read".to_string(),
             "checkpointed subscribers/GetSubscribers XML API read with bounded shard/query steps"
                 .to_string(),
             "private checkpoint state written outside repository; aggregate MCP response only"

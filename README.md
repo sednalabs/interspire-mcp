@@ -189,6 +189,8 @@ INTERSPIRE_XML_TOKEN='redacted-token'
 `INTERSPIRE_VERSION` accepts `auto`, `6.2.3`, and `8.x`. The default is
 `auto`. Set `6.2.3` for older installations and `8.x` for newer admin login
 surfaces that expose JavaScript CSRF tokens such as `IEM_CSRF_TOKEN`.
+The supported XML request profile is documented in
+[`docs/interspire-xml-compatibility.md`](docs/interspire-xml-compatibility.md).
 
 Admin HTML fallback variables:
 

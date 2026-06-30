@@ -280,7 +280,7 @@ fn contract_list_summary(request: &ListSummaryRequest) -> ListSummaryReport {
     let original_count = lists.len();
     let max_lists = request.max_lists.clamp(1, HARD_LIST_READ_LIMIT);
     let mut warnings = Vec::new();
-    let mut notes = vec!["user/GetLists XML API read".to_string()];
+    let mut notes = vec!["lists/GetLists XML API read".to_string()];
 
     if original_count > max_lists {
         lists.truncate(max_lists);

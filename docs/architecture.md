@@ -41,7 +41,9 @@ narrow source-authority map over a split operational control plane:
 The generalized pattern lives in
 [`mcp-toolkit-rs`](https://github.com/sednalabs/mcp-toolkit-rs/blob/main/docs/legacy-system-adapter-pattern.md).
 Product-specific route allowlists, Interspire XML semantics, admin-form
-parsers, and operator wording stay in this repository.
+parsers, and operator wording stay in this repository. The supported XML
+request/response profile is maintained in
+[`interspire-xml-compatibility.md`](interspire-xml-compatibility.md).
 
 ## Module Boundaries
 
@@ -101,7 +103,8 @@ important operational state:
 - Send wizard proof state for selected campaign/list readiness, with the final
   editable form parsed but not submitted by proof tools.
 
-Interspire 8 compatibility note: subscriber XML methods have two layers of
+Interspire 8 compatibility note: list summary XML uses `lists/GetLists`.
+Subscriber XML methods have two layers of
 parameter semantics. The XML security layer checks a top-level `listid`, while
 some underlying subscriber APIs still accept legacy method parameters such as
 `listids` or nested `searchinfo`. Curated XML reads include both forms only

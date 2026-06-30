@@ -53,7 +53,7 @@ impl XmlApiClient {
     }
 
     pub fn get_lists(&self) -> Result<Vec<ListSummary>, InterspireError> {
-        let xml = self.request_xml("user", "GetLists", "")?;
+        let xml = self.request_xml("lists", "GetLists", "")?;
         parse_get_lists_response(&xml)
     }
 
@@ -582,6 +582,8 @@ mod tests {
         let request = captured[0].to_ascii_lowercase();
         assert!(request.contains("cf-access-client-id: access-client\r\n"));
         assert!(request.contains("cf-access-client-secret: access-secret\r\n"));
+        assert!(request.contains("<requesttype>lists</requesttype>"));
+        assert!(request.contains("<requestmethod>getlists</requestmethod>"));
     }
 
     #[test]
@@ -596,7 +598,8 @@ mod tests {
 
     #[test]
     fn empty_details_are_serialized_as_non_empty_for_legacy_iem() {
-        let xml = build_xml_request("admin", "token", "user", "GetLists", "");
+        let xml = build_xml_request("admin", "token", "lists", "GetLists", "");
+        assert!(xml.contains("<requesttype>lists</requesttype>"));
         assert!(xml.contains("<details> </details>"));
     }
 

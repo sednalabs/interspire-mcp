@@ -56,7 +56,7 @@ impl AdminReadPage {
             Self::ListEdit { id } => format!("index.php?Page=Lists&Action=Edit&id={id}"),
             Self::SubscriberExactSearch { list_id } => {
                 format!(
-                    "index.php?Page=Subscribers&Action=Manage&Lists%5B%5D={list_id}&emailaddress=redacted%40example.invalid&search_rule=exact"
+                    "index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D={list_id}&emailaddress=redacted%40example.invalid&search_rule=exact"
                 )
             }
             Self::Settings { tab } => format!("index.php?Page=Settings&Tab={tab}"),
@@ -236,6 +236,7 @@ pub fn classify_allowed_admin_get(url: &Url) -> Result<AdminReadPage, Interspire
                 &[
                     "Page",
                     "Action",
+                    "SubAction",
                     "List",
                     "Lists",
                     "Lists[]",
@@ -247,6 +248,7 @@ pub fn classify_allowed_admin_get(url: &Url) -> Result<AdminReadPage, Interspire
             let list_id = subscriber_search_list_id(&pairs)?;
             let _ = subscriber_exact_search_email(&pairs)?;
             ensure_exact_subscriber_search_rule(&pairs)?;
+            ensure_exact_subscriber_search_subaction(&pairs)?;
             Ok(AdminReadPage::SubscriberExactSearch { list_id })
         }
         (Some("Settings"), None) => {
@@ -1004,6 +1006,26 @@ fn ensure_exact_subscriber_search_rule(
     ))
 }
 
+fn ensure_exact_subscriber_search_subaction(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+) -> Result<(), InterspireError> {
+    let Some(subaction) = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("SubAction"))
+        .map(|(_, value)| value.trim().to_ascii_lowercase())
+    else {
+        return Ok(());
+    };
+
+    if matches!(subaction.as_str(), "step3" | "simplesearch") {
+        return Ok(());
+    }
+
+    Err(InterspireError::Safety(
+        "subscriber exact search SubAction must be Step3 or SimpleSearch".to_string(),
+    ))
+}
+
 fn optional_numeric_query_value(
     pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
     key_name: &str,
@@ -1105,6 +1127,20 @@ mod tests {
         assert_eq!(
             classify_allowed_admin_get(&url(
                 "index.php?Page=Subscribers&Action=Manage&Lists%5B%5D=42&emailaddress=person%40example.test&search_rule=exact"
+            ))
+            .ok(),
+            Some(AdminReadPage::SubscriberExactSearch { list_id: 42 })
+        );
+        assert_eq!(
+            classify_allowed_admin_get(&url(
+                "index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D=42&emailaddress=person%40example.test&search_rule=exact"
+            ))
+            .ok(),
+            Some(AdminReadPage::SubscriberExactSearch { list_id: 42 })
+        );
+        assert_eq!(
+            classify_allowed_admin_get(&url(
+                "index.php?Page=Subscribers&Action=Manage&SubAction=SimpleSearch&Lists%5B%5D=42&emailaddress=person%40example.test&search_rule=exact"
             ))
             .ok(),
             Some(AdminReadPage::SubscriberExactSearch { list_id: 42 })
@@ -1380,6 +1416,7 @@ mod tests {
             "index.php?Page=Subscribers&Action=Manage&Search=person%40example.test",
             "index.php?Page=Subscribers&Action=Manage&Lists=1&Search=*%40example.test",
             "index.php?Page=Subscribers&Action=Manage&Lists=1&emailaddress=person%40example.test&search_rule=includes",
+            "index.php?Page=Subscribers&Action=Manage&SubAction=Delete&Lists%5B%5D=1&emailaddress=person%40example.test&search_rule=exact",
             "index.php?Page=Subscribers&Action=Manage&Lists=1&Lists=2&Search=person%40example.test",
             "index.php?Page=Subscribers&Action=Manage&Lists=1&Search=person%40example.test&Action=Delete",
             "index.php?Page=Settings&Tab=3",

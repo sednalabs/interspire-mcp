@@ -136,7 +136,7 @@ impl LiveInterspireBackend {
                 source: "environment".to_string(),
                 notes: vec![
                     "stdio MCP only".to_string(),
-                    "XML API read methods are user/GetLists, subscribers/IsSubscriberOnList, and subscribers/GetSubscribers for the guarded audience hygiene export".to_string(),
+                    "XML API read methods are lists/GetLists, subscribers/IsSubscriberOnList, and subscribers/GetSubscribers for the guarded audience hygiene export".to_string(),
                     "admin HTML fallback is limited to login plus explicitly allowlisted GET read pages".to_string(),
                     "send wizard proof is limited to an allowlisted no-send Step2 render and queue/stat invariant readback".to_string(),
                     "campaign render artifacts write private local preview files for native-browser screenshots; they do not mutate Interspire".to_string(),
@@ -157,7 +157,7 @@ impl LiveInterspireBackend {
     ) -> Result<ListSummaryReport, InterspireError> {
         let max_lists = cap_usize(request.max_lists, HARD_LIST_READ_LIMIT);
         let mut warnings = Vec::new();
-        let mut notes = vec!["user/GetLists XML API read".to_string()];
+        let mut notes = vec!["lists/GetLists XML API read".to_string()];
         let xml = self.xml_client()?;
         if !xml.configured() {
             if let Some(mut report) = self.html_list_summary_fallback(max_lists)? {
@@ -200,7 +200,7 @@ impl LiveInterspireBackend {
                         redact::redact_sensitive_text(&err.to_string())
                     )],
                     evidence: xml_api::xml_evidence(vec![
-                        "user/GetLists XML API read attempted".to_string()
+                        "lists/GetLists XML API read attempted".to_string()
                     ]),
                 });
             }
@@ -377,14 +377,14 @@ impl LiveInterspireBackend {
                         redact::redact_sensitive_text(&err.to_string())
                     )],
                     evidence: xml_api::xml_evidence(vec![
-                        "user/GetLists XML API read attempted".to_string()
+                        "lists/GetLists XML API read attempted".to_string()
                     ]),
                 });
             }
         };
 
         let mut warnings = Vec::new();
-        let mut notes = vec!["user/GetLists XML API read".to_string()];
+        let mut notes = vec!["lists/GetLists XML API read".to_string()];
         apply_list_result_cap(
             &mut lists,
             max_lists,

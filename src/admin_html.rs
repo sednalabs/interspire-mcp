@@ -1294,6 +1294,12 @@ fn subscriber_exact_search_paths(list_id: u64, email: &str) -> Vec<String> {
     let email = url::form_urlencoded::byte_serialize(email.trim().as_bytes()).collect::<String>();
     vec![
         format!(
+            "index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D={list_id}&emailaddress={email}&search_rule=exact"
+        ),
+        format!(
+            "index.php?Page=Subscribers&Action=Manage&SubAction=SimpleSearch&Lists%5B%5D={list_id}&emailaddress={email}&search_rule=exact"
+        ),
+        format!(
             "index.php?Page=Subscribers&Action=Manage&Lists%5B%5D={list_id}&emailaddress={email}&search_rule=exact"
         ),
         format!(
@@ -2331,7 +2337,34 @@ mod tests {
         assert!(!rendered.contains("person@example.test"));
         assert!(server.requests().iter().any(|request| {
             request.starts_with(
-                "GET /admin/index.php?Page=Subscribers&Action=Manage&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+                "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+            )
+        }));
+    }
+
+    #[test]
+    fn subscriber_exact_search_client_falls_back_to_simple_search() {
+        let server = spawn_contact_state_simple_search_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = client
+            .contact_state_readback("person@example.test", 7)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.found_on_list, Some(true));
+        let rendered =
+            serde_json::to_string(&report.evidence_notes).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!rendered.contains("person@example.test"));
+        let requests = server.requests();
+        assert!(requests.iter().any(|request| {
+            request.starts_with(
+                "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+            )
+        }));
+        assert!(requests.iter().any(|request| {
+            request.starts_with(
+                "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=SimpleSearch&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
             )
         }));
     }
@@ -2647,6 +2680,14 @@ mod tests {
     }
 
     fn spawn_contact_state_fixture_server() -> TestAdminServer {
+        spawn_contact_state_fixture_server_with(false)
+    }
+
+    fn spawn_contact_state_simple_search_fixture_server() -> TestAdminServer {
+        spawn_contact_state_fixture_server_with(true)
+    }
+
+    fn spawn_contact_state_fixture_server_with(simple_search_only: bool) -> TestAdminServer {
         let listener =
             TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
         listener
@@ -2677,14 +2718,19 @@ mod tests {
                                 panic!("test requests lock poisoned while push: {err}")
                             })
                             .push(request.clone());
-                        write_contact_state_fixture_response(&mut stream, &request);
+                        write_contact_state_fixture_response(
+                            &mut stream,
+                            &request,
+                            simple_search_only,
+                        );
+                        let expected_requests = if simple_search_only { 3 } else { 2 };
                         if thread_requests
                             .lock()
                             .unwrap_or_else(|err| {
                                 panic!("test requests lock poisoned while count: {err}")
                             })
                             .len()
-                            >= 2
+                            >= expected_requests
                         {
                             break;
                         }
@@ -2804,12 +2850,35 @@ mod tests {
             .unwrap_or_else(|err| panic!("test response write failed: {err}"));
     }
 
-    fn write_contact_state_fixture_response(stream: &mut std::net::TcpStream, request: &str) {
+    fn write_contact_state_fixture_response(
+        stream: &mut std::net::TcpStream,
+        request: &str,
+        simple_search_only: bool,
+    ) {
         let body = if request.starts_with("GET /admin/index.php?Page=Lists ") {
             "<html><body><a href=\"index.php?Page=Lists&Action=Edit&id=7\">List</a></body></html>"
-        } else if request.starts_with(
-            "GET /admin/index.php?Page=Subscribers&Action=Manage&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+        } else if simple_search_only && request.starts_with(
+            "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
         ) {
+            r#"<table>
+                <tr><th>Email</th><th>Status</th><th>Action</th></tr>
+                <tr>
+                  <td>other@example.test</td>
+                  <td>Active Confirmed</td>
+                  <td><a href="index.php?Page=Subscribers&Action=Edit&id=99">Edit</a></td>
+                </tr>
+              </table>"#
+        } else if (simple_search_only
+            && request.starts_with(
+                "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=SimpleSearch&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+            ))
+            || (!simple_search_only
+                && (request.starts_with(
+                    "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+                ) || request.starts_with(
+                    "GET /admin/index.php?Page=Subscribers&Action=Manage&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+                )))
+        {
             r#"<table>
                 <tr><th>Email</th><th>Status</th><th>Action</th></tr>
                 <tr>
