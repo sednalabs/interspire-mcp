@@ -1074,13 +1074,11 @@ fn summarize_field_value(name: &str, value: &str) -> String {
     let lower = name.to_ascii_lowercase();
     let trimmed = value.trim();
     if is_large_content_like_field(&lower) {
-        let excerpt = compact_text(&trimmed.chars().take(80).collect::<String>());
         let digest = Sha256::digest(trimmed.as_bytes());
         return format!(
-            "[content len={} sha256={} excerpt=\"{}\"]",
+            "[content len={} sha256={}]",
             trimmed.len(),
             &hex::encode(digest)[..12],
-            redact::redact_sensitive_text(&excerpt)
         );
     }
 
@@ -2249,6 +2247,20 @@ mod tests {
             Some("b***@example.com")
         );
         assert!(!format!("{metadata:?}").contains("Newsroom"));
+    }
+
+    #[test]
+    fn content_field_summaries_never_include_body_excerpts() {
+        let summary = summarize_field_value(
+            "html_body",
+            "<html><body>PRIVATE-NEWSLETTER-SENTINEL</body></html>",
+        );
+
+        assert!(summary.starts_with("[content len="));
+        assert!(summary.contains("sha256="));
+        assert!(!summary.contains("PRIVATE-NEWSLETTER-SENTINEL"));
+        assert!(!summary.contains("<html>"));
+        assert!(!summary.contains("excerpt"));
     }
 
     #[test]

@@ -23,7 +23,11 @@ Each operational capability needs all of the following:
 Tool listing, successful initialization, and checksum install are installation
 proof only. They do not prove that the workflow is usable.
 
-## Interspire 8 CommsWire Prep Matrix
+Do not discover this matrix one failure at a time. Before changing a capability,
+identify every affected row, update the expected contract, then run the complete
+focused gate for those rows before release or install.
+
+## Interspire Draft Prep Matrix
 
 | Workflow | Tool | Class | Required Proof | Negative Tests | Live No-Send Proof |
 | --- | --- | --- | --- | --- | --- |
@@ -36,6 +40,7 @@ proof only. They do not prove that the workflow is usable.
 | Campaign inventory | `interspire_campaign_readback` | Read | Returns redacted campaign manage rows plus structured campaign ids/action flags without admin URLs or CSRF tokens. | Linked campaign-name rows, token leakage, email leakage, capped output. | Read target campaign inventory and confirm the intended source campaign id before copy/edit. |
 | Campaign copy | `interspire_campaign_copy_preview` / `interspire_campaign_copy_apply` | Preview/apply | Preview finds exact Copy route; apply creates exactly one new draft id. | Wrong campaign id, stale plan, duplicate id detection, route with extra params. | Copy a known disposable/source campaign; reread new campaign row. |
 | Campaign template edit | `interspire_campaign_template_update_preview` / `interspire_campaign_template_update_apply` | Preview/apply | Preview resolves body controls; apply persists name/subject/body/tracking fields and rereads them. | Missing Step2 controls, stale plan, hidden field loss, tracking flag drift. | Apply a harmless draft-only change to a disposable draft; audit body after. |
+| Campaign template artifact transfer | `interspire_campaign_template_artifact_update_preview` / `interspire_campaign_template_artifact_update_apply` | Preview/apply | Preview reads only a fixed private render artifact, verifies optional bytes/SHA-256, returns no raw body, and delegates to guarded template preview; apply repeats the artifact read, saves the draft, then fails unless post-apply body audit matches the artifact hash. | Path traversal, symlink artifact, oversized artifact, bad expected digest, stale plan, raw HTML leakage, persisted hash mismatch, send boundary attempted. | Apply a private source artifact to a disposable/new draft; audit body and queue/stats unchanged. |
 | Campaign body audit | `interspire_campaign_body_audit` | Read/no-send proof | Counts unsubscribe tokens, URL protocols, images, alt text, links, and hashes without raw HTML. | Missing body form, raw HTML leakage, secret leakage. | Audit target draft and record warnings. |
 | Render artifact | `interspire_campaign_render_artifact` | Private artifact | Writes private preview files under approved root and returns paths/hashes only. | Path traversal, disallowed root, raw HTML in response. | Render target draft to private artifact root; open separately for visual proof if needed. |
 | CSV import preflight | `interspire_contact_import_preflight` | Read/local file proof | Reads only configured private roots; returns headers, aggregate counts, duplicates, invalid-looking count, and hash. | Disallowed root, `..`, non-CSV, raw row/email leakage. | Preflight a synthetic private CSV before any real audience artifact. |

@@ -15,6 +15,8 @@ fn stdio_initializes_and_lists_tools() {
             "interspire_campaign_copy_preview",
             "interspire_campaign_readback",
             "interspire_campaign_render_artifact",
+            "interspire_campaign_template_artifact_update_apply",
+            "interspire_campaign_template_artifact_update_preview",
             "interspire_campaign_template_update_apply",
             "interspire_campaign_template_update_preview",
             "interspire_campaign_update_apply",

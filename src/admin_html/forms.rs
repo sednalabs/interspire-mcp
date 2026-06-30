@@ -1511,7 +1511,7 @@ mod tests {
         let html = r#"
             <script>window.IEM_CSRF_TOKEN = "page-token-list-create";</script>
             <form name="frmListEditor" id="frmListEditor" method="post" action="index.php?Page=Lists&Action=AddList">
-                <input type="text" name="Name" value="CommsWire">
+                <input type="text" name="Name" value="Example Update">
                 <input type="text" name="OwnerName" value="Operator">
                 <input type="text" name="OwnerEmail" value="owner@example.invalid">
                 <input type="text" name="ReplyToEmail" value="reply@example.invalid">
@@ -1555,7 +1555,7 @@ mod tests {
 
     #[test]
     fn post_pairs_append_page_level_csrf_when_target_form_lacks_token() {
-        let pairs = vec![("Name".to_string(), "CommsWire".to_string())];
+        let pairs = vec![("Name".to_string(), "Example Update".to_string())];
         let with_csrf = post_pairs_with_page_csrf(
             &pairs,
             r#"<script>window.IEM_CSRF_TOKEN = "page-token-123";</script>"#,
@@ -1566,14 +1566,14 @@ mod tests {
             .any(|(name, value)| name == "csrfToken" && value == "page-token-123"));
         assert!(with_csrf
             .iter()
-            .any(|(name, value)| name == "Name" && value == "CommsWire"));
+            .any(|(name, value)| name == "Name" && value == "Example Update"));
     }
 
     #[test]
     fn post_pairs_replace_empty_form_csrf_with_page_level_token() {
         let pairs = vec![
             ("csrf_token".to_string(), "   ".to_string()),
-            ("Name".to_string(), "CommsWire".to_string()),
+            ("Name".to_string(), "Example Update".to_string()),
         ];
         let with_csrf = post_pairs_with_page_csrf(
             &pairs,
@@ -1589,7 +1589,7 @@ mod tests {
     fn post_pairs_ignore_unrelated_token_suffix_fields_for_csrf() {
         let pairs = vec![
             ("access_token".to_string(), "not-csrf".to_string()),
-            ("Name".to_string(), "CommsWire".to_string()),
+            ("Name".to_string(), "Example Update".to_string()),
         ];
         let with_csrf = post_pairs_with_page_csrf(
             &pairs,
@@ -1608,7 +1608,7 @@ mod tests {
     fn post_pairs_keep_existing_non_empty_form_csrf() {
         let pairs = vec![
             ("csrf_token".to_string(), "form-token".to_string()),
-            ("Name".to_string(), "CommsWire".to_string()),
+            ("Name".to_string(), "Example Update".to_string()),
         ];
         let with_csrf = post_pairs_with_page_csrf(
             &pairs,

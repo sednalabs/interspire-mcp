@@ -303,6 +303,230 @@
         "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false,
+        "title": "Campaign template artifact update apply"
+      },
+      "description": "Apply a fixed private render artifact to a campaign template and prove the persisted body hash.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "embed_images": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "expected_html_bytes": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expected_html_sha256": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_text_bytes": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expected_text_sha256": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "html_artifact_path": {
+            "type": "string"
+          },
+          "name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "send_multipart": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "subject": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text_artifact_path": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "track_links": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "track_opens": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "campaign_id",
+          "plan_id",
+          "html_artifact_path"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_template_artifact_update_apply"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Campaign template artifact update preview"
+      },
+      "description": "Preview applying a fixed private render artifact to a campaign template without returning raw HTML.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "embed_images": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "expected_html_bytes": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expected_html_sha256": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_text_bytes": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expected_text_sha256": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "html_artifact_path": {
+            "type": "string"
+          },
+          "name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "send_multipart": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "subject": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text_artifact_path": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "track_links": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "track_opens": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "campaign_id",
+          "html_artifact_path"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_template_artifact_update_preview"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
         "title": "Campaign template update apply"
       },
       "description": "Apply a previously previewed semantic EDM template edit.",

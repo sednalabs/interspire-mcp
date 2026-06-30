@@ -53,6 +53,12 @@ This repository contains a public Rust MCP server for Interspire Email Marketer
   operational capability, update `docs/live-proof-matrix.md` before coding and
   record the exact fixture tests, negative tests, and live no-send proof needed
   for the target Interspire major version.
+- Do not drip-feed contract tests after failures appear. Before patching a new
+  tool or operational capability, list the full affected contract surface
+  first: router inventory, backend path, schema snapshot, fixture tests,
+  negative tests, stdio smoke, docs, live-proof matrix, formatting, clippy, and
+  workspace tests. Patch against that matrix and run it as a complete focused
+  gate before release or install.
 - The minimum usable proof for Interspire 8 operational prep is a successful
   live no-send smoke of the exact tool on the target instance. Tool listing,
   binary checksum verification, and Codex restart prove only installation, not

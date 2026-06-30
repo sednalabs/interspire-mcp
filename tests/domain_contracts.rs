@@ -452,6 +452,12 @@ fn status_contract_is_redacted_and_read_only() {
         .contains(&"interspire_campaign_template_update_apply".to_string()));
     assert!(report
         .capabilities
+        .contains(&"interspire_campaign_template_artifact_update_preview".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_campaign_template_artifact_update_apply".to_string()));
+    assert!(report
+        .capabilities
         .contains(&"interspire_list_create_preview".to_string()));
     assert!(report
         .capabilities
@@ -871,7 +877,7 @@ fn production_send_apply_contract_requires_explicit_authorization_and_redacts() 
 fn server_can_be_constructed_with_fixture_backend() {
     let server = InterspireMcpServer::with_backend(Arc::new(ContractBackend))
         .unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(server.tool_schema_snapshot().len(), 39);
+    assert_eq!(server.tool_schema_snapshot().len(), 41);
 }
 
 #[test]

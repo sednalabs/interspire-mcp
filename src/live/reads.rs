@@ -117,6 +117,8 @@ impl LiveInterspireBackend {
                 "interspire_production_send_apply".to_string(),
                 "interspire_campaign_template_update_preview".to_string(),
                 "interspire_campaign_template_update_apply".to_string(),
+                "interspire_campaign_template_artifact_update_preview".to_string(),
+                "interspire_campaign_template_artifact_update_apply".to_string(),
                 "interspire_campaign_update_preview".to_string(),
                 "interspire_campaign_update_apply".to_string(),
                 "interspire_list_update_preview".to_string(),

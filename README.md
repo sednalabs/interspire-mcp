@@ -114,6 +114,8 @@ than proprietary Interspire source snippets.
 | `interspire_production_send_apply` | Guarded send | Apply an explicitly acknowledged production send after strict readiness proof, exact expected count/sender/subject/hash, and production-send runtime gates. |
 | `interspire_campaign_template_update_preview` | Read preview | Preview semantic EDM template edits such as subject, HTML body, text body, and tracking flags. |
 | `interspire_campaign_template_update_apply` | Guarded apply | Apply one previously previewed semantic EDM template edit. |
+| `interspire_campaign_template_artifact_update_preview` | Read preview | Preview applying a fixed private render artifact to a draft campaign without returning raw HTML. |
+| `interspire_campaign_template_artifact_update_apply` | Guarded apply | Apply one previously previewed fixed private render artifact and prove the persisted body hash. |
 | `interspire_campaign_update_preview` | Read preview | Preview guarded campaign content or sender-metadata edits. |
 | `interspire_campaign_update_apply` | Guarded apply | Apply one previously previewed campaign edit when guarded form-write gates are enabled. |
 | `interspire_list_update_preview` | Read preview | Preview guarded list metadata edits. |
@@ -387,6 +389,16 @@ writes private local files outside the repository. The response contains file
 paths, hashes, byte counts, and a native-browser next step; it does not return
 raw campaign HTML. Visual signoff still requires opening the preview artifact
 with a browser and inspecting desktop/mobile screenshots.
+
+`interspire_campaign_template_artifact_update_preview` and
+`interspire_campaign_template_artifact_update_apply` transfer campaign HTML from
+that fixed private render-artifact directory into another draft without placing
+the raw HTML in the MCP transcript. Preview reads the artifact privately,
+verifies optional expected byte and SHA-256 values, and returns only the
+filename, hash, byte count, and guarded write preview. Apply repeats the
+artifact read, saves through the guarded campaign edit surface, and fails unless
+the post-apply body audit matches the artifact hash. These tools do not send,
+schedule, import contacts, or authorize production mail.
 
 Render artifacts require a private output root:
 
