@@ -28,6 +28,8 @@ before newsletter work goes wrong:
   desktop/mobile previews before sending?
 - Can we send a one-recipient Interspire campaign preview to a reviewer without
   creating a seed list, while clearly marking what that preview does not prove?
+- Can we prepare a private OCI send-ledger file from a sanitized manifest before
+  a guarded send, without contacting the provider or exposing raw recipients?
 - Can we apply a seed or production send only after fresh proof, exact expected
   values, runtime send gates, and explicit acknowledgement?
 - When server setup requires a saved admin value, can we query one exact
@@ -36,8 +38,9 @@ before newsletter work goes wrong:
 The server is read-only by default. Its write-class capabilities are limited to
 guarded queue cancel/delete, guarded campaign/list/user/settings/template
 edits, guarded list creation, guarded campaign copy, private render artifacts,
-aggregate-only import preflight, and separately gated seed or production send
-apply tools. All apply paths stay disabled unless the runtime explicitly
+aggregate-only import preflight, private OCI send-ledger preparation, and
+separately gated seed or production send apply tools. All apply paths stay
+disabled unless the runtime explicitly
 enables guarded writes and the matching control flags. Import preflight is a
 read tool and never imports contacts.
 The narrow sensitive-read tool is also disabled by default and requires both a
@@ -113,6 +116,8 @@ than proprietary Interspire source snippets.
 | `interspire_campaign_render_artifact` | Private artifact | Write private persisted-campaign render artifacts for native-browser screenshot inspection without returning raw HTML. |
 | `interspire_campaign_test_send_preview` | No-mutation proof | Preview a one-recipient Interspire campaign preview/test send without posting the SendPreview route. |
 | `interspire_campaign_test_send_apply` | Guarded test send | Apply one explicitly acknowledged campaign preview/test send to one recipient after exact preview digest, public preview subject, HTML hash, and send-control runtime gates. The digest also binds raw subject, text/preheader hashes, and the caller-supplied preview sender. |
+| `interspire_oci_send_ledger_prepare_preview` | No-mutation proof | Preview sanitized private OCI send-ledger rows from a private JSONL manifest without writing the ledger or sending. |
+| `interspire_oci_send_ledger_prepare_apply` | Guarded local apply | Write sanitized private OCI send-ledger rows from an acknowledged preview plan, then rerun OCI ledger preflight. This does not contact OCI or perform an Interspire send. |
 | `interspire_send_wizard_readback` | No-mutation proof | Render the Send wizard through the no-send proof boundary and verify queue/stat invariants, including Interspire 8 wizard shapes that echo recipient count rather than selected list ids. |
 | `interspire_seed_readiness_gate` | No-mutation proof | Combine campaign body audit and Send wizard readback into seed-readiness gates. |
 | `interspire_seed_send_apply` | Guarded send | Apply one explicitly acknowledged bounded seed send after immediate readiness proof and send-control runtime gates. |
@@ -443,6 +448,15 @@ posting the final send form captured from the live Interspire page.
   object whose `campaign_id` matches the Interspire campaign being sent and
   whose batch id, sender domain, and expected row count match rows already
   present in the configured private OCI send ledger.
+
+`interspire_oci_send_ledger_prepare_preview` and
+`interspire_oci_send_ledger_prepare_apply` can prepare those private ledger
+rows before a guarded send request. Preview reads a private JSONL manifest from
+the configured ledger directory and returns a plan id without writing. Apply
+requires `INTERSPIRE_GUARDED_WRITES=1`, `INTERSPIRE_SEND_CONTROLS=1`, the exact
+plan id, and `acknowledge_ledger_write=true`, then writes only sanitized ledger
+rows and reruns the same preflight gate. The prepare tools do not contact OCI
+and do not perform an Interspire send.
 
 `interspire_production_send_apply` is the full-send boundary. It requires:
 

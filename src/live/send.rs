@@ -4,8 +4,9 @@ use crate::{
     guarded_write, oci_ledger,
     response::{
         CampaignTestSendApplyReport, CampaignTestSendApplyRequest, OciLedgerPreflightReport,
-        ProductionSendApplyReport, ProductionSendApplyRequest, SeedSendApplyReport,
-        SeedSendApplyRequest,
+        OciSendLedgerPrepareApplyRequest, OciSendLedgerPreparePreviewRequest,
+        OciSendLedgerPrepareReport, ProductionSendApplyReport, ProductionSendApplyRequest,
+        SeedSendApplyReport, SeedSendApplyRequest,
     },
 };
 
@@ -17,6 +18,24 @@ impl LiveInterspireBackend {
         guarded_write::require_send_controls_enabled(&self.config.guarded_writes)?;
         let html = self.html_client()?;
         html.campaign_test_send_apply(request)
+    }
+
+    pub(super) fn oci_send_ledger_prepare_preview_impl(
+        &self,
+        request: &OciSendLedgerPreparePreviewRequest,
+    ) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+        oci_ledger::prepare_preview(&self.config.oci_send_ledger, request)
+    }
+
+    pub(super) fn oci_send_ledger_prepare_apply_impl(
+        &self,
+        request: &OciSendLedgerPrepareApplyRequest,
+    ) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+        oci_ledger::prepare_apply(
+            &self.config.guarded_writes,
+            &self.config.oci_send_ledger,
+            request,
+        )
     }
 
     pub(super) fn seed_send_apply_impl(

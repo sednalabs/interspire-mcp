@@ -31,6 +31,8 @@ fn stdio_initializes_and_lists_tools() {
             "interspire_list_summary",
             "interspire_list_update_apply",
             "interspire_list_update_preview",
+            "interspire_oci_send_ledger_prepare_apply",
+            "interspire_oci_send_ledger_prepare_preview",
             "interspire_production_send_apply",
             "interspire_queue_control_apply",
             "interspire_queue_control_preview",

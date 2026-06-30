@@ -1211,6 +1211,204 @@
         "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false,
+        "title": "OCI send-ledger prepare apply"
+      },
+      "description": "Write sanitized private OCI send-ledger rows from an explicitly acknowledged preview plan and rerun OCI ledger preflight. Requires guarded writes, send controls, expected_plan_id, and acknowledge_ledger_write=true; this does not contact OCI or perform an Interspire send.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "acknowledge_ledger_write": {
+            "default": false,
+            "type": "boolean"
+          },
+          "approved_sender": {
+            "default": null,
+            "maxLength": 320,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "batch_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "campaign_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "expected_manifest_sha256": {
+            "default": null,
+            "maxLength": 64,
+            "minLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_plan_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "expected_rows": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "manifest_path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "sender_domain": {
+            "maxLength": 253,
+            "minLength": 1,
+            "type": "string"
+          },
+          "subject_sha256": {
+            "default": null,
+            "maxLength": 64,
+            "minLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "template_sha256": {
+            "default": null,
+            "maxLength": 64,
+            "minLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "campaign_id",
+          "batch_id",
+          "expected_rows",
+          "sender_domain",
+          "manifest_path",
+          "expected_plan_id"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_oci_send_ledger_prepare_apply"
+    },
+    {
+      "_meta": {
+        "approval_required": false,
+        "mutation_prohibited": true,
+        "openai/widgetAccessible": false,
+        "operation_class": "no_mutation_proof",
+        "production_action_authorized": false,
+        "proof_boundary": "read a private OCI send-ledger manifest and compute sanitized ledger rows without writing the ledger or sending",
+        "securitySchemes": [
+          {
+            "type": "noauth"
+          }
+        ],
+        "ui": {
+          "visibility": [
+            "model"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "OCI send-ledger prepare preview"
+      },
+      "description": "Preview sanitized private OCI send-ledger rows from a private JSONL manifest without writing the ledger, contacting OCI, sending, scheduling, queueing, importing contacts, or mutating lists.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "approved_sender": {
+            "default": null,
+            "maxLength": 320,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "batch_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "campaign_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "expected_manifest_sha256": {
+            "default": null,
+            "maxLength": 64,
+            "minLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_rows": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "manifest_path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "sender_domain": {
+            "maxLength": 253,
+            "minLength": 1,
+            "type": "string"
+          },
+          "subject_sha256": {
+            "default": null,
+            "maxLength": 64,
+            "minLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "template_sha256": {
+            "default": null,
+            "maxLength": 64,
+            "minLength": 64,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "campaign_id",
+          "batch_id",
+          "expected_rows",
+          "sender_domain",
+          "manifest_path"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_oci_send_ledger_prepare_preview"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
         "title": "Production send apply"
       },
       "description": "Apply an explicitly acknowledged production send after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight.",

@@ -29,7 +29,8 @@ use crate::{
         ContactStateReport, ContactStateRequest, GuardedWriteApplyReport,
         GuardedWritePreviewReport, ListCreateApplyRequest, ListCreatePreviewRequest,
         ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest,
-        ListUpdateApplyRequest, ListUpdatePreviewRequest, ProductionSendApplyReport,
+        ListUpdateApplyRequest, ListUpdatePreviewRequest, OciSendLedgerPrepareApplyRequest,
+        OciSendLedgerPreparePreviewRequest, OciSendLedgerPrepareReport, ProductionSendApplyReport,
         ProductionSendApplyRequest, QueueControlApplyReport, QueueControlApplyRequest,
         QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
         QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
@@ -183,6 +184,20 @@ impl InterspireReadBackend for LiveInterspireBackend {
         request: &CampaignTestSendApplyRequest,
     ) -> Result<CampaignTestSendApplyReport, InterspireError> {
         self.campaign_test_send_apply_impl(request)
+    }
+
+    fn oci_send_ledger_prepare_preview(
+        &self,
+        request: &OciSendLedgerPreparePreviewRequest,
+    ) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+        self.oci_send_ledger_prepare_preview_impl(request)
+    }
+
+    fn oci_send_ledger_prepare_apply(
+        &self,
+        request: &OciSendLedgerPrepareApplyRequest,
+    ) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+        self.oci_send_ledger_prepare_apply_impl(request)
     }
 
     fn send_wizard_readback(

@@ -11,7 +11,8 @@ use interspire_mcp::{
     GuardedWriteApplyReport, GuardedWritePreviewReport, InterspireError, InterspireMcpServer,
     InterspireReadBackend, ListCreateApplyRequest, ListCreatePreviewRequest,
     ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest,
-    ListUpdateApplyRequest, ListUpdatePreviewRequest, ProductionSendApplyReport,
+    ListUpdateApplyRequest, ListUpdatePreviewRequest, OciSendLedgerPrepareApplyRequest,
+    OciSendLedgerPreparePreviewRequest, OciSendLedgerPrepareReport, ProductionSendApplyReport,
     ProductionSendApplyRequest, QueueControlApplyReport, QueueControlApplyRequest,
     QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
     QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
@@ -144,6 +145,20 @@ impl InterspireReadBackend for FixtureBackend {
         _request: &CampaignTestSendApplyRequest,
     ) -> Result<CampaignTestSendApplyReport, InterspireError> {
         Ok(CampaignTestSendApplyReport::fixture())
+    }
+
+    fn oci_send_ledger_prepare_preview(
+        &self,
+        _request: &OciSendLedgerPreparePreviewRequest,
+    ) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+        Ok(OciSendLedgerPrepareReport::fixture())
+    }
+
+    fn oci_send_ledger_prepare_apply(
+        &self,
+        _request: &OciSendLedgerPrepareApplyRequest,
+    ) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+        Ok(OciSendLedgerPrepareReport::fixture())
     }
 
     fn send_wizard_readback(

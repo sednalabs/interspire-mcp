@@ -1,13 +1,25 @@
 use crate::{
-    config::OciSendLedgerConfig,
-    redact,
-    response::{short_hash as ledger_hash, OciLedgerPreflightReport, OciLedgerPreflightRequest},
+    config::{GuardedWriteConfig, OciSendLedgerConfig},
+    error::InterspireError,
+    guarded_write, redact,
+    response::{
+        short_hash as ledger_hash, Evidence, OciLedgerPreflightReport, OciLedgerPreflightRequest,
+        OciSendLedgerPrepareApplyRequest, OciSendLedgerPreparePreviewRequest,
+        OciSendLedgerPrepareReport,
+    },
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::{
-    fs::File,
-    io::{BufRead, BufReader},
+    collections::BTreeSet,
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, Read, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::{Component, Path, PathBuf},
 };
+
+const LEDGER_PREPARE_VERSION: &str = "interspire-oci-send-ledger-prepare-v1";
+const MAX_LEDGER_MANIFEST_BYTES: u64 = 50_000_000;
+const MAX_LEDGER_MANIFEST_ROWS: u64 = 250_000;
 
 pub fn verify_preflight(
     config: &OciSendLedgerConfig,
@@ -216,6 +228,424 @@ pub fn verify_preflight(
     }
 }
 
+pub fn prepare_preview(
+    config: &OciSendLedgerConfig,
+    request: &OciSendLedgerPreparePreviewRequest,
+) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+    let context = LedgerPrepareContext::build(config, request)?;
+    let preflight = verify_preflight(
+        config,
+        Some(&context.preflight_request),
+        request.expected_rows,
+        None,
+    );
+    Ok(context.report(PrepareReportOptions {
+        apply: false,
+        guarded_writes_enabled: false,
+        send_controls_enabled: false,
+        ledger_written: false,
+        already_present: false,
+        appended_rows: 0,
+        expected_plan_match: None,
+        ok: context.warnings.is_empty(),
+        preflight,
+        extra_warnings: Vec::new(),
+        notes: vec![
+            "preview only; no private ledger file was written".to_string(),
+            "no Interspire send, schedule, queue, contact, or provider request was sent"
+                .to_string(),
+            "raw manifest rows and recipient values were not returned".to_string(),
+        ],
+    }))
+}
+
+pub fn prepare_apply(
+    guarded_config: &GuardedWriteConfig,
+    config: &OciSendLedgerConfig,
+    request: &OciSendLedgerPrepareApplyRequest,
+) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+    guarded_write::require_send_controls_enabled(guarded_config)?;
+    let preview_request = request.preview_request();
+    let context = LedgerPrepareContext::build(config, &preview_request)?;
+    let plan_matches = context.plan_id == request.expected_plan_id.trim();
+
+    if !request.acknowledge_ledger_write {
+        let preflight = verify_context_preflight(config, &context);
+        return Ok(context.report(PrepareReportOptions {
+            apply: true,
+            guarded_writes_enabled: guarded_config.enabled,
+            send_controls_enabled: guarded_config.send_controls_enabled,
+            ledger_written: false,
+            already_present: preflight.verified,
+            appended_rows: 0,
+            expected_plan_match: Some(plan_matches),
+            ok: false,
+            preflight,
+            extra_warnings: vec![
+                "acknowledge_ledger_write=true is required before writing private OCI ledger rows"
+                    .to_string(),
+            ],
+            notes: vec![
+                "apply denied before writing the private ledger".to_string(),
+                "no Interspire send, schedule, queue, contact, or provider request was sent"
+                    .to_string(),
+            ],
+        }));
+    }
+
+    if !plan_matches {
+        let preflight = verify_context_preflight(config, &context);
+        return Ok(context.report(PrepareReportOptions {
+            apply: true,
+            guarded_writes_enabled: guarded_config.enabled,
+            send_controls_enabled: guarded_config.send_controls_enabled,
+            ledger_written: false,
+            already_present: preflight.verified,
+            appended_rows: 0,
+            expected_plan_match: Some(false),
+            ok: false,
+            preflight,
+            extra_warnings: vec![
+                "expected_plan_id did not match the current private OCI ledger prepare plan"
+                    .to_string(),
+            ],
+            notes: vec![
+                "apply denied before writing the private ledger".to_string(),
+                "no Interspire send, schedule, queue, contact, or provider request was sent"
+                    .to_string(),
+            ],
+        }));
+    }
+
+    if !context.warnings.is_empty() {
+        let preflight = verify_context_preflight(config, &context);
+        return Ok(context.report(PrepareReportOptions {
+            apply: true,
+            guarded_writes_enabled: guarded_config.enabled,
+            send_controls_enabled: guarded_config.send_controls_enabled,
+            ledger_written: false,
+            already_present: preflight.verified,
+            appended_rows: 0,
+            expected_plan_match: Some(true),
+            ok: false,
+            preflight,
+            extra_warnings: vec![
+                "private OCI ledger prepare plan has validation warnings; refusing to write"
+                    .to_string(),
+            ],
+            notes: vec![
+                "apply denied before writing the private ledger".to_string(),
+                "no Interspire send, schedule, queue, contact, or provider request was sent"
+                    .to_string(),
+            ],
+        }));
+    }
+
+    let _lock = LedgerPrepareLock::acquire(&context.ledger_path)?;
+    let before = verify_context_preflight(config, &context);
+    if before.verified {
+        if !prepared_rows_already_present(&context.ledger_path, &context.ledger_rows)? {
+            return Ok(context.report(PrepareReportOptions {
+                apply: true,
+                guarded_writes_enabled: guarded_config.enabled,
+                send_controls_enabled: guarded_config.send_controls_enabled,
+                ledger_written: false,
+                already_present: false,
+                appended_rows: 0,
+                expected_plan_match: Some(true),
+                ok: false,
+                preflight: before,
+                extra_warnings: vec![
+                    "existing OCI ledger rows satisfy preflight but do not match the current prepared row set; refusing to claim idempotence or append"
+                        .to_string(),
+                ],
+                notes: vec![
+                    "apply denied before writing the private ledger".to_string(),
+                    "no Interspire send, schedule, queue, contact, or provider request was sent"
+                        .to_string(),
+                ],
+            }));
+        }
+        return Ok(context.report(PrepareReportOptions {
+            apply: true,
+            guarded_writes_enabled: guarded_config.enabled,
+            send_controls_enabled: guarded_config.send_controls_enabled,
+            ledger_written: false,
+            already_present: true,
+            appended_rows: 0,
+            expected_plan_match: Some(true),
+            ok: true,
+            preflight: before,
+            extra_warnings: Vec::new(),
+            notes: vec![
+                "matching private OCI ledger rows were already present".to_string(),
+                "no Interspire send, schedule, queue, contact, or provider request was sent"
+                    .to_string(),
+            ],
+        }));
+    }
+
+    if before.matched_rows > 0 {
+        return Ok(context.report(PrepareReportOptions {
+            apply: true,
+            guarded_writes_enabled: guarded_config.enabled,
+            send_controls_enabled: guarded_config.send_controls_enabled,
+            ledger_written: false,
+            already_present: false,
+            appended_rows: 0,
+            expected_plan_match: Some(true),
+            ok: false,
+            preflight: before,
+            extra_warnings: vec![
+                "existing partial OCI ledger rows matched this campaign and batch; refusing to append duplicate prepare rows"
+                    .to_string(),
+            ],
+            notes: vec![
+                "apply denied before writing the private ledger".to_string(),
+                "no Interspire send, schedule, queue, contact, or provider request was sent"
+                    .to_string(),
+            ],
+        }));
+    }
+
+    append_private_ledger_rows(&context.ledger_path, &context.ledger_rows)?;
+    let after = verify_context_preflight(config, &context);
+    let ok = after.verified;
+    let mut extra_warnings = Vec::new();
+    if !ok {
+        extra_warnings.push(
+            "private OCI ledger rows were written but the post-write preflight did not verify"
+                .to_string(),
+        );
+    }
+    Ok(context.report(PrepareReportOptions {
+        apply: true,
+        guarded_writes_enabled: guarded_config.enabled,
+        send_controls_enabled: guarded_config.send_controls_enabled,
+        ledger_written: true,
+        already_present: false,
+        appended_rows: context.ledger_rows.len() as u64,
+        expected_plan_match: Some(true),
+        ok,
+        preflight: after,
+        extra_warnings,
+        notes: vec![
+            "sanitized private OCI ledger rows were appended".to_string(),
+            "OCI ledger preflight was rerun after the write".to_string(),
+            "no Interspire send, schedule, queue, contact, or provider request was sent"
+                .to_string(),
+        ],
+    }))
+}
+
+struct LedgerPrepareContext {
+    ledger_path: PathBuf,
+    ledger_rows: Vec<String>,
+    preflight_request: OciLedgerPreflightRequest,
+    campaign_hash: String,
+    batch_hash: String,
+    sender_domain: String,
+    manifest_sha256: String,
+    approved_sender_hash: Option<String>,
+    template_sha256: Option<String>,
+    subject_sha256: Option<String>,
+    plan_id: String,
+    validated_manifest_rows: u64,
+    expected_rows: u64,
+    duplicate_recipient_key_count: u64,
+    duplicate_trace_key_count: u64,
+    warnings: Vec<String>,
+}
+
+impl LedgerPrepareContext {
+    fn build(
+        config: &OciSendLedgerConfig,
+        request: &OciSendLedgerPreparePreviewRequest,
+    ) -> Result<Self, InterspireError> {
+        let campaign_id = request.campaign_id.trim();
+        let batch_id = request.batch_id.trim();
+        let sender_domain = request.sender_domain.trim().to_ascii_lowercase();
+        validate_prepare_request(request, campaign_id, batch_id, &sender_domain)?;
+        let ledger_path = private_ledger_path(config)?;
+        let manifest_path = private_manifest_path(&ledger_path, &request.manifest_path)?;
+        let manifest =
+            read_private_manifest(&manifest_path, request.expected_manifest_sha256.as_deref())?;
+        let prepared = prepare_manifest_rows(request, &sender_domain, &manifest)?;
+        let expected_rows_string = request.expected_rows.to_string();
+        let campaign_hash = ledger_hash(campaign_id);
+        let batch_hash = ledger_hash(batch_id);
+        let approved_sender_hash = request
+            .approved_sender
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ledger_hash);
+        let template_sha256 = normalized_optional_sha256(request.template_sha256.as_deref())?;
+        let subject_sha256 = normalized_optional_sha256(request.subject_sha256.as_deref())?;
+        let plan_id = guarded_write::stable_plan_id(&[
+            LEDGER_PREPARE_VERSION,
+            campaign_id,
+            &batch_hash,
+            &sender_domain,
+            &expected_rows_string,
+            &manifest.sha256,
+            approved_sender_hash.as_deref().unwrap_or(""),
+            template_sha256.as_deref().unwrap_or(""),
+            subject_sha256.as_deref().unwrap_or(""),
+        ]);
+        let mut warnings = prepared.warnings;
+        if prepared.rows.len() as u64 != request.expected_rows {
+            warnings.push(format!(
+                "private OCI send ledger manifest contained {} usable rows but expected {} rows",
+                prepared.rows.len(),
+                request.expected_rows
+            ));
+        }
+
+        Ok(Self {
+            ledger_path,
+            ledger_rows: prepared.rows,
+            preflight_request: OciLedgerPreflightRequest {
+                campaign_id: campaign_id.to_string(),
+                batch_id: batch_id.to_string(),
+                expected_rows: request.expected_rows,
+                sender_domain: Some(sender_domain.clone()),
+                expected_manifest_sha256: Some(manifest.sha256.clone()),
+            },
+            campaign_hash,
+            batch_hash,
+            sender_domain,
+            manifest_sha256: manifest.sha256,
+            approved_sender_hash,
+            template_sha256,
+            subject_sha256,
+            plan_id,
+            validated_manifest_rows: prepared.validated_rows,
+            expected_rows: request.expected_rows,
+            duplicate_recipient_key_count: prepared.duplicate_recipient_key_count,
+            duplicate_trace_key_count: prepared.duplicate_trace_key_count,
+            warnings,
+        })
+    }
+
+    fn report(&self, options: PrepareReportOptions) -> OciSendLedgerPrepareReport {
+        let mut warnings = self.warnings.clone();
+        warnings.extend(options.extra_warnings);
+        OciSendLedgerPrepareReport {
+            ok: options.ok && warnings.is_empty(),
+            configured: true,
+            apply: options.apply,
+            guarded_writes_enabled: options.guarded_writes_enabled,
+            send_controls_enabled: options.send_controls_enabled,
+            ledger_written: options.ledger_written,
+            already_present: options.already_present,
+            appended_rows: options.appended_rows,
+            validated_manifest_rows: self.validated_manifest_rows,
+            expected_rows: self.expected_rows,
+            duplicate_recipient_key_count: self.duplicate_recipient_key_count,
+            duplicate_trace_key_count: self.duplicate_trace_key_count,
+            campaign_hash: self.campaign_hash.clone(),
+            batch_hash: self.batch_hash.clone(),
+            sender_domain: Some(self.sender_domain.clone()),
+            manifest_sha256: Some(self.manifest_sha256.clone()),
+            approved_sender_hash: self.approved_sender_hash.clone(),
+            template_sha256: self.template_sha256.clone(),
+            subject_sha256: self.subject_sha256.clone(),
+            plan_id: Some(self.plan_id.clone()),
+            expected_plan_match: options.expected_plan_match,
+            oci_ledger_preflight: options.preflight,
+            send_authorized: false,
+            production_send_authorized: false,
+            raw_payload_returned: false,
+            warnings: warnings
+                .into_iter()
+                .map(|warning| redact::redact_sensitive_text(&warning))
+                .collect(),
+            evidence: Evidence {
+                source: "private_oci_send_ledger_manifest".to_string(),
+                notes: options.notes,
+            },
+        }
+    }
+}
+
+struct PrepareReportOptions {
+    apply: bool,
+    guarded_writes_enabled: bool,
+    send_controls_enabled: bool,
+    ledger_written: bool,
+    already_present: bool,
+    appended_rows: u64,
+    expected_plan_match: Option<bool>,
+    ok: bool,
+    preflight: OciLedgerPreflightReport,
+    extra_warnings: Vec<String>,
+    notes: Vec<String>,
+}
+
+struct PrivateManifest {
+    sha256: String,
+    text: String,
+}
+
+struct PreparedManifestRows {
+    rows: Vec<String>,
+    validated_rows: u64,
+    duplicate_recipient_key_count: u64,
+    duplicate_trace_key_count: u64,
+    warnings: Vec<String>,
+}
+
+struct LedgerPrepareLock {
+    path: PathBuf,
+    _file: File,
+}
+
+impl LedgerPrepareLock {
+    fn acquire(ledger_path: &Path) -> Result<Self, InterspireError> {
+        let parent = ledger_path.parent().ok_or_else(|| {
+            InterspireError::Safety(
+                "OCI send ledger path must have a private parent directory".to_string(),
+            )
+        })?;
+        let file_name = ledger_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                InterspireError::Safety("OCI send ledger filename is invalid".to_string())
+            })?;
+        let lock_path = parent.join(format!(".{file_name}.lock"));
+        ensure_private_direct_child_path(&lock_path, "OCI send ledger lock")?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&lock_path)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    InterspireError::Safety(
+                        "another OCI send ledger prepare apply is already in progress".to_string(),
+                    )
+                } else {
+                    InterspireError::Io(format!(
+                        "failed to acquire private OCI send ledger apply lock: {err}"
+                    ))
+                }
+            })?;
+        Ok(Self {
+            path: lock_path,
+            _file: file,
+        })
+    }
+}
+
+impl Drop for LedgerPrepareLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 fn row_matches(request: &OciLedgerPreflightRequest, value: &Value) -> bool {
     if !matches_identifier(
         &request.campaign_id,
@@ -263,6 +693,568 @@ fn row_matches(request: &OciLedgerPreflightRequest, value: &Value) -> bool {
         }
     }
     true
+}
+
+fn verify_context_preflight(
+    config: &OciSendLedgerConfig,
+    context: &LedgerPrepareContext,
+) -> OciLedgerPreflightReport {
+    verify_preflight(
+        config,
+        Some(&context.preflight_request),
+        context.expected_rows,
+        None,
+    )
+}
+
+fn prepared_rows_already_present(path: &Path, rows: &[String]) -> Result<bool, InterspireError> {
+    let mut expected = row_fingerprints_from_serialized_rows(rows)?;
+    if expected.is_empty() {
+        return Ok(false);
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|err| {
+            InterspireError::Io(format!(
+                "failed to open private OCI send ledger for read: {err}"
+            ))
+        })?;
+    let mut body = String::new();
+    file.read_to_string(&mut body).map_err(|err| {
+        InterspireError::Io(format!("failed to read private OCI send ledger: {err}"))
+    })?;
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(fingerprint) = ledger_row_fingerprint(&value) {
+            expected.remove(&fingerprint);
+            if expected.is_empty() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn row_fingerprints_from_serialized_rows(
+    rows: &[String],
+) -> Result<BTreeSet<String>, InterspireError> {
+    let mut fingerprints = BTreeSet::new();
+    for row in rows {
+        let value = serde_json::from_str::<Value>(row).map_err(|err| {
+            InterspireError::Io(format!(
+                "failed to parse prepared private OCI ledger row for fingerprint: {err}"
+            ))
+        })?;
+        let Some(fingerprint) = ledger_row_fingerprint(&value) else {
+            return Err(InterspireError::Io(
+                "prepared private OCI ledger row did not contain a complete fingerprint"
+                    .to_string(),
+            ));
+        };
+        fingerprints.insert(fingerprint);
+    }
+    Ok(fingerprints)
+}
+
+fn ledger_row_fingerprint(value: &Value) -> Option<String> {
+    if !value.is_object() {
+        return None;
+    }
+    let campaign_hash = string_any(
+        value,
+        &[
+            "campaign_hash",
+            "campaignHash",
+            "campaign_id_hash",
+            "campaignIdHash",
+        ],
+    )
+    .map(normalized_hash)
+    .or_else(|| string_any(value, &["campaign_id", "campaignId"]).map(ledger_hash))?;
+    let batch_hash = string_any(
+        value,
+        &["batch_hash", "batchHash", "batch_id_hash", "batchIdHash"],
+    )
+    .map(normalized_hash)
+    .or_else(|| string_any(value, &["batch_id", "batchId"]).map(ledger_hash))?;
+    let sender_domain = string_any(value, &["sender_domain", "senderDomain"])
+        .and_then(domain_from_address_or_domain)?;
+    let manifest_sha256 = string_any(value, &["manifest_sha256", "manifestSha256"])?
+        .trim()
+        .to_ascii_lowercase();
+    let recipient_hash = string_any(
+        value,
+        &[
+            "recipient_hash",
+            "recipientHash",
+            "recipient_id_hash",
+            "recipientIdHash",
+            "recipient_address_hash",
+            "recipientAddressHash",
+        ],
+    )?
+    .trim()
+    .to_ascii_lowercase();
+    let (trace_kind, trace_hash) = if let Some(hash) =
+        string_any(value, &["message_id_hash", "messageIdHash"])
+    {
+        ("message", hash.trim().to_ascii_lowercase())
+    } else if let Some(hash) = string_any(value, &["correlation_id_hash", "correlationIdHash"]) {
+        ("correlation", hash.trim().to_ascii_lowercase())
+    } else if let Some(hash) = string_any(value, &["header_value_hash", "headerValueHash"]) {
+        ("header", hash.trim().to_ascii_lowercase())
+    } else {
+        return None;
+    };
+    Some(format!(
+        "{campaign_hash}\0{batch_hash}\0{sender_domain}\0{manifest_sha256}\0{recipient_hash}\0{trace_kind}\0{trace_hash}"
+    ))
+}
+
+fn validate_prepare_request(
+    request: &OciSendLedgerPreparePreviewRequest,
+    campaign_id: &str,
+    batch_id: &str,
+    sender_domain: &str,
+) -> Result<(), InterspireError> {
+    if !valid_identifier(campaign_id) || !valid_identifier(batch_id) {
+        return Err(InterspireError::Safety(
+            "OCI send ledger prepare campaign_id and batch_id must be non-empty printable identifiers"
+                .to_string(),
+        ));
+    }
+    if !valid_domain(sender_domain) {
+        return Err(InterspireError::Safety(
+            "OCI send ledger prepare sender_domain must be a valid domain token".to_string(),
+        ));
+    }
+    if let Some(manifest) = request.expected_manifest_sha256.as_deref() {
+        if !valid_sha256(manifest) {
+            return Err(InterspireError::Safety(
+                "OCI send ledger prepare expected_manifest_sha256 must be a 64-character hex SHA-256"
+                    .to_string(),
+            ));
+        }
+    }
+    let _ = normalized_optional_sha256(request.template_sha256.as_deref())?;
+    let _ = normalized_optional_sha256(request.subject_sha256.as_deref())?;
+    Ok(())
+}
+
+fn private_ledger_path(config: &OciSendLedgerConfig) -> Result<PathBuf, InterspireError> {
+    let Some(raw_path) = config
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Err(InterspireError::Safety(
+            "INTERSPIRE_OCI_SEND_LEDGER_PATH is required before preparing private OCI ledger rows"
+                .to_string(),
+        ));
+    };
+    let path = PathBuf::from(raw_path);
+    ensure_private_direct_child_path(&path, "OCI send ledger")?;
+    let parent = path.parent().ok_or_else(|| {
+        InterspireError::Safety(
+            "OCI send ledger path must have a private parent directory".to_string(),
+        )
+    })?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(|err| {
+        InterspireError::Io(format!(
+            "failed to stat private OCI ledger directory: {err}"
+        ))
+    })?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(InterspireError::Safety(
+            "OCI send ledger parent must be a real private directory".to_string(),
+        ));
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(InterspireError::Safety(
+                "OCI send ledger path must be a regular file when it already exists".to_string(),
+            ));
+        }
+    }
+    Ok(path)
+}
+
+fn private_manifest_path(ledger_path: &Path, raw_path: &str) -> Result<PathBuf, InterspireError> {
+    let path = PathBuf::from(raw_path.trim());
+    ensure_private_direct_child_path(&path, "OCI send ledger manifest")?;
+    if path.parent() != ledger_path.parent() {
+        return Err(InterspireError::Safety(
+            "OCI send ledger manifest must be a direct child of the configured ledger directory"
+                .to_string(),
+        ));
+    }
+    if path == ledger_path {
+        return Err(InterspireError::Safety(
+            "OCI send ledger manifest must not be the ledger output file".to_string(),
+        ));
+    }
+    let metadata = fs::symlink_metadata(&path).map_err(|err| {
+        InterspireError::Io(format!("failed to stat private OCI ledger manifest: {err}"))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(InterspireError::Safety(
+            "OCI send ledger manifest must be a regular private file".to_string(),
+        ));
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_LEDGER_MANIFEST_BYTES {
+        return Err(InterspireError::Safety(format!(
+            "OCI send ledger manifest size must be between 1 and {MAX_LEDGER_MANIFEST_BYTES} bytes"
+        )));
+    }
+    Ok(path)
+}
+
+fn ensure_private_direct_child_path(path: &Path, label: &str) -> Result<(), InterspireError> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(InterspireError::Safety(format!(
+            "{label} path must be an absolute direct-child file path without dot components"
+        )));
+    }
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Err(InterspireError::Safety(format!(
+            "{label} filename is invalid"
+        )));
+    };
+    if file_name.is_empty()
+        || file_name.len() > 160
+        || file_name.contains("..")
+        || !file_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(InterspireError::Safety(format!(
+            "{label} filename is outside the private filename policy"
+        )));
+    }
+    Ok(())
+}
+
+fn read_private_manifest(
+    path: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<PrivateManifest, InterspireError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|err| {
+            InterspireError::Io(format!("failed to open private OCI ledger manifest: {err}"))
+        })?;
+    let metadata = file.metadata().map_err(|err| {
+        InterspireError::Io(format!("failed to stat private OCI ledger manifest: {err}"))
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_LEDGER_MANIFEST_BYTES {
+        return Err(InterspireError::Safety(format!(
+            "OCI send ledger manifest size must be between 1 and {MAX_LEDGER_MANIFEST_BYTES} bytes"
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|err| {
+        InterspireError::Io(format!("failed to read private OCI ledger manifest: {err}"))
+    })?;
+    let sha256 = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&bytes))
+    };
+    if let Some(expected) = expected_sha256 {
+        if expected.trim().to_ascii_lowercase() != sha256 {
+            return Err(InterspireError::Safety(
+                "private OCI send ledger manifest SHA-256 did not match expected value".to_string(),
+            ));
+        }
+    }
+    let text = String::from_utf8(bytes).map_err(|_| {
+        InterspireError::Safety(
+            "private OCI send ledger manifest must be valid UTF-8 JSONL".to_string(),
+        )
+    })?;
+    Ok(PrivateManifest { sha256, text })
+}
+
+fn prepare_manifest_rows(
+    request: &OciSendLedgerPreparePreviewRequest,
+    sender_domain: &str,
+    manifest: &PrivateManifest,
+) -> Result<PreparedManifestRows, InterspireError> {
+    let campaign_id = request.campaign_id.trim();
+    let campaign_hash = ledger_hash(campaign_id);
+    let batch_hash = ledger_hash(&request.batch_id);
+    let approved_sender_hash = request
+        .approved_sender
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ledger_hash);
+    let template_sha256 = normalized_optional_sha256(request.template_sha256.as_deref())?;
+    let subject_sha256 = normalized_optional_sha256(request.subject_sha256.as_deref())?;
+    let mut rows = Vec::new();
+    let mut recipient_keys = BTreeSet::new();
+    let mut trace_keys = BTreeSet::new();
+    let mut duplicate_recipient_key_count = 0u64;
+    let mut duplicate_trace_key_count = 0u64;
+    let mut warnings = Vec::new();
+
+    for (index, line) in manifest.text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if rows.len() as u64 >= MAX_LEDGER_MANIFEST_ROWS {
+            return Err(InterspireError::Safety(format!(
+                "OCI send ledger manifest must contain at most {MAX_LEDGER_MANIFEST_ROWS} rows"
+            )));
+        }
+        let value = serde_json::from_str::<Value>(line).map_err(|_| {
+            InterspireError::Safety(format!(
+                "OCI send ledger manifest row {} is not a valid JSON object",
+                index + 1
+            ))
+        })?;
+        if !value.is_object() {
+            return Err(InterspireError::Safety(format!(
+                "OCI send ledger manifest row {} is not a valid JSON object",
+                index + 1
+            )));
+        }
+        let Some(recipient_hash) = recipient_hash_from_manifest(&value)? else {
+            return Err(InterspireError::Safety(format!(
+                "OCI send ledger manifest row {} lacks a recipient identifier or recipient hash",
+                index + 1
+            )));
+        };
+        let Some((trace_field, trace_hash)) = trace_hash_from_manifest(&value)? else {
+            return Err(InterspireError::Safety(format!(
+                "OCI send ledger manifest row {} lacks a provider message, correlation, or header identifier",
+                index + 1
+            )));
+        };
+        if !recipient_keys.insert(recipient_hash.clone()) {
+            duplicate_recipient_key_count += 1;
+        }
+        if !trace_keys.insert(trace_hash.clone()) {
+            duplicate_trace_key_count += 1;
+        }
+
+        let mut row = Map::new();
+        row.insert("provider".to_string(), Value::String("oci".to_string()));
+        row.insert(
+            "ledger_prepare_version".to_string(),
+            Value::String(LEDGER_PREPARE_VERSION.to_string()),
+        );
+        row.insert(
+            "campaign_id".to_string(),
+            Value::String(campaign_id.to_string()),
+        );
+        row.insert(
+            "campaign_hash".to_string(),
+            Value::String(campaign_hash.clone()),
+        );
+        row.insert("batch_hash".to_string(), Value::String(batch_hash.clone()));
+        row.insert(
+            "sender_domain".to_string(),
+            Value::String(sender_domain.to_string()),
+        );
+        row.insert(
+            "manifest_sha256".to_string(),
+            Value::String(manifest.sha256.clone()),
+        );
+        row.insert("recipient_hash".to_string(), Value::String(recipient_hash));
+        row.insert(trace_field.to_string(), Value::String(trace_hash));
+        if let Some(hash) = approved_sender_hash.as_ref() {
+            row.insert(
+                "approved_sender_hash".to_string(),
+                Value::String(hash.clone()),
+            );
+        }
+        if let Some(sha256) = template_sha256.as_ref() {
+            row.insert("template_sha256".to_string(), Value::String(sha256.clone()));
+        }
+        if let Some(sha256) = subject_sha256.as_ref() {
+            row.insert("subject_sha256".to_string(), Value::String(sha256.clone()));
+        }
+        rows.push(serde_json::to_string(&Value::Object(row)).map_err(|err| {
+            InterspireError::Io(format!("failed to serialize private OCI ledger row: {err}"))
+        })?);
+    }
+
+    if duplicate_recipient_key_count > 0 {
+        warnings
+            .push("private OCI send ledger manifest contains duplicate recipient keys".to_string());
+    }
+    if duplicate_trace_key_count > 0 {
+        warnings.push("private OCI send ledger manifest contains duplicate trace keys".to_string());
+    }
+
+    Ok(PreparedManifestRows {
+        validated_rows: rows.len() as u64,
+        rows,
+        duplicate_recipient_key_count,
+        duplicate_trace_key_count,
+        warnings,
+    })
+}
+
+fn recipient_hash_from_manifest(value: &Value) -> Result<Option<String>, InterspireError> {
+    hash_or_raw_from_manifest(
+        value,
+        &[
+            "recipient_hash",
+            "recipientHash",
+            "recipient_id_hash",
+            "recipientIdHash",
+            "recipient_address_hash",
+            "recipientAddressHash",
+        ],
+        &[
+            "recipient_id",
+            "recipientId",
+            "subscriber_id",
+            "subscriberId",
+            "contact_id",
+            "contactId",
+            "recipient",
+            "recipient_email",
+            "recipientEmail",
+            "email",
+        ],
+    )
+}
+
+fn trace_hash_from_manifest(
+    value: &Value,
+) -> Result<Option<(&'static str, String)>, InterspireError> {
+    if let Some(hash) = hash_or_raw_from_manifest(
+        value,
+        &["message_id_hash", "messageIdHash"],
+        &[
+            "message_id",
+            "messageId",
+            "provider_message_id",
+            "providerMessageId",
+        ],
+    )? {
+        return Ok(Some(("message_id_hash", hash)));
+    }
+    if let Some(hash) = hash_or_raw_from_manifest(
+        value,
+        &["correlation_id_hash", "correlationIdHash"],
+        &["correlation_id", "correlationId"],
+    )? {
+        return Ok(Some(("correlation_id_hash", hash)));
+    }
+    Ok(hash_or_raw_from_manifest(
+        value,
+        &["header_value_hash", "headerValueHash"],
+        &["header_value", "headerValue"],
+    )?
+    .map(|hash| ("header_value_hash", hash)))
+}
+
+fn hash_or_raw_from_manifest(
+    value: &Value,
+    hash_keys: &[&str],
+    raw_keys: &[&str],
+) -> Result<Option<String>, InterspireError> {
+    if let Some(hash) = manifest_hash_any(value, hash_keys)? {
+        return Ok(Some(hash));
+    }
+    Ok(non_empty_string_any(value, raw_keys).map(ledger_hash))
+}
+
+fn manifest_hash_any(value: &Value, keys: &[&str]) -> Result<Option<String>, InterspireError> {
+    for key in keys {
+        let Some(raw) = value.get(*key).and_then(Value::as_str) else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !valid_manifest_hash_token(trimmed) {
+            return Err(InterspireError::Safety(
+                "OCI send ledger manifest *_hash fields must contain 20- or 64-character hex digests"
+                    .to_string(),
+            ));
+        }
+        return Ok(Some(trimmed.to_ascii_lowercase()));
+    }
+    Ok(None)
+}
+
+fn non_empty_string_any<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .filter_map(|key| value.get(*key).and_then(Value::as_str))
+        .find(|item| !item.trim().is_empty())
+}
+
+fn valid_manifest_hash_token(value: &str) -> bool {
+    matches!(value.len(), 20 | 64) && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn append_private_ledger_rows(path: &Path, rows: &[String]) -> Result<(), InterspireError> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(InterspireError::Safety(
+                "OCI send ledger path must be a regular file before append".to_string(),
+            ));
+        }
+    }
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|err| {
+            InterspireError::Io(format!(
+                "failed to open private OCI send ledger for append: {err}"
+            ))
+        })?;
+    for row in rows {
+        file.write_all(row.as_bytes()).map_err(|err| {
+            InterspireError::Io(format!(
+                "failed to write private OCI send ledger row: {err}"
+            ))
+        })?;
+        file.write_all(b"\n").map_err(|err| {
+            InterspireError::Io(format!(
+                "failed to write private OCI send ledger row: {err}"
+            ))
+        })?;
+    }
+    file.flush().map_err(|err| {
+        InterspireError::Io(format!("failed to flush private OCI send ledger: {err}"))
+    })
+}
+
+fn normalized_optional_sha256(value: Option<&str>) -> Result<Option<String>, InterspireError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if !valid_sha256(value) {
+        return Err(InterspireError::Safety(
+            "optional OCI send ledger SHA-256 fields must be 64-character hex digests".to_string(),
+        ));
+    }
+    Ok(Some(value.to_ascii_lowercase()))
 }
 
 fn matches_identifier(filter: &str, raw_value: Option<&str>, hash_value: Option<&str>) -> bool {
@@ -438,6 +1430,533 @@ mod tests {
         assert!(report.sender_domain.is_none());
         assert!(report.manifest_sha256.is_none());
         assert!(!body.contains("private-manifest-token"));
+    }
+
+    #[test]
+    fn prepare_preview_builds_private_plan_without_writing_or_exposing_manifest_values() {
+        const LEDGER: &str = "/tmp/interspire-mcp-oci-prepare-preview-ledger.jsonl";
+        const MANIFEST: &str = "/tmp/interspire-mcp-oci-prepare-preview-manifest.jsonl";
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+        fs::write(
+            MANIFEST,
+            "{\"recipient_email\":\"person-one@example.invalid\",\"correlation_id\":\"trace-one\"}\n\
+             {\"recipient_id\":\"subscriber-two\",\"header_value\":\"trace-two\"}\n",
+        )
+        .expect("write manifest");
+
+        let report = prepare_preview(
+            &OciSendLedgerConfig {
+                path: Some(LEDGER.to_string()),
+                required_for_sends: true,
+            },
+            &OciSendLedgerPreparePreviewRequest {
+                campaign_id: "7".to_string(),
+                batch_id: "batch-private".to_string(),
+                expected_rows: 2,
+                sender_domain: "example.invalid".to_string(),
+                manifest_path: MANIFEST.to_string(),
+                expected_manifest_sha256: None,
+                approved_sender: Some("sender@example.invalid".to_string()),
+                template_sha256: None,
+                subject_sha256: None,
+            },
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let body = serde_json::to_string(&report).expect("serialize report");
+
+        assert!(report.ok);
+        assert!(!report.apply);
+        assert!(!report.ledger_written);
+        assert_eq!(report.validated_manifest_rows, 2);
+        assert!(!report.oci_ledger_preflight.verified);
+        assert!(!Path::new(LEDGER).exists());
+        assert!(!body.contains("person-one@example.invalid"));
+        assert!(!body.contains("subscriber-two"));
+        assert!(!body.contains("trace-one"));
+        assert!(!body.contains("trace-two"));
+        let _ = fs::remove_file(MANIFEST);
+    }
+
+    #[test]
+    fn prepare_apply_writes_sanitized_rows_and_verifies_preflight() {
+        const LEDGER: &str = "/tmp/interspire-mcp-oci-prepare-apply-ledger.jsonl";
+        const MANIFEST: &str = "/tmp/interspire-mcp-oci-prepare-apply-manifest.jsonl";
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+        fs::write(
+            MANIFEST,
+            "{\"recipient_email\":\"person-one@example.invalid\",\"message_id\":\"provider-message-one\"}\n\
+             {\"recipient_id\":\"subscriber-two\",\"correlation_id\":\"trace-two\"}\n",
+        )
+        .expect("write manifest");
+        let ledger_config = OciSendLedgerConfig {
+            path: Some(LEDGER.to_string()),
+            required_for_sends: true,
+        };
+        let preview_request = OciSendLedgerPreparePreviewRequest {
+            campaign_id: "7".to_string(),
+            batch_id: "batch-private".to_string(),
+            expected_rows: 2,
+            sender_domain: "example.invalid".to_string(),
+            manifest_path: MANIFEST.to_string(),
+            expected_manifest_sha256: None,
+            approved_sender: Some("sender@example.invalid".to_string()),
+            template_sha256: None,
+            subject_sha256: None,
+        };
+        let preview =
+            prepare_preview(&ledger_config, &preview_request).unwrap_or_else(|err| panic!("{err}"));
+        let report = prepare_apply(
+            &GuardedWriteConfig {
+                enabled: true,
+                send_controls_enabled: true,
+                ..GuardedWriteConfig::default()
+            },
+            &ledger_config,
+            &OciSendLedgerPrepareApplyRequest {
+                campaign_id: preview_request.campaign_id,
+                batch_id: preview_request.batch_id,
+                expected_rows: preview_request.expected_rows,
+                sender_domain: preview_request.sender_domain,
+                manifest_path: preview_request.manifest_path,
+                expected_manifest_sha256: preview_request.expected_manifest_sha256,
+                approved_sender: preview_request.approved_sender,
+                template_sha256: preview_request.template_sha256,
+                subject_sha256: preview_request.subject_sha256,
+                expected_plan_id: preview.plan_id.expect("plan id"),
+                acknowledge_ledger_write: true,
+            },
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let body = serde_json::to_string(&report).expect("serialize report");
+        let ledger_body = fs::read_to_string(LEDGER).expect("read ledger");
+
+        assert!(report.ok);
+        assert!(report.apply);
+        assert!(report.ledger_written);
+        assert_eq!(report.appended_rows, 2);
+        assert!(report.oci_ledger_preflight.verified);
+        assert_eq!(report.oci_ledger_preflight.matched_rows, 2);
+        assert!(!report.send_authorized);
+        assert!(!report.production_send_authorized);
+        assert!(!body.contains("person-one@example.invalid"));
+        assert!(!body.contains("provider-message-one"));
+        assert!(!ledger_body.contains("person-one@example.invalid"));
+        assert!(!ledger_body.contains("subscriber-two"));
+        assert!(!ledger_body.contains("provider-message-one"));
+        assert!(ledger_body.contains("\"recipient_hash\""));
+        assert!(
+            ledger_body.contains("\"message_id_hash\"")
+                || ledger_body.contains("\"correlation_id_hash\"")
+        );
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+    }
+
+    #[test]
+    fn prepare_apply_refuses_preflight_valid_but_different_existing_rows() {
+        const LEDGER: &str = "/tmp/interspire-mcp-oci-existing-mismatch-ledger.jsonl";
+        const MANIFEST: &str = "/tmp/interspire-mcp-oci-existing-mismatch-manifest.jsonl";
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+        fs::write(
+            MANIFEST,
+            "{\"recipient_email\":\"person-one@example.invalid\",\"message_id\":\"provider-message-one\"}\n",
+        )
+        .expect("write manifest");
+        let ledger_config = OciSendLedgerConfig {
+            path: Some(LEDGER.to_string()),
+            required_for_sends: true,
+        };
+        let preview_request = OciSendLedgerPreparePreviewRequest {
+            campaign_id: "7".to_string(),
+            batch_id: "batch-private".to_string(),
+            expected_rows: 1,
+            sender_domain: "example.invalid".to_string(),
+            manifest_path: MANIFEST.to_string(),
+            expected_manifest_sha256: None,
+            approved_sender: None,
+            template_sha256: None,
+            subject_sha256: None,
+        };
+        let preview =
+            prepare_preview(&ledger_config, &preview_request).unwrap_or_else(|err| panic!("{err}"));
+        let manifest_sha256 = preview.manifest_sha256.clone().expect("manifest sha");
+        fs::write(
+            LEDGER,
+            format!(
+                "{{\"campaign_id\":\"7\",\"batch_hash\":\"{}\",\"sender_domain\":\"example.invalid\",\"manifest_sha256\":\"{}\",\"recipient_hash\":\"{}\",\"message_id_hash\":\"{}\"}}\n",
+                ledger_hash("batch-private"),
+                manifest_sha256,
+                ledger_hash("different-recipient"),
+                ledger_hash("different-message")
+            ),
+        )
+        .expect("write existing ledger");
+
+        let report = prepare_apply(
+            &GuardedWriteConfig {
+                enabled: true,
+                send_controls_enabled: true,
+                ..GuardedWriteConfig::default()
+            },
+            &ledger_config,
+            &OciSendLedgerPrepareApplyRequest {
+                campaign_id: preview_request.campaign_id,
+                batch_id: preview_request.batch_id,
+                expected_rows: preview_request.expected_rows,
+                sender_domain: preview_request.sender_domain,
+                manifest_path: preview_request.manifest_path,
+                expected_manifest_sha256: preview_request.expected_manifest_sha256,
+                approved_sender: preview_request.approved_sender,
+                template_sha256: preview_request.template_sha256,
+                subject_sha256: preview_request.subject_sha256,
+                expected_plan_id: preview.plan_id.expect("plan id"),
+                acknowledge_ledger_write: true,
+            },
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let ledger_body = fs::read_to_string(LEDGER).expect("read ledger");
+
+        assert!(!report.ok);
+        assert!(report.oci_ledger_preflight.verified);
+        assert!(!report.already_present);
+        assert!(!report.ledger_written);
+        assert_eq!(ledger_body.lines().count(), 1);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("do not match the current prepared row set")));
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+    }
+
+    #[test]
+    fn prepare_apply_is_idempotent_for_exact_prepared_rows() {
+        const LEDGER: &str = "/tmp/interspire-mcp-oci-idempotent-ledger.jsonl";
+        const MANIFEST: &str = "/tmp/interspire-mcp-oci-idempotent-manifest.jsonl";
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+        fs::write(
+            MANIFEST,
+            "{\"recipient_email\":\"person-one@example.invalid\",\"correlation_id\":\"trace-one\"}\n",
+        )
+        .expect("write manifest");
+        let ledger_config = OciSendLedgerConfig {
+            path: Some(LEDGER.to_string()),
+            required_for_sends: true,
+        };
+        let preview_request = OciSendLedgerPreparePreviewRequest {
+            campaign_id: "7".to_string(),
+            batch_id: "batch-private".to_string(),
+            expected_rows: 1,
+            sender_domain: "example.invalid".to_string(),
+            manifest_path: MANIFEST.to_string(),
+            expected_manifest_sha256: None,
+            approved_sender: None,
+            template_sha256: None,
+            subject_sha256: None,
+        };
+        let preview =
+            prepare_preview(&ledger_config, &preview_request).unwrap_or_else(|err| panic!("{err}"));
+        let apply_request = OciSendLedgerPrepareApplyRequest {
+            campaign_id: preview_request.campaign_id,
+            batch_id: preview_request.batch_id,
+            expected_rows: preview_request.expected_rows,
+            sender_domain: preview_request.sender_domain,
+            manifest_path: preview_request.manifest_path,
+            expected_manifest_sha256: preview_request.expected_manifest_sha256,
+            approved_sender: preview_request.approved_sender,
+            template_sha256: preview_request.template_sha256,
+            subject_sha256: preview_request.subject_sha256,
+            expected_plan_id: preview.plan_id.expect("plan id"),
+            acknowledge_ledger_write: true,
+        };
+        let first = prepare_apply(
+            &GuardedWriteConfig {
+                enabled: true,
+                send_controls_enabled: true,
+                ..GuardedWriteConfig::default()
+            },
+            &ledger_config,
+            &apply_request,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let second = prepare_apply(
+            &GuardedWriteConfig {
+                enabled: true,
+                send_controls_enabled: true,
+                ..GuardedWriteConfig::default()
+            },
+            &ledger_config,
+            &apply_request,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let ledger_body = fs::read_to_string(LEDGER).expect("read ledger");
+
+        assert!(first.ok);
+        assert!(first.ledger_written);
+        assert!(second.ok);
+        assert!(second.already_present);
+        assert!(!second.ledger_written);
+        assert_eq!(ledger_body.lines().count(), 1);
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+    }
+
+    #[test]
+    fn prepare_apply_refuses_stale_plan_without_writing() {
+        const LEDGER: &str = "/tmp/interspire-mcp-oci-stale-plan-ledger.jsonl";
+        const MANIFEST: &str = "/tmp/interspire-mcp-oci-stale-plan-manifest.jsonl";
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+        fs::write(
+            MANIFEST,
+            "{\"recipient_email\":\"person-one@example.invalid\",\"correlation_id\":\"trace-one\"}\n",
+        )
+        .expect("write manifest");
+        let report = prepare_apply(
+            &GuardedWriteConfig {
+                enabled: true,
+                send_controls_enabled: true,
+                ..GuardedWriteConfig::default()
+            },
+            &OciSendLedgerConfig {
+                path: Some(LEDGER.to_string()),
+                required_for_sends: true,
+            },
+            &OciSendLedgerPrepareApplyRequest {
+                campaign_id: "7".to_string(),
+                batch_id: "batch-private".to_string(),
+                expected_rows: 1,
+                sender_domain: "example.invalid".to_string(),
+                manifest_path: MANIFEST.to_string(),
+                expected_manifest_sha256: None,
+                approved_sender: None,
+                template_sha256: None,
+                subject_sha256: None,
+                expected_plan_id: "iqc_wrong_plan".to_string(),
+                acknowledge_ledger_write: true,
+            },
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.ok);
+        assert_eq!(report.expected_plan_match, Some(false));
+        assert!(!report.ledger_written);
+        assert!(!Path::new(LEDGER).exists());
+        let _ = fs::remove_file(MANIFEST);
+    }
+
+    #[test]
+    fn prepare_apply_refuses_when_lock_exists() {
+        const LEDGER: &str = "/tmp/interspire-mcp-oci-locked-ledger.jsonl";
+        const MANIFEST: &str = "/tmp/interspire-mcp-oci-locked-manifest.jsonl";
+        const LOCK: &str = "/tmp/.interspire-mcp-oci-locked-ledger.jsonl.lock";
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+        let _ = fs::remove_file(LOCK);
+        fs::write(
+            MANIFEST,
+            "{\"recipient_email\":\"person-one@example.invalid\",\"correlation_id\":\"trace-one\"}\n",
+        )
+        .expect("write manifest");
+        fs::write(LOCK, "").expect("write lock");
+        let ledger_config = OciSendLedgerConfig {
+            path: Some(LEDGER.to_string()),
+            required_for_sends: true,
+        };
+        let preview_request = OciSendLedgerPreparePreviewRequest {
+            campaign_id: "7".to_string(),
+            batch_id: "batch-private".to_string(),
+            expected_rows: 1,
+            sender_domain: "example.invalid".to_string(),
+            manifest_path: MANIFEST.to_string(),
+            expected_manifest_sha256: None,
+            approved_sender: None,
+            template_sha256: None,
+            subject_sha256: None,
+        };
+        let preview =
+            prepare_preview(&ledger_config, &preview_request).unwrap_or_else(|err| panic!("{err}"));
+        let err = prepare_apply(
+            &GuardedWriteConfig {
+                enabled: true,
+                send_controls_enabled: true,
+                ..GuardedWriteConfig::default()
+            },
+            &ledger_config,
+            &OciSendLedgerPrepareApplyRequest {
+                campaign_id: preview_request.campaign_id,
+                batch_id: preview_request.batch_id,
+                expected_rows: preview_request.expected_rows,
+                sender_domain: preview_request.sender_domain,
+                manifest_path: preview_request.manifest_path,
+                expected_manifest_sha256: preview_request.expected_manifest_sha256,
+                approved_sender: preview_request.approved_sender,
+                template_sha256: preview_request.template_sha256,
+                subject_sha256: preview_request.subject_sha256,
+                expected_plan_id: preview.plan_id.expect("plan id"),
+                acknowledge_ledger_write: true,
+            },
+        )
+        .expect_err("lock should deny apply");
+
+        assert!(matches!(err, InterspireError::Safety(_)));
+        assert!(!Path::new(LEDGER).exists());
+        let _ = fs::remove_file(LOCK);
+        let _ = fs::remove_file(MANIFEST);
+    }
+
+    #[test]
+    fn prepare_apply_refuses_warning_plan_without_writing() {
+        const LEDGER: &str = "/tmp/interspire-mcp-oci-warning-plan-ledger.jsonl";
+        const MANIFEST: &str = "/tmp/interspire-mcp-oci-warning-plan-manifest.jsonl";
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+        fs::write(
+            MANIFEST,
+            "{\"recipient_email\":\"person-one@example.invalid\",\"correlation_id\":\"trace-one\"}\n",
+        )
+        .expect("write manifest");
+        let ledger_config = OciSendLedgerConfig {
+            path: Some(LEDGER.to_string()),
+            required_for_sends: true,
+        };
+        let preview_request = OciSendLedgerPreparePreviewRequest {
+            campaign_id: "7".to_string(),
+            batch_id: "batch-private".to_string(),
+            expected_rows: 2,
+            sender_domain: "example.invalid".to_string(),
+            manifest_path: MANIFEST.to_string(),
+            expected_manifest_sha256: None,
+            approved_sender: None,
+            template_sha256: None,
+            subject_sha256: None,
+        };
+        let preview =
+            prepare_preview(&ledger_config, &preview_request).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!preview.ok);
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("usable rows")));
+
+        let report = prepare_apply(
+            &GuardedWriteConfig {
+                enabled: true,
+                send_controls_enabled: true,
+                ..GuardedWriteConfig::default()
+            },
+            &ledger_config,
+            &OciSendLedgerPrepareApplyRequest {
+                campaign_id: preview_request.campaign_id,
+                batch_id: preview_request.batch_id,
+                expected_rows: preview_request.expected_rows,
+                sender_domain: preview_request.sender_domain,
+                manifest_path: preview_request.manifest_path,
+                expected_manifest_sha256: preview_request.expected_manifest_sha256,
+                approved_sender: preview_request.approved_sender,
+                template_sha256: preview_request.template_sha256,
+                subject_sha256: preview_request.subject_sha256,
+                expected_plan_id: preview.plan_id.expect("plan id"),
+                acknowledge_ledger_write: true,
+            },
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.ok);
+        assert_eq!(report.expected_plan_match, Some(true));
+        assert!(!report.ledger_written);
+        assert!(!Path::new(LEDGER).exists());
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("validation warnings")));
+        let _ = fs::remove_file(MANIFEST);
+    }
+
+    #[test]
+    fn prepare_preview_rejects_malformed_manifest_hash_fields() {
+        const LEDGER: &str = "/tmp/interspire-mcp-oci-bad-hash-ledger.jsonl";
+        const MANIFEST: &str = "/tmp/interspire-mcp-oci-bad-hash-manifest.jsonl";
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(MANIFEST);
+        fs::write(
+            MANIFEST,
+            "{\"recipient_hash\":\"person-one@example.invalid\",\"correlation_id\":\"trace-one\"}\n",
+        )
+        .expect("write manifest");
+        let err = prepare_preview(
+            &OciSendLedgerConfig {
+                path: Some(LEDGER.to_string()),
+                required_for_sends: true,
+            },
+            &OciSendLedgerPreparePreviewRequest {
+                campaign_id: "7".to_string(),
+                batch_id: "batch-private".to_string(),
+                expected_rows: 1,
+                sender_domain: "example.invalid".to_string(),
+                manifest_path: MANIFEST.to_string(),
+                expected_manifest_sha256: None,
+                approved_sender: None,
+                template_sha256: None,
+                subject_sha256: None,
+            },
+        )
+        .expect_err("malformed hash field should be rejected");
+
+        assert!(matches!(err, InterspireError::Safety(_)));
+        assert!(!Path::new(LEDGER).exists());
+        let _ = fs::remove_file(MANIFEST);
+    }
+
+    #[test]
+    fn prepare_preview_rejects_blank_raw_manifest_identifiers() {
+        const LEDGER: &str = "/tmp/interspire-mcp-oci-blank-raw-ledger.jsonl";
+        const BLANK_RECIPIENT: &str = "/tmp/interspire-mcp-oci-blank-recipient.jsonl";
+        const BLANK_TRACE: &str = "/tmp/interspire-mcp-oci-blank-trace.jsonl";
+        let _ = fs::remove_file(LEDGER);
+        let _ = fs::remove_file(BLANK_RECIPIENT);
+        let _ = fs::remove_file(BLANK_TRACE);
+        fs::write(
+            BLANK_RECIPIENT,
+            "{\"recipient_email\":\"\",\"correlation_id\":\"trace-one\"}\n",
+        )
+        .expect("write blank recipient manifest");
+        fs::write(
+            BLANK_TRACE,
+            "{\"recipient_email\":\"person-one@example.invalid\",\"message_id\":\"\"}\n",
+        )
+        .expect("write blank trace manifest");
+
+        let request = |manifest_path: &Path| OciSendLedgerPreparePreviewRequest {
+            campaign_id: "7".to_string(),
+            batch_id: "batch-private".to_string(),
+            expected_rows: 1,
+            sender_domain: "example.invalid".to_string(),
+            manifest_path: manifest_path.to_string_lossy().to_string(),
+            expected_manifest_sha256: None,
+            approved_sender: None,
+            template_sha256: None,
+            subject_sha256: None,
+        };
+        let ledger_config = OciSendLedgerConfig {
+            path: Some(LEDGER.to_string()),
+            required_for_sends: true,
+        };
+
+        let blank_recipient = prepare_preview(&ledger_config, &request(Path::new(BLANK_RECIPIENT)))
+            .expect_err("blank recipient should be rejected");
+        let blank_trace = prepare_preview(&ledger_config, &request(Path::new(BLANK_TRACE)))
+            .expect_err("blank trace should be rejected");
+
+        assert!(matches!(blank_recipient, InterspireError::Safety(_)));
+        assert!(matches!(blank_trace, InterspireError::Safety(_)));
+        assert!(!Path::new(LEDGER).exists());
+        let _ = fs::remove_file(BLANK_RECIPIENT);
+        let _ = fs::remove_file(BLANK_TRACE);
     }
 
     fn fixture_path(label: &str) -> PathBuf {

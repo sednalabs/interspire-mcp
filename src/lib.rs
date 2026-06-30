@@ -80,7 +80,8 @@ pub use response::{
     GuardedWriteApplyReport, GuardedWritePreviewReport, ListCreateApplyRequest,
     ListCreatePreviewRequest, ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary,
     ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
-    OciLedgerPreflightReport, OciLedgerPreflightRequest, ProductionSendApplyReport,
+    OciLedgerPreflightReport, OciLedgerPreflightRequest, OciSendLedgerPrepareApplyRequest,
+    OciSendLedgerPreparePreviewRequest, OciSendLedgerPrepareReport, ProductionSendApplyReport,
     ProductionSendApplyRequest, QueueControlAction, QueueControlApplyReport,
     QueueControlApplyRequest, QueueControlCandidate, QueueControlPreviewReport,
     QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
@@ -204,6 +205,14 @@ pub trait InterspireReadBackend: Send + Sync {
         &self,
         request: &CampaignTestSendApplyRequest,
     ) -> Result<CampaignTestSendApplyReport, InterspireError>;
+    fn oci_send_ledger_prepare_preview(
+        &self,
+        request: &OciSendLedgerPreparePreviewRequest,
+    ) -> Result<OciSendLedgerPrepareReport, InterspireError>;
+    fn oci_send_ledger_prepare_apply(
+        &self,
+        request: &OciSendLedgerPrepareApplyRequest,
+    ) -> Result<OciSendLedgerPrepareReport, InterspireError>;
     fn send_wizard_readback(
         &self,
         request: &SendWizardReadbackRequest,
@@ -448,6 +457,20 @@ impl InterspireMcpServer {
                             "apply",
                             "guarded-send",
                         ],
+                    )),
+                ToolCapability::new("interspire_oci_send_ledger_prepare_preview")
+                    .with_group("guarded-send")
+                    .with_risk_posture(GuardedActionPosture::no_mutation_proof())
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Preview sanitized private OCI send-ledger rows from a private JSONL manifest without writing the ledger or sending.",
+                        ["interspire", "oci", "send", "ledger", "prepare", "preview"],
+                    )),
+                ToolCapability::new("interspire_oci_send_ledger_prepare_apply")
+                    .with_group("guarded-send")
+                    .with_read_only(false)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Write sanitized private OCI send-ledger rows from an acknowledged preview plan and rerun OCI ledger preflight without sending.",
+                        ["interspire", "oci", "send", "ledger", "prepare", "apply"],
                     )),
                 ToolCapability::new("interspire_send_wizard_readback")
                     .with_group("read")
@@ -1057,6 +1080,26 @@ impl InterspireMcpServer {
     }
 
     #[tool(
+        description = "Preview sanitized private OCI send-ledger rows from a private JSONL manifest without writing the ledger, contacting OCI, sending, scheduling, queueing, importing contacts, or mutating lists."
+    )]
+    fn interspire_oci_send_ledger_prepare_preview(
+        &self,
+        Parameters(request): Parameters<OciSendLedgerPreparePreviewRequest>,
+    ) -> String {
+        response::tool_json(self.backend.oci_send_ledger_prepare_preview(&request))
+    }
+
+    #[tool(
+        description = "Write sanitized private OCI send-ledger rows from an explicitly acknowledged preview plan and rerun OCI ledger preflight. Requires guarded writes, send controls, expected_plan_id, and acknowledge_ledger_write=true; this does not contact OCI or perform an Interspire send."
+    )]
+    fn interspire_oci_send_ledger_prepare_apply(
+        &self,
+        Parameters(request): Parameters<OciSendLedgerPrepareApplyRequest>,
+    ) -> String {
+        response::tool_json(self.backend.oci_send_ledger_prepare_apply(&request))
+    }
+
+    #[tool(
         description = "Render the send wizard through the no-send preview boundary and verify queue/stat invariants."
     )]
     fn interspire_send_wizard_readback(
@@ -1418,6 +1461,27 @@ fn with_interspire_tool_metadata(tool: Tool) -> Tool {
                 .idempotent(false)
                 .open_world(false),
         ),
+        "interspire_oci_send_ledger_prepare_preview" => {
+            let meta = with_mcp_apps_no_mutation_proof_metadata(
+                Some(Meta::new()),
+                "read a private OCI send-ledger manifest and compute sanitized ledger rows without writing the ledger or sending",
+            );
+            tool.with_annotations(
+                ToolAnnotations::with_title("OCI send-ledger prepare preview")
+                    .read_only(true)
+                    .destructive(false)
+                    .idempotent(true)
+                    .open_world(false),
+            )
+            .with_meta(meta)
+        }
+        "interspire_oci_send_ledger_prepare_apply" => tool.with_annotations(
+            ToolAnnotations::with_title("OCI send-ledger prepare apply")
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
         "interspire_seed_send_apply" => tool.with_annotations(
             ToolAnnotations::with_title("Seed send apply")
                 .read_only(false)
@@ -1600,6 +1664,20 @@ mod tests {
             _request: &CampaignTestSendApplyRequest,
         ) -> Result<CampaignTestSendApplyReport, InterspireError> {
             Ok(CampaignTestSendApplyReport::fixture())
+        }
+
+        fn oci_send_ledger_prepare_preview(
+            &self,
+            _request: &OciSendLedgerPreparePreviewRequest,
+        ) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+            Ok(OciSendLedgerPrepareReport::fixture())
+        }
+
+        fn oci_send_ledger_prepare_apply(
+            &self,
+            _request: &OciSendLedgerPrepareApplyRequest,
+        ) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+            Ok(OciSendLedgerPrepareReport::fixture())
         }
 
         fn send_wizard_readback(
@@ -1842,6 +1920,8 @@ mod tests {
                 "interspire_list_summary",
                 "interspire_list_update_apply",
                 "interspire_list_update_preview",
+                "interspire_oci_send_ledger_prepare_apply",
+                "interspire_oci_send_ledger_prepare_preview",
                 "interspire_production_send_apply",
                 "interspire_queue_control_apply",
                 "interspire_queue_control_preview",

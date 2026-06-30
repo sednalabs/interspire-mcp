@@ -290,6 +290,8 @@ pub fn default_status_capabilities() -> Vec<String> {
         "interspire_campaign_render_artifact",
         "interspire_campaign_test_send_preview",
         "interspire_campaign_test_send_apply",
+        "interspire_oci_send_ledger_prepare_preview",
+        "interspire_oci_send_ledger_prepare_apply",
         "interspire_send_wizard_readback",
         "interspire_seed_readiness_gate",
         "interspire_seed_send_apply",

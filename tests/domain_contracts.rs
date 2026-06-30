@@ -12,17 +12,18 @@ use interspire_mcp::{
     InterspireReadBackend, ListCreateApplyRequest, ListCreatePreviewRequest,
     ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary, ListSummaryReport,
     ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
-    ProductionSendApplyReport, ProductionSendApplyRequest, QueueControlApplyReport,
-    QueueControlApplyRequest, QueueControlPreviewReport, QueueControlPreviewRequest,
-    QueueStatsReadbackReport, QueueStatsReadbackRequest, SeedReadinessGateReport,
-    SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus,
-    SendWizardReadbackReport, SendWizardReadbackRequest, SensitiveFieldQueryReport,
-    SensitiveFieldQueryRequest, SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport,
-    SettingsInventoryRequest, SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest,
-    StatusReport, StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest,
-    UserUpdateApplyRequest, UserUpdatePreviewRequest, WarmupAudienceReadinessReport,
-    WarmupAudienceReadinessRequest, XmlAuthProbeReport, XmlAuthProbeRequest,
-    DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
+    OciSendLedgerPrepareApplyRequest, OciSendLedgerPreparePreviewRequest,
+    OciSendLedgerPrepareReport, ProductionSendApplyReport, ProductionSendApplyRequest,
+    QueueControlApplyReport, QueueControlApplyRequest, QueueControlPreviewReport,
+    QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
+    SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest,
+    SendApplyStatus, SendWizardReadbackReport, SendWizardReadbackRequest,
+    SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SettingsAuditReport,
+    SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
+    SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
+    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
+    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
+    XmlAuthProbeReport, XmlAuthProbeRequest, DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
 };
 use mcp_toolkit_testing::response_safety_contract::{
     assert_json_bool_field_false, assert_payload_excludes_substrings,
@@ -147,6 +148,20 @@ impl InterspireReadBackend for ContractBackend {
         _request: &CampaignTestSendApplyRequest,
     ) -> Result<CampaignTestSendApplyReport, InterspireError> {
         Ok(CampaignTestSendApplyReport::fixture())
+    }
+
+    fn oci_send_ledger_prepare_preview(
+        &self,
+        _request: &OciSendLedgerPreparePreviewRequest,
+    ) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+        Ok(OciSendLedgerPrepareReport::fixture())
+    }
+
+    fn oci_send_ledger_prepare_apply(
+        &self,
+        _request: &OciSendLedgerPrepareApplyRequest,
+    ) -> Result<OciSendLedgerPrepareReport, InterspireError> {
+        Ok(OciSendLedgerPrepareReport::fixture())
     }
 
     fn send_wizard_readback(
@@ -466,6 +481,12 @@ fn status_contract_is_redacted_and_read_only() {
     assert!(report
         .capabilities
         .contains(&"interspire_campaign_test_send_apply".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_oci_send_ledger_prepare_preview".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_oci_send_ledger_prepare_apply".to_string()));
     assert!(report
         .capabilities
         .contains(&"interspire_send_wizard_readback".to_string()));
@@ -1048,7 +1069,7 @@ fn production_send_apply_contract_requires_explicit_authorization_and_redacts() 
 fn server_can_be_constructed_with_fixture_backend() {
     let server = InterspireMcpServer::with_backend(Arc::new(ContractBackend))
         .unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(server.tool_schema_snapshot().len(), 44);
+    assert_eq!(server.tool_schema_snapshot().len(), 46);
 }
 
 #[test]

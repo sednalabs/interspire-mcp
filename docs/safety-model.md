@@ -259,6 +259,14 @@ guarded writes:
   posted. The preflight `campaign_id` must equal the Interspire campaign id in
   the send request. The ledger path is environment-configured only; tool callers
   cannot supply arbitrary file paths.
+- `interspire_oci_send_ledger_prepare_preview` and
+  `interspire_oci_send_ledger_prepare_apply` can prepare that private ledger
+  from a private JSONL manifest. Preview computes sanitized rows and a plan id
+  without writing. Apply requires guarded writes, send controls, the exact plan
+  id, and `acknowledge_ledger_write=true`, then writes only hashed recipient and
+  trace values and reruns preflight. The prepare tools do not contact OCI and do
+  not perform an Interspire send, schedule, queue, import, contact, list, or
+  suppression mutation.
 
 The wizard proof records Schedule and Stats rows before and after the Step2
 render. Output includes invariant evidence and explicit negative flags such as
@@ -271,11 +279,12 @@ not trigger cron. They post only the final Send-page form captured from the
 freshly proven wizard page, and only when the relevant runtime controls are
 enabled.
 
-OCI ledger preflight is not delivery proof. It proves only that a private local
-send ledger already contains the expected Interspire campaign/batch rows before
-the Interspire final send boundary. Provider acceptance, bounces, complaints,
-suppression reconciliation, and recipient rendering still require OCI and
-recipient-side readback after an explicitly approved send.
+OCI ledger preparation and preflight are not delivery proof. They prove only
+that a private local send ledger can contain, and does contain, the expected
+Interspire campaign/batch rows before the Interspire final send boundary.
+Provider acceptance, bounces, complaints, suppression reconciliation, and
+recipient rendering still require OCI and recipient-side readback after an
+explicitly approved send.
 
 Posting the final form is not considered proof of a send. Apply responses carry
 a post-send reconciliation object with the explicit status vocabulary
