@@ -1168,11 +1168,7 @@ pub(super) fn extract_login_csrf_token(html: &str) -> Option<LoginCsrfToken> {
 }
 
 fn is_login_csrf_field(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "token" | "csrf" | "csrf_token" | "csrftoken" | "_token" | "form_token" | "iem_csrf_token"
-    ) || lower.ends_with("token")
+    is_csrf_field_name(name)
 }
 
 fn extract_js_string_assignment(html: &str, name: &str) -> Option<String> {
@@ -2003,7 +1999,7 @@ fn route_fingerprint(route_key: &str) -> String {
 
 fn csrf_pair(pairs: &[(String, String)]) -> Option<(&str, &str)> {
     pairs.iter().find_map(|(name, value)| {
-        if is_csrf_field_name(name) {
+        if is_csrf_field_name(name) && !value.trim().is_empty() {
             Some((name.as_str(), value.as_str()))
         } else {
             None
@@ -2016,7 +2012,7 @@ fn is_csrf_field_name(name: &str) -> bool {
     matches!(
         lower.as_str(),
         "csrf" | "csrftoken" | "csrf_token" | "token" | "_token" | "form_token" | "iem_csrf_token"
-    ) || lower.ends_with("token")
+    )
 }
 
 fn admin_origin(base_url: &str) -> Result<String, InterspireError> {
@@ -2361,6 +2357,24 @@ mod tests {
             Some(LoginCsrfToken {
                 field_name: "_token".to_string(),
                 value: "generic-token-123".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn login_csrf_token_ignores_unrelated_token_suffix_fields() {
+        let html = r#"
+            <form method="post" action="index.php?Page=Login&Action=Login">
+              <input name="access_token" value="wrong-token">
+              <script>window.IEM_CSRF_TOKEN = 'right-token';</script>
+            </form>
+        "#;
+
+        assert_eq!(
+            extract_login_csrf_token(html),
+            Some(LoginCsrfToken {
+                field_name: "csrfToken".to_string(),
+                value: "right-token".to_string(),
             })
         );
     }

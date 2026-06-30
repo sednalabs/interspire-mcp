@@ -1,6 +1,7 @@
 use super::{
-    admin_evidence, admin_origin, csrf_pair, extract_ids_from_links, looks_like_save_submit,
-    parse_form_values, parse_settings_fields, summarize_field_value, AdminHtmlClient,
+    admin_evidence, admin_origin, csrf_pair, extract_ids_from_links, extract_login_csrf_token,
+    looks_like_save_submit, parse_form_values, parse_settings_fields, summarize_field_value,
+    AdminHtmlClient,
 };
 use crate::{
     config::WriteExecutionMode,
@@ -327,7 +328,7 @@ pub(super) fn guarded_write_apply(
         .map(|change| applied_control_name(&change.name))
         .collect::<BTreeSet<_>>();
     let post_fields = staged.to_post_pairs_for_fields(&requested_fields);
-    let response = guarded_form_post(client, &snapshot, &post_fields, &read_path)?;
+    let response = guarded_form_post(client, &snapshot, &post_fields, &html, &read_path)?;
     if !response.status().is_success() && !response.status().is_redirection() {
         return Err(InterspireError::Http(format!(
             "guarded form write returned HTTP {}",
@@ -426,7 +427,7 @@ pub(super) fn guarded_list_create_apply(
         .map(|change| applied_control_name(&change.name))
         .collect::<BTreeSet<_>>();
     let post_fields = staged.to_post_pairs_for_fields(&requested_fields);
-    let response = guarded_form_post(client, &snapshot, &post_fields, &read_path)?;
+    let response = guarded_form_post(client, &snapshot, &post_fields, &html, &read_path)?;
     if !response.status().is_success() && !response.status().is_redirection() {
         return Err(InterspireError::Http(format!(
             "guarded list create returned HTTP {}",
@@ -536,7 +537,7 @@ fn apply_guarded_form_updates(
         .map(|change| applied_control_name(&change.name))
         .collect::<BTreeSet<_>>();
     let post_fields = staged.to_post_pairs_for_fields(&requested_fields);
-    let response = guarded_form_post(client, &snapshot, &post_fields, &read_path)?;
+    let response = guarded_form_post(client, &snapshot, &post_fields, &html, &read_path)?;
     if !response.status().is_success() && !response.status().is_redirection() {
         return Err(InterspireError::Http(format!(
             "guarded post-create list metadata update returned HTTP {}",
@@ -557,23 +558,43 @@ fn guarded_form_post(
     client: &AdminHtmlClient,
     snapshot: &FormSnapshot,
     post_fields: &[(String, String)],
+    page_html: &str,
     referer_path: &str,
 ) -> Result<reqwest::blocking::Response, InterspireError> {
     let base_url = client.config.base_url.as_deref().unwrap_or_default();
+    let post_fields = post_pairs_with_page_csrf(post_fields, page_html);
     let mut request = client
         .with_access_headers(client.http.post(snapshot.action_url.clone()))
-        .form(post_fields)
+        .form(&post_fields)
         .header(
             "referer",
             safety::ensure_allowed_admin_get(base_url, referer_path)?.as_str(),
         )
         .header("origin", admin_origin(base_url)?);
-    if let Some((_, token)) = csrf_pair(post_fields) {
+    if let Some((_, token)) = csrf_pair(&post_fields) {
         request = request.header("x-csrf-token", token);
     }
     request
         .send()
         .map_err(|err| InterspireError::Http(err.to_string()))
+}
+
+fn post_pairs_with_page_csrf(
+    post_fields: &[(String, String)],
+    page_html: &str,
+) -> Vec<(String, String)> {
+    let mut pairs = post_fields.to_vec();
+    if csrf_pair(&pairs).is_some() {
+        return pairs;
+    }
+
+    // Interspire 8 can publish the current CSRF token as page JavaScript
+    // instead of a hidden input on the target form. Browsers still submit from
+    // the current page context, so guarded form writes must replay that token.
+    if let Some(token) = extract_login_csrf_token(page_html) {
+        pairs.push((token.field_name, token.value));
+    }
+    pairs
 }
 
 fn verify_list_create_fields_persisted(
@@ -1483,6 +1504,123 @@ mod tests {
         assert!(pairs
             .iter()
             .any(|(name, value)| name == "AvailableFields[]" && value == "7"));
+    }
+
+    #[test]
+    fn source_derived_list_create_post_pairs_use_page_csrf_not_unrelated_tokens() {
+        let html = r#"
+            <script>window.IEM_CSRF_TOKEN = "page-token-list-create";</script>
+            <form name="frmListEditor" id="frmListEditor" method="post" action="index.php?Page=Lists&Action=AddList">
+                <input type="text" name="Name" value="CommsWire">
+                <input type="text" name="OwnerName" value="Operator">
+                <input type="text" name="OwnerEmail" value="owner@example.invalid">
+                <input type="text" name="ReplyToEmail" value="reply@example.invalid">
+                <input type="text" name="BounceEmail" value="bounce@example.invalid">
+                <input type="hidden" name="access_token" value="not-csrf">
+                <input type="hidden" name="total_webhooks" value="0">
+                <select id="fields" name="VisibleFields[]" multiple="multiple">
+                    <option value="emailaddress" selected>Email</option>
+                    <option value="format" selected>Format</option>
+                </select>
+                <input class="FormButton SubmitButton" type="submit" value="Save">
+            </form>
+        "#;
+
+        let snapshot = capture_form_snapshot(
+            "https://example.test/admin/",
+            "index.php?Page=Lists&Action=create",
+            html,
+            &GuardedFormTarget::ListCreate,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let pairs = snapshot.to_post_pairs_for_fields(&BTreeSet::from(["name".to_string()]));
+        let pairs = post_pairs_with_page_csrf(&pairs, html);
+
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| name == "csrfToken" && value == "page-token-list-create"));
+        assert!(!pairs
+            .iter()
+            .any(|(name, value)| name == "x-csrf-token" && value == "not-csrf"));
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| name == "VisibleFields[]" && value == "emailaddress"));
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| name == "VisibleFields[]" && value == "format"));
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| name == "total_webhooks" && value == "0"));
+    }
+
+    #[test]
+    fn post_pairs_append_page_level_csrf_when_target_form_lacks_token() {
+        let pairs = vec![("Name".to_string(), "CommsWire".to_string())];
+        let with_csrf = post_pairs_with_page_csrf(
+            &pairs,
+            r#"<script>window.IEM_CSRF_TOKEN = "page-token-123";</script>"#,
+        );
+
+        assert!(with_csrf
+            .iter()
+            .any(|(name, value)| name == "csrfToken" && value == "page-token-123"));
+        assert!(with_csrf
+            .iter()
+            .any(|(name, value)| name == "Name" && value == "CommsWire"));
+    }
+
+    #[test]
+    fn post_pairs_replace_empty_form_csrf_with_page_level_token() {
+        let pairs = vec![
+            ("csrf_token".to_string(), "   ".to_string()),
+            ("Name".to_string(), "CommsWire".to_string()),
+        ];
+        let with_csrf = post_pairs_with_page_csrf(
+            &pairs,
+            r#"<script>window.IEM_CSRF_TOKEN = "page-token-456";</script>"#,
+        );
+
+        assert!(with_csrf
+            .iter()
+            .any(|(name, value)| name == "csrfToken" && value == "page-token-456"));
+    }
+
+    #[test]
+    fn post_pairs_ignore_unrelated_token_suffix_fields_for_csrf() {
+        let pairs = vec![
+            ("access_token".to_string(), "not-csrf".to_string()),
+            ("Name".to_string(), "CommsWire".to_string()),
+        ];
+        let with_csrf = post_pairs_with_page_csrf(
+            &pairs,
+            r#"<script>window.IEM_CSRF_TOKEN = "page-token-999";</script>"#,
+        );
+
+        assert!(with_csrf
+            .iter()
+            .any(|(name, value)| name == "access_token" && value == "not-csrf"));
+        assert!(with_csrf
+            .iter()
+            .any(|(name, value)| name == "csrfToken" && value == "page-token-999"));
+    }
+
+    #[test]
+    fn post_pairs_keep_existing_non_empty_form_csrf() {
+        let pairs = vec![
+            ("csrf_token".to_string(), "form-token".to_string()),
+            ("Name".to_string(), "CommsWire".to_string()),
+        ];
+        let with_csrf = post_pairs_with_page_csrf(
+            &pairs,
+            r#"<script>window.IEM_CSRF_TOKEN = "page-token-789";</script>"#,
+        );
+
+        assert!(with_csrf
+            .iter()
+            .any(|(name, value)| name == "csrf_token" && value == "form-token"));
+        assert!(!with_csrf
+            .iter()
+            .any(|(name, value)| name == "csrfToken" && value == "page-token-789"));
     }
 
     #[test]

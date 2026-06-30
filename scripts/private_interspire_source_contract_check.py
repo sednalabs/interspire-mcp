@@ -132,6 +132,31 @@ CHECKS: tuple[ContractCheck, ...] = (
             ContractPattern("authentication_allowlist", r"authentication"),
             ContractPattern("lists_allowlist", r"lists"),
             ContractPattern("subscribers_allowlist", r"subscribers"),
+            ContractPattern("newsletters_allowlist", r"newsletters"),
+            ContractPattern("lists_create_allowlist", r"['\"]Create['\"]"),
+            ContractPattern("lists_copy_allowlist", r"['\"]CopyList['\"]"),
+        ),
+    ),
+    ContractCheck(
+        area="xml",
+        name="xml list api write candidates",
+        relative_path="admin/functions/api/lists.php",
+        patterns=(
+            ContractPattern("create_method", r"function\s+Create\s*\("),
+            ContractPattern("save_method", r"function\s+Save\s*\("),
+            ContractPattern("copy_method", r"function\s+Copy\s*\("),
+            ContractPattern("get_lists_method", r"function\s+GetLists\s*\("),
+        ),
+    ),
+    ContractCheck(
+        area="xml",
+        name="xml newsletter api write candidates",
+        relative_path="admin/functions/api/newsletters.php",
+        patterns=(
+            ContractPattern("create_method", r"function\s+Create\s*\("),
+            ContractPattern("save_method", r"function\s+Save\s*\("),
+            ContractPattern("copy_method", r"function\s+Copy\s*\("),
+            ContractPattern("get_newsletters_method", r"function\s+GetNewsletters\s*\("),
         ),
     ),
 )
