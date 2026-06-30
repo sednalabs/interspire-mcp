@@ -1,6 +1,6 @@
 use super::{
-    admin_evidence, extract_ids_from_links, looks_like_save_submit, parse_form_values,
-    parse_settings_fields, summarize_field_value, AdminHtmlClient,
+    admin_evidence, admin_origin, csrf_pair, extract_ids_from_links, looks_like_save_submit,
+    parse_form_values, parse_settings_fields, summarize_field_value, AdminHtmlClient,
 };
 use crate::{
     config::WriteExecutionMode,
@@ -327,11 +327,7 @@ pub(super) fn guarded_write_apply(
         .map(|change| applied_control_name(&change.name))
         .collect::<BTreeSet<_>>();
     let post_fields = staged.to_post_pairs_for_fields(&requested_fields);
-    let response = client
-        .with_access_headers(client.http.post(snapshot.action_url.clone()))
-        .form(&post_fields)
-        .send()
-        .map_err(|err| InterspireError::Http(err.to_string()))?;
+    let response = guarded_form_post(client, &snapshot, &post_fields, &read_path)?;
     if !response.status().is_success() && !response.status().is_redirection() {
         return Err(InterspireError::Http(format!(
             "guarded form write returned HTTP {}",
@@ -430,11 +426,7 @@ pub(super) fn guarded_list_create_apply(
         .map(|change| applied_control_name(&change.name))
         .collect::<BTreeSet<_>>();
     let post_fields = staged.to_post_pairs_for_fields(&requested_fields);
-    let response = client
-        .with_access_headers(client.http.post(snapshot.action_url.clone()))
-        .form(&post_fields)
-        .send()
-        .map_err(|err| InterspireError::Http(err.to_string()))?;
+    let response = guarded_form_post(client, &snapshot, &post_fields, &read_path)?;
     if !response.status().is_success() && !response.status().is_redirection() {
         return Err(InterspireError::Http(format!(
             "guarded list create returned HTTP {}",
@@ -544,11 +536,7 @@ fn apply_guarded_form_updates(
         .map(|change| applied_control_name(&change.name))
         .collect::<BTreeSet<_>>();
     let post_fields = staged.to_post_pairs_for_fields(&requested_fields);
-    let response = client
-        .with_access_headers(client.http.post(snapshot.action_url.clone()))
-        .form(&post_fields)
-        .send()
-        .map_err(|err| InterspireError::Http(err.to_string()))?;
+    let response = guarded_form_post(client, &snapshot, &post_fields, &read_path)?;
     if !response.status().is_success() && !response.status().is_redirection() {
         return Err(InterspireError::Http(format!(
             "guarded post-create list metadata update returned HTTP {}",
@@ -563,6 +551,29 @@ fn list_id_inventory(client: &AdminHtmlClient) -> Result<BTreeSet<u64>, Interspi
     let html = client.get_allowed(&AdminReadPage::Lists.path())?;
     let ids = extract_ids_from_links(&html, "Page=Lists", "id");
     Ok(ids.into_iter().collect())
+}
+
+fn guarded_form_post(
+    client: &AdminHtmlClient,
+    snapshot: &FormSnapshot,
+    post_fields: &[(String, String)],
+    referer_path: &str,
+) -> Result<reqwest::blocking::Response, InterspireError> {
+    let base_url = client.config.base_url.as_deref().unwrap_or_default();
+    let mut request = client
+        .with_access_headers(client.http.post(snapshot.action_url.clone()))
+        .form(post_fields)
+        .header(
+            "referer",
+            safety::ensure_allowed_admin_get(base_url, referer_path)?.as_str(),
+        )
+        .header("origin", admin_origin(base_url)?);
+    if let Some((_, token)) = csrf_pair(post_fields) {
+        request = request.header("x-csrf-token", token);
+    }
+    request
+        .send()
+        .map_err(|err| InterspireError::Http(err.to_string()))
 }
 
 fn verify_list_create_fields_persisted(

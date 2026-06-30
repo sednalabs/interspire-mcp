@@ -68,7 +68,7 @@ paths:
 - newsletter manage and edit pages;
 - newsletter Copy routes discovered from the manage page for exact campaign ids;
 - the list create page and form;
-- schedule and stats pages.
+- schedule and stats pages;
 - the Send page for the reviewed no-send Step2 proof boundary and the
   separately gated guarded-send final form boundary.
 
@@ -152,6 +152,9 @@ Apply:
   excluding volatile CSRF/session token values that are refreshed at apply time;
 - posts only to an allowlisted campaign, list, user, settings, or list-create
   route, or follows the exact allowlisted campaign-copy route;
+- sends the current form page as Referer plus the admin Origin and accepted
+  CSRF token header when the form exposes a token, matching Interspire 8's
+  browser-side POST expectations;
 - mutates the requested controls in the captured form snapshot, then submits
   the resulting current form state plus safe hidden controls and the save submit
   control;

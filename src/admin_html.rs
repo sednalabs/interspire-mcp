@@ -2791,6 +2791,13 @@ mod tests {
         assert!(complete_post.contains("Subject=Original+subject"));
         assert!(complete_post.contains("trackopens=1"));
         assert!(complete_post.contains("tracklinks=1"));
+        let complete_post_headers = complete_post.to_ascii_lowercase();
+        assert!(complete_post_headers.contains("referer: http://"));
+        assert!(
+            complete_post_headers.contains("/admin/index.php?page=newsletters&action=edit&id=7")
+        );
+        assert!(complete_post_headers.contains("origin: http://"));
+        assert!(complete_post_headers.contains("x-csrf-token: fixture-csrf"));
     }
 
     #[test]
