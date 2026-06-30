@@ -8,14 +8,24 @@
 mod audience;
 mod common;
 mod forms;
+mod production_send;
 mod queue;
+mod render;
+mod seed_send;
+mod send_outcome;
 mod send_wizard;
+mod template;
 
 pub use audience::*;
 pub use common::*;
 pub use forms::*;
+pub use production_send::*;
 pub use queue::*;
+pub use render::*;
+pub use seed_send::*;
+pub use send_outcome::*;
 pub use send_wizard::*;
+pub use template::*;
 
 pub fn sensitive_field_query_metadata() -> SensitiveToolMetadata {
     let meta = mcp_toolkit_core::mcp_apps::with_mcp_apps_sensitive_output_metadata(

@@ -1,19 +1,35 @@
 use super::{
-    admin_evidence, compact_text, ensure_authenticated_html, parse_table_rows, redact_field_value,
-    route_fingerprint, AdminHtmlClient,
+    admin_evidence, compact_text, ensure_authenticated_html, extract_login_csrf_token, forms,
+    parse_table_rows, redact_field_value, route_fingerprint, AdminHtmlClient,
 };
 use crate::{
     error::InterspireError,
-    redact,
+    private_artifacts, redact,
     response::{
-        AdminSessionProbeReport, CampaignBodyAuditReport, SeedReadinessGate,
-        SeedReadinessGateReport, SeedReadinessGateRequest, SendWizardReadbackReport,
-        SendWizardReadbackRequest,
+        AdminSessionProbeReport, CampaignBodyAuditReport, CampaignRenderArtifactReport,
+        CampaignRenderArtifactRequest, ProductionSendApplyReport, ProductionSendApplyRequest,
+        RenderArtifact, SeedReadinessGate, SeedReadinessGateReport, SeedReadinessGateRequest,
+        SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus, SendReconciliationReport,
+        SendWizardReadbackReport, SendWizardReadbackRequest, MAX_SEED_SEND_RECIPIENTS,
+        PRODUCTION_SEND_CONFIRMATION_PHRASE,
     },
     safety::{self, AdminReadPage},
 };
-use scraper::{Html, Selector};
+use mcp_toolkit_observability::redaction::truncate;
+use reqwest::blocking::RequestBuilder;
+use scraper::{ElementRef, Html, Selector};
 use sha2::{Digest, Sha256};
+use std::{collections::HashSet, io::Write, path::Path};
+use url::Url;
+
+const MAX_SEND_POPUP_STEPS: usize = 25;
+
+#[derive(Debug, Clone)]
+struct GuardedSendEvidence {
+    status_code: u16,
+    redirected: bool,
+    reconciliation: SendReconciliationReport,
+}
 
 impl AdminHtmlClient {
     pub fn admin_session_probe(
@@ -79,8 +95,192 @@ impl AdminHtmlClient {
         }
         self.login()?;
 
-        let html = self.get_allowed(&AdminReadPage::NewsletterEdit { id: campaign_id }.path())?;
-        campaign_body_audit_from_html(campaign_id, &html)
+        let resolved = self.resolve_campaign_body_html(campaign_id)?;
+        let mut report = campaign_body_audit_from_html(campaign_id, &resolved.html)?;
+        if report.name.is_none() {
+            report.name = resolved
+                .step1_name
+                .map(|value| redact::redact_sensitive_text(&value));
+        }
+        if resolved.missing_step2 && report.html_bytes == 0 && report.text_bytes == 0 {
+            report.warnings.push(
+                "campaign edit page did not expose Interspire 8 Step2 body form; body audit is incomplete"
+                    .to_string(),
+            );
+        }
+        if !resolved.used_step2 {
+            return Ok(report);
+        }
+        report.evidence.notes.push(
+            "allowlisted Newsletter edit Step1 POST rendered Interspire 8 Step2 body page; Complete/save form was not posted"
+                .to_string(),
+        );
+        Ok(report)
+    }
+
+    pub fn campaign_render_artifact(
+        &self,
+        request: &CampaignRenderArtifactRequest,
+    ) -> Result<CampaignRenderArtifactReport, InterspireError> {
+        if !self.config.is_configured() {
+            return Ok(CampaignRenderArtifactReport {
+                ok: true,
+                configured: false,
+                campaign_id: request.campaign_id,
+                subject: None,
+                html_sha256: None,
+                html_bytes: 0,
+                artifacts: Vec::new(),
+                native_browser_next_step:
+                    "Admin HTML is not configured; no render artifact was written.".to_string(),
+                campaign_body: CampaignBodyAuditReport::fixture(),
+                production_send_authorized: false,
+                warnings: vec![
+                    "admin HTML fallback is not configured; no campaign render artifact attempted"
+                        .to_string(),
+                ],
+                evidence: admin_evidence(vec!["no request sent".to_string()]),
+            });
+        }
+
+        self.login()?;
+        let resolved = self.resolve_campaign_body_html(request.campaign_id)?;
+        let parts = campaign_body_parts_from_html(&resolved.html)?;
+        let body_audit = campaign_body_audit_from_parts(request.campaign_id, parts.clone())?;
+        if parts.html_body.trim().is_empty() {
+            return Err(InterspireError::HtmlParse(
+                "campaign body resolver did not expose a non-empty HTML body".to_string(),
+            ));
+        }
+
+        let output_dir =
+            private_artifacts::prepare_private_render_output_dir(request.output_dir.as_deref())?;
+        let stamp = private_artifacts::unix_timestamp_nanos()?;
+        let prefix = private_artifacts::fixed_render_prefix(request.artifact_prefix.as_deref())?;
+
+        let source_path = output_dir.join(format!("{prefix}-{stamp}-source.html"));
+        let mut artifacts = vec![write_private_text_artifact(
+            "campaign_source_html",
+            &source_path,
+            &parts.html_body,
+            "campaign source HTML",
+        )?];
+
+        let image_blocked_path = if request.include_image_blocked_variant {
+            let path = output_dir.join(format!("{prefix}-{stamp}-image-blocked.html"));
+            artifacts.push(write_private_text_artifact(
+                "image_blocked_html",
+                &path,
+                &format!(
+                    "<style>img{{visibility:hidden!important;outline:1px dashed #999!important;background:#f3f3f3!important;}}</style>\n{}",
+                    parts.html_body
+                ),
+                "image-blocked campaign HTML",
+            )?);
+            Some(path)
+        } else {
+            None
+        };
+
+        let preview_path = output_dir.join(format!("{prefix}-{stamp}-preview.html"));
+        let preview_html =
+            render_preview_index(&parts, &source_path, image_blocked_path.as_deref())?;
+        artifacts.insert(
+            0,
+            write_private_text_artifact(
+                "preview_index_html",
+                &preview_path,
+                &preview_html,
+                "campaign render preview",
+            )?,
+        );
+
+        Ok(CampaignRenderArtifactReport {
+            ok: true,
+            configured: true,
+            campaign_id: request.campaign_id,
+            subject: body_audit.subject.clone(),
+            html_sha256: body_audit.html_sha256.clone(),
+            html_bytes: body_audit.html_bytes,
+            artifacts,
+            native_browser_next_step:
+                "Open the preview_index_html artifact with native browser and capture desktop/mobile screenshots; inspect rendered images before making visual claims."
+                    .to_string(),
+            campaign_body: body_audit,
+            production_send_authorized: false,
+            warnings: vec![
+                "render artifacts are private local files; this tool does not send, schedule, or mutate the campaign".to_string(),
+                "open the preview_index_html artifact rather than treating artifact paths or hashes as visual signoff".to_string(),
+            ],
+            evidence: admin_evidence({
+                let mut notes = vec![format!(
+                    "allowlisted Newsletter edit GET read for campaign {}",
+                    request.campaign_id
+                )];
+                if resolved.used_step2 {
+                    notes.push(
+                        "allowlisted Newsletter edit Step1 POST rendered Interspire 8 Step2 body page; Complete/save form was not posted"
+                            .to_string(),
+                    );
+                }
+                notes.push("persisted campaign HTML was written to private render artifacts".to_string());
+                notes
+            }),
+        })
+    }
+
+    pub(super) fn resolve_campaign_body_html(
+        &self,
+        campaign_id: u64,
+    ) -> Result<ResolvedCampaignBodyHtml, InterspireError> {
+        let step1_path = AdminReadPage::NewsletterEdit { id: campaign_id }.path();
+        let step1_html = self.get_allowed(&step1_path)?;
+        let step1_parts = campaign_body_parts_from_html(&step1_html)?;
+        if !step1_parts.html_body.trim().is_empty() || !step1_parts.text_body.trim().is_empty() {
+            return Ok(ResolvedCampaignBodyHtml {
+                html: step1_html,
+                used_step2: false,
+                step1_name: step1_parts.name,
+                missing_step2: false,
+            });
+        }
+
+        let Some(step2_path) = campaign_body_step2_action_path(campaign_id, &step1_html)? else {
+            return Ok(ResolvedCampaignBodyHtml {
+                html: step1_html,
+                used_step2: false,
+                step1_name: step1_parts.name,
+                missing_step2: true,
+            });
+        };
+        let step2_url = safety::ensure_allowed_campaign_body_step2_post(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &step2_path,
+            campaign_id,
+        )?;
+        let mut post_pairs = campaign_body_step1_pairs(campaign_id, &step1_html)?;
+        append_csrf_pair_if_missing(&mut post_pairs, &step1_html);
+        let response = self
+            .proof_post_with_page_context(step2_url, &post_pairs, &step1_path)?
+            .send()
+            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        if !response.status().is_success() {
+            return Err(InterspireError::Http(format!(
+                "campaign body no-save Step2 render returned HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        let step2_html = response
+            .text()
+            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        ensure_authenticated_html(&step2_html)?;
+
+        Ok(ResolvedCampaignBodyHtml {
+            html: step2_html,
+            used_step2: true,
+            step1_name: step1_parts.name,
+            missing_step2: false,
+        })
     }
 
     pub fn send_wizard_readback(
@@ -126,9 +326,10 @@ impl AdminHtmlClient {
             post_pairs.push(("lists[]".to_string(), list_id.to_string()));
         }
 
+        append_csrf_pair_if_missing(&mut post_pairs, &start_html);
+
         let response = self
-            .with_access_headers(self.http.post(step2_url))
-            .form(&post_pairs)
+            .proof_post_with_page_context(step2_url, &post_pairs, &AdminReadPage::SendStart.path())?
             .send()
             .map_err(|err| InterspireError::Http(err.to_string()))?;
         if !response.status().is_success() {
@@ -168,21 +369,28 @@ impl AdminHtmlClient {
                 .warnings
                 .push("Stats rows changed during no-send wizard proof".to_string());
         }
-        if report.selected_campaign_id != Some(request.campaign_id) {
+        if report.selected_campaign_id != Some(request.campaign_id)
+            && !report.requested_campaign_available
+        {
             report.warnings.push(format!(
-                "selected campaign did not match requested campaign {}",
+                "requested campaign {} was not selected and was not found in the campaign dropdown",
                 request.campaign_id
             ));
         }
-        if report.selected_list_ids.is_empty() {
-            report
-                .warnings
-                .push("selected list ids could not be proven from final wizard page".to_string());
-        } else if !ids_match(&report.selected_list_ids, &request.list_ids) {
-            report.warnings.push(format!(
-                "selected list ids {:?} did not match requested list ids {:?}",
-                report.selected_list_ids, request.list_ids
-            ));
+        report.requested_list_ids_proven_by_recipient_count = report.selected_list_ids.is_empty()
+            && request.expected_recipient_count.is_some()
+            && report.recipient_count == request.expected_recipient_count;
+        if report.requested_list_ids_proven_by_recipient_count {
+            report.warnings.retain(|warning| {
+                warning != "final send wizard page did not expose selected list ids"
+            });
+        }
+        if let Some(warning) = list_ids_warning(
+            &report.selected_list_ids,
+            &request.list_ids,
+            report.requested_list_ids_proven_by_recipient_count,
+        ) {
+            report.warnings.push(warning);
         }
         if let Some(expected) = request.expected_recipient_count {
             if report.recipient_count != Some(expected) {
@@ -195,11 +403,29 @@ impl AdminHtmlClient {
             "allowlisted Send Step2 POST rendered final editable page; final form was not posted"
                 .to_string(),
         );
+        if report.requested_campaign_available
+            && report.selected_campaign_id != Some(request.campaign_id)
+        {
+            report.evidence.notes.push(
+                "requested campaign was present as a selectable campaign option on Interspire Step2"
+                    .to_string(),
+            );
+        }
+        if report.requested_list_ids_proven_by_recipient_count {
+            report.evidence.notes.push(
+                "Interspire Step2 did not echo list ids; requested list ids were accepted as session proof because the rendered recipient count matched the expected count"
+                    .to_string(),
+            );
+        }
+        let campaign_proven = report.selected_campaign_id == Some(request.campaign_id)
+            || report.requested_campaign_available;
+        let lists_proven = ids_match(&report.selected_list_ids, &request.list_ids)
+            || report.requested_list_ids_proven_by_recipient_count;
         report.ok = report.final_form_posts_to_send_boundary
             && report.queue_unchanged
             && report.stats_unchanged
-            && report.selected_campaign_id == Some(request.campaign_id)
-            && ids_match(&report.selected_list_ids, &request.list_ids)
+            && campaign_proven
+            && lists_proven
             && match request.expected_recipient_count {
                 Some(expected) => report.recipient_count == Some(expected),
                 None => true,
@@ -242,18 +468,24 @@ impl AdminHtmlClient {
         ));
         gates.push(gate(
             "send_wizard_campaign_matches",
-            send_wizard.selected_campaign_id == Some(request.campaign_id),
+            send_wizard.selected_campaign_id == Some(request.campaign_id)
+                || send_wizard.requested_campaign_available,
             "blocker",
             format!(
-                "selected campaign id is {:?}",
-                send_wizard.selected_campaign_id
+                "selected campaign id is {:?}; requested campaign available is {}",
+                send_wizard.selected_campaign_id, send_wizard.requested_campaign_available
             ),
         ));
         gates.push(gate(
             "send_wizard_lists_match",
-            ids_match(&send_wizard.selected_list_ids, &request.list_ids),
+            ids_match(&send_wizard.selected_list_ids, &request.list_ids)
+                || send_wizard.requested_list_ids_proven_by_recipient_count,
             "blocker",
-            format!("selected list ids are {:?}", send_wizard.selected_list_ids),
+            format!(
+                "selected list ids are {:?}; recipient-count list proof is {}",
+                send_wizard.selected_list_ids,
+                send_wizard.requested_list_ids_proven_by_recipient_count
+            ),
         ));
         gates.push(gate(
             "send_wizard_queue_unchanged",
@@ -329,6 +561,947 @@ impl AdminHtmlClient {
             ]),
         })
     }
+
+    pub fn seed_send_apply(
+        &self,
+        request: &SeedSendApplyRequest,
+        guarded_writes_enabled: bool,
+        send_controls_enabled: bool,
+    ) -> Result<SeedSendApplyReport, InterspireError> {
+        if !self.config.is_configured() {
+            return Ok(SeedSendApplyReport::denied(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                "admin HTML fallback is not configured; no seed send attempted".to_string(),
+            ));
+        }
+        if !request.acknowledge_seed_send {
+            return Ok(SeedSendApplyReport::denied(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                "seed send refused because acknowledge_seed_send was not true".to_string(),
+            ));
+        }
+        if request.list_ids.is_empty() {
+            return Err(InterspireError::Safety(
+                "seed send requires at least one explicit list id".to_string(),
+            ));
+        }
+        if request.expected_recipient_count == 0
+            || request.expected_recipient_count > MAX_SEED_SEND_RECIPIENTS
+        {
+            return Err(InterspireError::Safety(format!(
+                "seed send expected_recipient_count must be between 1 and {MAX_SEED_SEND_RECIPIENTS}"
+            )));
+        }
+
+        let readiness_request = SeedReadinessGateRequest {
+            campaign_id: request.campaign_id,
+            list_ids: request.list_ids.clone(),
+            expected_recipient_count: Some(request.expected_recipient_count),
+            expected_from_email: request.expected_from_email.clone(),
+            expected_reply_to_email: request.expected_reply_to_email.clone(),
+        };
+        let readiness = self.seed_readiness_gate(&readiness_request)?;
+        let mut warnings = readiness.warnings.clone();
+        if !readiness.ready_for_seed_approval || !readiness.gates.iter().all(|gate| gate.passed) {
+            warnings.push("seed send refused because readiness gates did not pass".to_string());
+            return Ok(self.seed_send_report_from_readiness(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                readiness,
+                false,
+                None,
+                false,
+                0,
+                0,
+                0,
+                0,
+                warnings,
+            ));
+        }
+
+        if let Some(expected_subject) = request.expected_subject.as_deref() {
+            if readiness.campaign_body.subject.as_deref() != Some(expected_subject) {
+                warnings.push(
+                    "seed send refused because campaign subject did not match expected_subject"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(expected_hash) = request.expected_html_sha256.as_deref() {
+            if readiness.campaign_body.html_sha256.as_deref() != Some(expected_hash) {
+                warnings.push(
+                    "seed send refused because campaign HTML SHA-256 did not match expected_html_sha256"
+                        .to_string(),
+                );
+            }
+        }
+        if !warnings.is_empty() {
+            return Ok(self.seed_send_report_from_readiness(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                readiness,
+                false,
+                None,
+                false,
+                0,
+                0,
+                0,
+                0,
+                warnings,
+            ));
+        }
+
+        self.login()?;
+        let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
+        let queue_before = parse_table_rows(
+            &self.get_allowed(&AdminReadPage::Schedule.path())?,
+            max_rows,
+        )?;
+        let stats_before =
+            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let (send_wizard, final_html) = self.render_send_wizard_final_page(
+            &SendWizardReadbackRequest {
+                campaign_id: request.campaign_id,
+                list_ids: request.list_ids.clone(),
+                expected_recipient_count: Some(request.expected_recipient_count),
+                max_queue_rows: request.max_queue_rows,
+            },
+            max_rows,
+        )?;
+        if !send_wizard.ok {
+            let mut warnings = send_wizard.warnings.clone();
+            warnings
+                .push("seed send refused because the final send wizard proof failed".to_string());
+            return Ok(self.seed_send_report_from_parts(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                readiness.campaign_body,
+                send_wizard,
+                readiness.gates,
+                false,
+                None,
+                false,
+                queue_before.len(),
+                queue_before.len(),
+                stats_before.len(),
+                stats_before.len(),
+                None,
+                warnings,
+            ));
+        }
+        if matches!(send_wizard.send_immediately_checked, Some(false)) {
+            let warnings = vec![
+                "seed send refused because final form did not select immediate send".to_string(),
+            ];
+            return Ok(self.seed_send_report_from_parts(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                readiness.campaign_body,
+                send_wizard,
+                readiness.gates,
+                false,
+                None,
+                false,
+                queue_before.len(),
+                queue_before.len(),
+                stats_before.len(),
+                stats_before.len(),
+                None,
+                warnings,
+            ));
+        }
+
+        let send_evidence = self.post_guarded_send_and_reconcile(
+            guarded_send_final_form_post(
+                self.config.base_url.as_deref().unwrap_or_default(),
+                &final_html,
+            )?,
+            &queue_before,
+            &stats_before,
+            request.expected_recipient_count,
+            true,
+            max_rows,
+        )?;
+        let sent = matches!(
+            send_evidence.reconciliation.status,
+            SendApplyStatus::SeedProven
+        );
+
+        Ok(self.seed_send_report_from_parts(
+            request,
+            guarded_writes_enabled,
+            send_controls_enabled,
+            readiness.campaign_body,
+            send_wizard,
+            readiness.gates,
+            sent,
+            Some(send_evidence.status_code),
+            send_evidence.redirected,
+            queue_before.len(),
+            send_evidence.reconciliation.queue_rows_after,
+            stats_before.len(),
+            send_evidence.reconciliation.stats_rows_after,
+            Some(send_evidence.reconciliation),
+            vec![
+                "seed send final form was posted after immediate readiness proof and reconciled through the Interspire send loop".to_string(),
+                "provider delivery and recipient render still require external readback".to_string(),
+            ],
+        ))
+    }
+
+    pub fn production_send_apply(
+        &self,
+        request: &ProductionSendApplyRequest,
+        guarded_writes_enabled: bool,
+        send_controls_enabled: bool,
+        production_send_controls_enabled: bool,
+    ) -> Result<ProductionSendApplyReport, InterspireError> {
+        if !self.config.is_configured() {
+            return Ok(ProductionSendApplyReport::denied(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                production_send_controls_enabled,
+                "admin HTML fallback is not configured; no production send attempted".to_string(),
+            ));
+        }
+        if !request.acknowledge_production_send {
+            return Ok(ProductionSendApplyReport::denied(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                production_send_controls_enabled,
+                "production send refused because acknowledge_production_send was not true"
+                    .to_string(),
+            ));
+        }
+        if request.confirmation_phrase != PRODUCTION_SEND_CONFIRMATION_PHRASE {
+            return Ok(ProductionSendApplyReport::denied(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                production_send_controls_enabled,
+                "production send refused because confirmation_phrase did not match the required phrase"
+                    .to_string(),
+            ));
+        }
+        if request.list_ids.is_empty() {
+            return Err(InterspireError::Safety(
+                "production send requires at least one explicit list id".to_string(),
+            ));
+        }
+        if request.expected_recipient_count == 0 {
+            return Err(InterspireError::Safety(
+                "production send expected_recipient_count must be positive".to_string(),
+            ));
+        }
+        if request.expected_from_email.trim().is_empty()
+            || request.expected_reply_to_email.trim().is_empty()
+            || request.expected_subject.trim().is_empty()
+            || request.expected_html_sha256.trim().is_empty()
+        {
+            return Err(InterspireError::Safety(
+                "production send requires expected From, Reply-To, subject, and HTML SHA-256"
+                    .to_string(),
+            ));
+        }
+
+        let readiness_request = SeedReadinessGateRequest {
+            campaign_id: request.campaign_id,
+            list_ids: request.list_ids.clone(),
+            expected_recipient_count: Some(request.expected_recipient_count),
+            expected_from_email: Some(request.expected_from_email.clone()),
+            expected_reply_to_email: Some(request.expected_reply_to_email.clone()),
+        };
+        let readiness = self.seed_readiness_gate(&readiness_request)?;
+        let mut warnings = readiness.warnings.clone();
+        if !readiness.ready_for_seed_approval || !readiness.gates.iter().all(|gate| gate.passed) {
+            warnings
+                .push("production send refused because readiness gates did not pass".to_string());
+        }
+        if readiness.campaign_body.subject.as_deref() != Some(request.expected_subject.as_str()) {
+            warnings.push(
+                "production send refused because campaign subject did not match expected_subject"
+                    .to_string(),
+            );
+        }
+        if readiness.campaign_body.html_sha256.as_deref()
+            != Some(request.expected_html_sha256.as_str())
+        {
+            warnings.push(
+                "production send refused because campaign HTML SHA-256 did not match expected_html_sha256"
+                    .to_string(),
+            );
+        }
+        if !warnings.is_empty() {
+            return Ok(self.production_send_report_from_parts(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                production_send_controls_enabled,
+                readiness.campaign_body,
+                readiness.send_wizard,
+                readiness.gates,
+                false,
+                None,
+                false,
+                0,
+                0,
+                0,
+                0,
+                None,
+                warnings,
+            ));
+        }
+
+        self.login()?;
+        let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
+        let queue_before = parse_table_rows(
+            &self.get_allowed(&AdminReadPage::Schedule.path())?,
+            max_rows,
+        )?;
+        let stats_before =
+            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let (send_wizard, final_html) = self.render_send_wizard_final_page(
+            &SendWizardReadbackRequest {
+                campaign_id: request.campaign_id,
+                list_ids: request.list_ids.clone(),
+                expected_recipient_count: Some(request.expected_recipient_count),
+                max_queue_rows: request.max_queue_rows,
+            },
+            max_rows,
+        )?;
+        if !send_wizard.ok {
+            let mut warnings = send_wizard.warnings.clone();
+            warnings.push(
+                "production send refused because the final send wizard proof failed".to_string(),
+            );
+            return Ok(self.production_send_report_from_parts(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                production_send_controls_enabled,
+                readiness.campaign_body,
+                send_wizard,
+                readiness.gates,
+                false,
+                None,
+                false,
+                queue_before.len(),
+                queue_before.len(),
+                stats_before.len(),
+                stats_before.len(),
+                None,
+                warnings,
+            ));
+        }
+        if matches!(send_wizard.send_immediately_checked, Some(false)) {
+            let warnings = vec![
+                "production send refused because final form did not select immediate send"
+                    .to_string(),
+            ];
+            return Ok(self.production_send_report_from_parts(
+                request,
+                guarded_writes_enabled,
+                send_controls_enabled,
+                production_send_controls_enabled,
+                readiness.campaign_body,
+                send_wizard,
+                readiness.gates,
+                false,
+                None,
+                false,
+                queue_before.len(),
+                queue_before.len(),
+                stats_before.len(),
+                stats_before.len(),
+                None,
+                warnings,
+            ));
+        }
+
+        let send_evidence = self.post_guarded_send_and_reconcile(
+            guarded_send_final_form_post(
+                self.config.base_url.as_deref().unwrap_or_default(),
+                &final_html,
+            )?,
+            &queue_before,
+            &stats_before,
+            request.expected_recipient_count,
+            false,
+            max_rows,
+        )?;
+        let sent = send_evidence.reconciliation.status.terminal_success();
+
+        Ok(self.production_send_report_from_parts(
+            request,
+            guarded_writes_enabled,
+            send_controls_enabled,
+            production_send_controls_enabled,
+            readiness.campaign_body,
+            send_wizard,
+            readiness.gates,
+            sent,
+            Some(send_evidence.status_code),
+            send_evidence.redirected,
+            queue_before.len(),
+            send_evidence.reconciliation.queue_rows_after,
+            stats_before.len(),
+            send_evidence.reconciliation.stats_rows_after,
+            Some(send_evidence.reconciliation),
+            vec![
+                "production send final form was posted after immediate readiness proof and reconciled through the Interspire send loop".to_string(),
+                "provider delivery, bounce rate, and recipient engagement require external monitoring".to_string(),
+            ],
+        ))
+    }
+
+    fn post_guarded_send_and_reconcile(
+        &self,
+        send_form: (Url, Vec<(String, String)>),
+        queue_before: &[String],
+        stats_before: &[String],
+        expected_recipient_count: u64,
+        seed_send: bool,
+        max_rows: usize,
+    ) -> Result<GuardedSendEvidence, InterspireError> {
+        let (send_url, send_pairs) = send_form;
+        let response = self
+            .proof_post_with_page_context(send_url, &send_pairs, &AdminReadPage::SendStart.path())?
+            .send()
+            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        let status = response.status();
+        let status_code = status.as_u16();
+        let redirected = status.is_redirection();
+        let mut popup_steps = 0usize;
+        let mut job_id = None;
+        let mut smtp_reason = None;
+        let mut popup_notes = Vec::new();
+        let mut seen_popup_urls = HashSet::new();
+        let mut next_popup_url = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|location| {
+                safety::ensure_allowed_guarded_send_popup(
+                    self.config.base_url.as_deref().unwrap_or_default(),
+                    location,
+                )
+                .ok()
+            });
+
+        if status.is_success() {
+            let html = response
+                .text()
+                .map_err(|err| InterspireError::Http(err.to_string()))?;
+            if !html.trim().is_empty() {
+                ensure_authenticated_html(&html)?;
+                smtp_reason = transport_failure_reason(&html);
+                next_popup_url = next_popup_url.or(guarded_send_popup_url(
+                    self.config.base_url.as_deref().unwrap_or_default(),
+                    &html,
+                )?);
+            }
+        } else if !redirected {
+            return Err(InterspireError::Http(format!(
+                "guarded send final form returned HTTP {}",
+                status_code
+            )));
+        }
+
+        while let Some(url) = next_popup_url.take() {
+            if popup_steps >= MAX_SEND_POPUP_STEPS {
+                popup_notes.push("send popup loop stopped at the maximum step guard".to_string());
+                break;
+            }
+            let url_key = url.as_str().to_string();
+            if !seen_popup_urls.insert(url_key) {
+                popup_notes.push("send popup loop stopped after a repeated route".to_string());
+                break;
+            }
+            job_id = job_id.or_else(|| send_popup_job_id(&url));
+            let response = self
+                .with_access_headers(self.http.get(url))
+                .send()
+                .map_err(|err| InterspireError::Http(err.to_string()))?;
+            let popup_status = response.status();
+            let popup_location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|location| {
+                    safety::ensure_allowed_guarded_send_popup(
+                        self.config.base_url.as_deref().unwrap_or_default(),
+                        location,
+                    )
+                    .ok()
+                });
+            if !popup_status.is_success() && !popup_status.is_redirection() {
+                return Err(InterspireError::Http(format!(
+                    "send popup route returned HTTP {}",
+                    popup_status.as_u16()
+                )));
+            }
+            popup_steps += 1;
+            if popup_status.is_redirection() {
+                next_popup_url = popup_location;
+                continue;
+            }
+            let html = response
+                .text()
+                .map_err(|err| InterspireError::Http(err.to_string()))?;
+            if !html.trim().is_empty() {
+                ensure_authenticated_html(&html)?;
+                smtp_reason = smtp_reason.or_else(|| transport_failure_reason(&html));
+                next_popup_url = popup_location.or(guarded_send_popup_url(
+                    self.config.base_url.as_deref().unwrap_or_default(),
+                    &html,
+                )?);
+            }
+        }
+
+        let queue_after = parse_table_rows(
+            &self.get_allowed(&AdminReadPage::Schedule.path())?,
+            max_rows,
+        )?;
+        let stats_after =
+            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let stats_increased = stats_after.len() > stats_before.len();
+        let queued = queue_after.len() > queue_before.len();
+        let sent_count = if stats_increased || popup_steps > 0 {
+            Some(expected_recipient_count)
+        } else {
+            None
+        };
+        let failed_count = smtp_reason.as_ref().map(|_| expected_recipient_count);
+        let unsent_count = if smtp_reason.is_some() {
+            Some(expected_recipient_count)
+        } else {
+            Some(0).filter(|_| stats_increased || popup_steps > 0)
+        };
+        let mut proof_gaps = Vec::new();
+        let status = if smtp_reason.is_some() {
+            SendApplyStatus::TransportFailed
+        } else if stats_increased && seed_send {
+            proof_gaps.push("provider inbox delivery still requires external readback".to_string());
+            SendApplyStatus::SeedProven
+        } else if stats_increased {
+            proof_gaps.push(
+                "provider delivery, bounces, and complaints require external monitoring"
+                    .to_string(),
+            );
+            SendApplyStatus::Processed
+        } else if queued || popup_steps > 0 {
+            proof_gaps.push("Stats page did not yet show a completed send row".to_string());
+            SendApplyStatus::Queued
+        } else {
+            proof_gaps.push(
+                "final send boundary posted but no popup, queue, or stats processing evidence was found"
+                    .to_string(),
+            );
+            SendApplyStatus::Posted
+        };
+        if job_id.is_none() {
+            proof_gaps
+                .push("Interspire job id was not found in redacted send-loop evidence".to_string());
+        }
+        if stats_increased {
+            popup_notes.push("Stats row count increased after guarded send loop".to_string());
+        }
+        if queued {
+            popup_notes.push("Schedule row count increased after guarded send loop".to_string());
+        }
+
+        Ok(GuardedSendEvidence {
+            status_code,
+            redirected,
+            reconciliation: SendReconciliationReport::new(
+                status,
+                job_id,
+                None,
+                None,
+                sent_count,
+                failed_count,
+                unsent_count,
+                smtp_reason,
+                popup_steps,
+                queue_before.len(),
+                queue_after.len(),
+                stats_before.len(),
+                stats_after.len(),
+                proof_gaps,
+                popup_notes,
+            ),
+        })
+    }
+
+    fn proof_post_with_page_context(
+        &self,
+        url: Url,
+        post_pairs: &[(String, String)],
+        referer_path: &str,
+    ) -> Result<RequestBuilder, InterspireError> {
+        let mut request = self
+            .with_access_headers(self.http.post(url))
+            .form(post_pairs)
+            .header("referer", self.admin_url_for_path(referer_path)?.as_str())
+            .header(
+                "origin",
+                admin_origin(self.config.base_url.as_deref().unwrap_or_default())?,
+            );
+        if let Some((_, token)) = csrf_pair(post_pairs) {
+            request = request.header("x-csrf-token", token.as_str());
+        }
+        Ok(request)
+    }
+
+    fn admin_url_for_path(&self, path: &str) -> Result<Url, InterspireError> {
+        safety::ensure_allowed_admin_get(self.config.base_url.as_deref().unwrap_or_default(), path)
+    }
+
+    fn render_send_wizard_final_page(
+        &self,
+        request: &SendWizardReadbackRequest,
+        max_rows: usize,
+    ) -> Result<(SendWizardReadbackReport, String), InterspireError> {
+        let queue_before = parse_table_rows(
+            &self.get_allowed(&AdminReadPage::Schedule.path())?,
+            max_rows,
+        )?;
+        let stats_before =
+            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+
+        let start_html = self.get_allowed(&AdminReadPage::SendStart.path())?;
+        let step2_path = send_step2_action_path(&start_html).ok_or_else(|| {
+            InterspireError::Safety(
+                "Send start page did not expose an allowlisted no-send Step2 form".to_string(),
+            )
+        })?;
+        let step2_url = safety::ensure_allowed_send_wizard_step2_post(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &step2_path,
+        )?;
+        let mut post_pairs = send_start_hidden_pairs(&start_html)?;
+        upsert_post_pair(
+            &mut post_pairs,
+            "newsletter",
+            &request.campaign_id.to_string(),
+        );
+        upsert_post_pair(&mut post_pairs, "ShowFilteringOptions", "2");
+        for list_id in &request.list_ids {
+            post_pairs.push(("lists[]".to_string(), list_id.to_string()));
+        }
+
+        append_csrf_pair_if_missing(&mut post_pairs, &start_html);
+
+        let response = self
+            .proof_post_with_page_context(step2_url, &post_pairs, &AdminReadPage::SendStart.path())?
+            .send()
+            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        if !response.status().is_success() {
+            return Err(InterspireError::Http(format!(
+                "send wizard no-send Step2 render returned HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        let final_html = response
+            .text()
+            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        ensure_authenticated_html(&final_html)?;
+
+        let queue_after = parse_table_rows(
+            &self.get_allowed(&AdminReadPage::Schedule.path())?,
+            max_rows,
+        )?;
+        let stats_after =
+            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+
+        let mut report =
+            parse_send_wizard_final_page(request.campaign_id, &request.list_ids, &final_html)?;
+        report.queue_rows_before = queue_before.len();
+        report.queue_rows_after = queue_after.len();
+        report.stats_rows_before = stats_before.len();
+        report.stats_rows_after = stats_after.len();
+        report.queue_unchanged = queue_before == queue_after;
+        report.stats_unchanged = stats_before == stats_after;
+
+        if !report.queue_unchanged {
+            report
+                .warnings
+                .push("Schedule queue rows changed during no-send wizard proof".to_string());
+        }
+        if !report.stats_unchanged {
+            report
+                .warnings
+                .push("Stats rows changed during no-send wizard proof".to_string());
+        }
+        if report.selected_campaign_id != Some(request.campaign_id)
+            && !report.requested_campaign_available
+        {
+            report.warnings.push(format!(
+                "requested campaign {} was not selected and was not found in the campaign dropdown",
+                request.campaign_id
+            ));
+        }
+        report.requested_list_ids_proven_by_recipient_count = report.selected_list_ids.is_empty()
+            && request.expected_recipient_count.is_some()
+            && report.recipient_count == request.expected_recipient_count;
+        if report.requested_list_ids_proven_by_recipient_count {
+            report.warnings.retain(|warning| {
+                warning != "final send wizard page did not expose selected list ids"
+            });
+        }
+        if let Some(warning) = list_ids_warning(
+            &report.selected_list_ids,
+            &request.list_ids,
+            report.requested_list_ids_proven_by_recipient_count,
+        ) {
+            report.warnings.push(warning);
+        }
+        if let Some(expected) = request.expected_recipient_count {
+            if report.recipient_count != Some(expected) {
+                report.warnings.push(format!(
+                    "recipient count did not match expected count {expected}"
+                ));
+            }
+        }
+        report.evidence.notes.push(
+            "allowlisted Send Step2 POST rendered final editable page; final form was not posted"
+                .to_string(),
+        );
+        if report.requested_campaign_available
+            && report.selected_campaign_id != Some(request.campaign_id)
+        {
+            report.evidence.notes.push(
+                "requested campaign was present as a selectable campaign option on Interspire Step2"
+                    .to_string(),
+            );
+        }
+        if report.requested_list_ids_proven_by_recipient_count {
+            report.evidence.notes.push(
+                "Interspire Step2 did not echo list ids; requested list ids were accepted as session proof because the rendered recipient count matched the expected count"
+                    .to_string(),
+            );
+        }
+        let campaign_proven = report.selected_campaign_id == Some(request.campaign_id)
+            || report.requested_campaign_available;
+        let lists_proven = ids_match(&report.selected_list_ids, &request.list_ids)
+            || report.requested_list_ids_proven_by_recipient_count;
+        report.ok = report.final_form_posts_to_send_boundary
+            && report.queue_unchanged
+            && report.stats_unchanged
+            && campaign_proven
+            && lists_proven
+            && match request.expected_recipient_count {
+                Some(expected) => report.recipient_count == Some(expected),
+                None => true,
+            };
+        Ok((report, final_html))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_send_report_from_readiness(
+        &self,
+        request: &SeedSendApplyRequest,
+        guarded_writes_enabled: bool,
+        send_controls_enabled: bool,
+        readiness: SeedReadinessGateReport,
+        sent: bool,
+        post_status_code: Option<u16>,
+        post_redirected: bool,
+        queue_rows_before: usize,
+        queue_rows_after: usize,
+        stats_rows_before: usize,
+        stats_rows_after: usize,
+        warnings: Vec<String>,
+    ) -> SeedSendApplyReport {
+        self.seed_send_report_from_parts(
+            request,
+            guarded_writes_enabled,
+            send_controls_enabled,
+            readiness.campaign_body,
+            readiness.send_wizard,
+            readiness.gates,
+            sent,
+            post_status_code,
+            post_redirected,
+            queue_rows_before,
+            queue_rows_after,
+            stats_rows_before,
+            stats_rows_after,
+            None,
+            warnings,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_send_report_from_parts(
+        &self,
+        request: &SeedSendApplyRequest,
+        guarded_writes_enabled: bool,
+        send_controls_enabled: bool,
+        campaign_body: CampaignBodyAuditReport,
+        mut send_wizard: SendWizardReadbackReport,
+        gates: Vec<SeedReadinessGate>,
+        sent: bool,
+        post_status_code: Option<u16>,
+        post_redirected: bool,
+        queue_rows_before: usize,
+        queue_rows_after: usize,
+        stats_rows_before: usize,
+        stats_rows_after: usize,
+        reconciliation: Option<SendReconciliationReport>,
+        warnings: Vec<String>,
+    ) -> SeedSendApplyReport {
+        if sent {
+            send_wizard.send_performed = true;
+        }
+        let reconciliation = reconciliation.unwrap_or_else(|| {
+            if post_status_code.is_some() {
+                SendReconciliationReport::from_boundary_post(
+                    true,
+                    queue_rows_before,
+                    queue_rows_after,
+                    stats_rows_before,
+                    stats_rows_after,
+                )
+            } else {
+                SendReconciliationReport::refused(
+                    queue_rows_before,
+                    queue_rows_after,
+                    stats_rows_before,
+                    stats_rows_after,
+                    "no seed send request sent".to_string(),
+                )
+            }
+        });
+        SeedSendApplyReport {
+            ok: sent,
+            configured: true,
+            guarded_writes_enabled,
+            send_controls_enabled,
+            sent,
+            campaign_id: request.campaign_id,
+            requested_list_ids: request.list_ids.clone(),
+            recipient_count: send_wizard.recipient_count,
+            from_name: send_wizard.from_name.clone(),
+            from_email_redacted: send_wizard.from_email_redacted.clone(),
+            reply_to_email_redacted: send_wizard.reply_to_email_redacted.clone(),
+            bounce_email_redacted: send_wizard.bounce_email_redacted.clone(),
+            subject: campaign_body.subject.clone(),
+            html_sha256: campaign_body.html_sha256.clone(),
+            gates,
+            send_wizard,
+            campaign_body,
+            post_status_code,
+            post_redirected,
+            reconciliation,
+            queue_rows_before,
+            queue_rows_after,
+            stats_rows_before,
+            stats_rows_after,
+            production_send_authorized: false,
+            warnings: warnings
+                .into_iter()
+                .map(|warning| redact::redact_sensitive_text(&warning))
+                .collect(),
+            evidence: admin_evidence(vec![
+                "seed send apply requires INTERSPIRE_GUARDED_WRITES=1 and INTERSPIRE_SEND_CONTROLS=1".to_string(),
+                "campaign body audit and send wizard proof passed immediately before final send form post".to_string(),
+                "final send form controls were captured from the live Interspire page and posted to the guarded seed-send route".to_string(),
+            ]),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn production_send_report_from_parts(
+        &self,
+        request: &ProductionSendApplyRequest,
+        guarded_writes_enabled: bool,
+        send_controls_enabled: bool,
+        production_send_controls_enabled: bool,
+        campaign_body: CampaignBodyAuditReport,
+        mut send_wizard: SendWizardReadbackReport,
+        gates: Vec<SeedReadinessGate>,
+        sent: bool,
+        post_status_code: Option<u16>,
+        post_redirected: bool,
+        queue_rows_before: usize,
+        queue_rows_after: usize,
+        stats_rows_before: usize,
+        stats_rows_after: usize,
+        reconciliation: Option<SendReconciliationReport>,
+        warnings: Vec<String>,
+    ) -> ProductionSendApplyReport {
+        if sent {
+            send_wizard.send_performed = true;
+        }
+        let reconciliation = reconciliation.unwrap_or_else(|| {
+            if post_status_code.is_some() {
+                SendReconciliationReport::from_boundary_post(
+                    true,
+                    queue_rows_before,
+                    queue_rows_after,
+                    stats_rows_before,
+                    stats_rows_after,
+                )
+            } else {
+                SendReconciliationReport::refused(
+                    queue_rows_before,
+                    queue_rows_after,
+                    stats_rows_before,
+                    stats_rows_after,
+                    "no production send request sent".to_string(),
+                )
+            }
+        });
+        ProductionSendApplyReport {
+            ok: sent,
+            configured: true,
+            guarded_writes_enabled,
+            send_controls_enabled,
+            production_send_controls_enabled,
+            sent,
+            campaign_id: request.campaign_id,
+            requested_list_ids: request.list_ids.clone(),
+            recipient_count: send_wizard.recipient_count,
+            from_name: send_wizard.from_name.clone(),
+            from_email_redacted: send_wizard.from_email_redacted.clone(),
+            reply_to_email_redacted: send_wizard.reply_to_email_redacted.clone(),
+            bounce_email_redacted: send_wizard.bounce_email_redacted.clone(),
+            subject: campaign_body.subject.clone(),
+            html_sha256: campaign_body.html_sha256.clone(),
+            ops_work_item_ref: request.ops_work_item_ref.clone(),
+            gates,
+            send_wizard,
+            campaign_body,
+            post_status_code,
+            post_redirected,
+            reconciliation,
+            queue_rows_before,
+            queue_rows_after,
+            stats_rows_before,
+            stats_rows_after,
+            production_send_authorized: sent,
+            warnings: warnings
+                .into_iter()
+                .map(|warning| redact::redact_sensitive_text(&warning))
+                .collect(),
+            evidence: admin_evidence(vec![
+                "production send apply requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, and INTERSPIRE_PRODUCTION_SEND_CONTROLS=1".to_string(),
+                "campaign body audit and send wizard proof passed immediately before final send form post".to_string(),
+                "final send form controls were captured from the live Interspire page and posted to the guarded production-send route".to_string(),
+            ]),
+        }
+    }
 }
 
 fn gate(name: &str, passed: bool, severity: &str, detail: String) -> SeedReadinessGate {
@@ -340,16 +1513,92 @@ fn gate(name: &str, passed: bool, severity: &str, detail: String) -> SeedReadine
     }
 }
 
+fn list_ids_warning(
+    selected_list_ids: &[u64],
+    requested_list_ids: &[u64],
+    recipient_count_proof: bool,
+) -> Option<String> {
+    if ids_match(selected_list_ids, requested_list_ids) || recipient_count_proof {
+        return None;
+    }
+    if selected_list_ids.is_empty() {
+        return Some(
+            "selected list ids could not be proven from final wizard page or recipient-count echo"
+                .to_string(),
+        );
+    }
+    Some(format!(
+        "selected list ids {:?} did not match requested list ids {:?}",
+        selected_list_ids, requested_list_ids
+    ))
+}
+
 fn campaign_body_audit_from_html(
     campaign_id: u64,
     html: &str,
 ) -> Result<CampaignBodyAuditReport, InterspireError> {
+    campaign_body_audit_from_parts(campaign_id, campaign_body_parts_from_html(html)?)
+}
+
+#[derive(Debug, Clone, Default)]
+struct CampaignBodyParts {
+    name: Option<String>,
+    subject: Option<String>,
+    html_body: String,
+    text_body: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ResolvedCampaignBodyHtml {
+    pub(super) html: String,
+    pub(super) used_step2: bool,
+    pub(super) step1_name: Option<String>,
+    pub(super) missing_step2: bool,
+}
+
+fn campaign_body_parts_from_html(html: &str) -> Result<CampaignBodyParts, InterspireError> {
     let fields = parse_form_values_exact(html)?;
-    let html_body = first_present(&fields, &["htmlbody", "htmlcontents"]).unwrap_or_default();
-    let text_body = first_present(&fields, &["textbody", "textcontents"]).unwrap_or_default();
+    let html_body = first_present(
+        &fields,
+        &[
+            "htmlbody",
+            "htmlcontents",
+            "mydeveditcontrol_html",
+            "mydeveditcontrolhtml",
+            "html_content",
+            "htmlcontent",
+        ],
+    )
+    .unwrap_or_default();
+    let text_body = first_present(
+        &fields,
+        &[
+            "textbody",
+            "textcontents",
+            "mydeveditcontrol_text",
+            "mydeveditcontroltext",
+            "text_content",
+            "textcontent",
+        ],
+    )
+    .unwrap_or_default();
     let name = first_present(&fields, &["name"]).map(|value| redact::redact_sensitive_text(&value));
     let subject =
         first_present(&fields, &["subject"]).map(|value| redact::redact_sensitive_text(&value));
+    Ok(CampaignBodyParts {
+        name,
+        subject,
+        html_body,
+        text_body,
+    })
+}
+
+fn campaign_body_audit_from_parts(
+    campaign_id: u64,
+    parts: CampaignBodyParts,
+) -> Result<CampaignBodyAuditReport, InterspireError> {
+    let html_body = parts.html_body;
+    let text_body = parts.text_body;
     let image_count = count_case_insensitive(&html_body, "<img");
     let missing_alt_image_count = count_missing_alt_images(&html_body)?;
     let unsubscribe_token_count =
@@ -375,8 +1624,8 @@ fn campaign_body_audit_from_html(
         ok: true,
         configured: true,
         campaign_id,
-        name,
-        subject,
+        name: parts.name,
+        subject: parts.subject,
         html_sha256: (!html_body.is_empty()).then(|| sha256_hex(&html_body)),
         html_bytes: html_body.len(),
         text_sha256: (!text_body.is_empty()).then(|| sha256_hex(&text_body)),
@@ -395,6 +1644,364 @@ fn campaign_body_audit_from_html(
             "allowlisted Newsletter edit GET body audit for campaign {campaign_id}"
         )]),
     })
+}
+
+fn write_private_text_artifact(
+    kind: &str,
+    path: &Path,
+    contents: &str,
+    label: &str,
+) -> Result<RenderArtifact, InterspireError> {
+    let mut file = private_artifacts::create_private_file(path, label)?;
+    file.write_all(contents.as_bytes())
+        .map_err(|err| InterspireError::Io(format!("failed to write private {label}: {err}")))?;
+    file.flush()
+        .map_err(|err| InterspireError::Io(format!("failed to flush private {label}: {err}")))?;
+    private_artifacts::set_private_file_permissions(path)?;
+    let bytes = contents.as_bytes();
+    Ok(RenderArtifact {
+        kind: kind.to_string(),
+        path: path.display().to_string(),
+        private: true,
+        bytes: bytes.len() as u64,
+        sha256: hex::encode(Sha256::digest(bytes)),
+    })
+}
+
+fn render_preview_index(
+    parts: &CampaignBodyParts,
+    source_path: &Path,
+    image_blocked_path: Option<&Path>,
+) -> Result<String, InterspireError> {
+    let source_file = source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            InterspireError::Safety("source artifact filename is invalid".to_string())
+        })?;
+    let image_blocked_file = image_blocked_path
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str());
+    let mut frames = String::new();
+    for (label, width, file_name) in [
+        ("Desktop 640", 640, source_file),
+        ("Mobile 390", 390, source_file),
+        ("Narrow 320", 320, source_file),
+    ] {
+        frames.push_str(&render_iframe(label, width, file_name));
+    }
+    if let Some(file_name) = image_blocked_file {
+        frames.push_str(&render_iframe("Image blocked 390", 390, file_name));
+    }
+    Ok(format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{}</title>
+  <style>
+    body {{ margin: 0; padding: 24px; background: #e6e8eb; color: #202124; font: 14px/1.45 Arial, Helvetica, sans-serif; }}
+    h1 {{ font-size: 18px; margin: 0 0 4px; }}
+    .meta {{ margin: 0 0 18px; color: #5f6368; }}
+    .frame {{ margin: 0 0 28px; }}
+    .frame h2 {{ font-size: 13px; font-weight: 700; margin: 0 0 8px; }}
+    iframe {{ display: block; border: 1px solid #b8bec5; background: white; min-height: 900px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }}
+  </style>
+</head>
+<body>
+  <h1>{}</h1>
+  <p class="meta">Private Interspire render artifact. Use native browser screenshots for visual signoff.</p>
+  {}
+</body>
+</html>
+"#,
+        html_escape(
+            parts
+                .subject
+                .as_deref()
+                .unwrap_or("Interspire campaign preview")
+        ),
+        html_escape(
+            parts
+                .subject
+                .as_deref()
+                .unwrap_or("Interspire campaign preview")
+        ),
+        frames
+    ))
+}
+
+fn render_iframe(label: &str, width: u16, file_name: &str) -> String {
+    format!(
+        r#"<section class="frame">
+  <h2>{}</h2>
+  <iframe sandbox src="{}" style="width:{}px"></iframe>
+</section>
+"#,
+        html_escape(label),
+        html_escape(file_name),
+        width
+    )
+}
+
+fn html_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn campaign_body_step2_action_path(
+    campaign_id: u64,
+    html: &str,
+) -> Result<Option<String>, InterspireError> {
+    let document = Html::parse_document(html);
+    let form_selector =
+        Selector::parse("form").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    for form in document.select(&form_selector) {
+        let Some(action) = form.value().attr("action") else {
+            continue;
+        };
+        if safety::classify_allowed_campaign_body_step2_post(
+            &form_action_url_for_parse(action)?,
+            campaign_id,
+        )
+        .is_ok()
+        {
+            return Ok(Some(action.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn campaign_body_step1_pairs(
+    campaign_id: u64,
+    html: &str,
+) -> Result<Vec<(String, String)>, InterspireError> {
+    let document = Html::parse_document(html);
+    let form_selector =
+        Selector::parse("form").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    for form in document.select(&form_selector) {
+        let Some(action) = form.value().attr("action") else {
+            continue;
+        };
+        if safety::classify_allowed_campaign_body_step2_post(
+            &form_action_url_for_parse(action)?,
+            campaign_id,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let pairs = controls_to_proof_post_pairs(&form);
+        if pairs
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("name"))
+            && pairs
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("format"))
+        {
+            return Ok(pairs);
+        }
+        return Err(InterspireError::HtmlParse(
+            "campaign Step1 proof form did not include required Name and Format controls"
+                .to_string(),
+        ));
+    }
+    Err(InterspireError::HtmlParse(
+        "campaign Step1 proof form was not found".to_string(),
+    ))
+}
+
+fn controls_to_proof_post_pairs(form: &ElementRef<'_>) -> Vec<(String, String)> {
+    forms::parse_form_controls(form)
+        .into_iter()
+        .filter_map(|control| match control.kind {
+            forms::FormControlKind::Hidden => {
+                Some((control.original_name.clone(), control.value.clone()))
+            }
+            forms::FormControlKind::Text
+            | forms::FormControlKind::Textarea
+            | forms::FormControlKind::Select => {
+                Some((control.original_name.clone(), control.value.clone()))
+            }
+            forms::FormControlKind::Checkbox | forms::FormControlKind::Radio => control
+                .checked
+                .then(|| (control.original_name.clone(), control.value.clone())),
+            forms::FormControlKind::Submit => {
+                let lower_value = control.value.to_ascii_lowercase();
+                let lower_name = control.lower_name.to_ascii_lowercase();
+                (lower_name.contains("next") || lower_value.contains("next"))
+                    .then(|| (control.original_name.clone(), control.value.clone()))
+            }
+            forms::FormControlKind::Password => None,
+        })
+        .collect()
+}
+
+fn guarded_send_final_form_post(
+    base_url: &str,
+    html: &str,
+) -> Result<(Url, Vec<(String, String)>), InterspireError> {
+    let document = Html::parse_document(html);
+    let form_selector =
+        Selector::parse("form").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    for form in document.select(&form_selector) {
+        let Some(action) = form.value().attr("action") else {
+            continue;
+        };
+        let Ok(action_url) = safety::ensure_allowed_guarded_send_final_post(base_url, action)
+        else {
+            continue;
+        };
+        let mut pairs = controls_to_guarded_send_final_post_pairs(&form);
+        append_csrf_pair_if_missing(&mut pairs, html);
+        if pairs.is_empty() {
+            return Err(InterspireError::HtmlParse(
+                "guarded final send form did not expose postable controls".to_string(),
+            ));
+        }
+        return Ok((action_url, pairs));
+    }
+    Err(InterspireError::HtmlParse(
+        "guarded final send form was not found".to_string(),
+    ))
+}
+
+fn guarded_send_popup_url(base_url: &str, html: &str) -> Result<Option<Url>, InterspireError> {
+    for candidate in send_popup_path_candidates(html) {
+        if let Ok(url) = safety::ensure_allowed_guarded_send_popup(base_url, &candidate) {
+            return Ok(Some(url));
+        }
+    }
+    Ok(None)
+}
+
+fn send_popup_path_candidates(html: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let document = Html::parse_document(html);
+    if let Ok(link_selector) = Selector::parse("a") {
+        for link in document.select(&link_selector) {
+            if let Some(href) = link.value().attr("href") {
+                if href.to_ascii_lowercase().contains("page=send")
+                    && href.to_ascii_lowercase().contains("action=send")
+                {
+                    candidates.push(href.to_string());
+                }
+            }
+        }
+    }
+    if let Ok(form_selector) = Selector::parse("form") {
+        for form in document.select(&form_selector) {
+            if let Some(action) = form.value().attr("action") {
+                if action.to_ascii_lowercase().contains("page=send")
+                    && action.to_ascii_lowercase().contains("action=send")
+                {
+                    candidates.push(action.to_string());
+                }
+            }
+        }
+    }
+
+    let lower = html.to_ascii_lowercase();
+    let mut offset = 0usize;
+    while let Some(relative) = lower[offset..].find("index.php?page=send&action=send") {
+        let start = offset + relative;
+        let raw_tail = &html[start..];
+        let end = raw_tail
+            .find(|ch: char| matches!(ch, '"' | '\'' | '<' | '>' | ')' | ';') || ch.is_whitespace())
+            .unwrap_or(raw_tail.len());
+        candidates.push(raw_tail[..end].replace("&amp;", "&"));
+        offset = start + end.max(1);
+    }
+
+    candidates
+}
+
+fn send_popup_job_id(url: &Url) -> Option<u64> {
+    for key in ["job", "Job", "jobid", "JobID", "id", "sendid", "SendID"] {
+        if let Some(value) = url
+            .query_pairs()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+            .and_then(|(_, value)| value.as_ref().parse::<u64>().ok())
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn transport_failure_reason(html: &str) -> Option<String> {
+    let text = compact_text(
+        &Html::parse_document(html)
+            .root_element()
+            .text()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let lower = text.to_ascii_lowercase();
+    let markers = [
+        "smtp error",
+        "smtp failed",
+        "authentication failed",
+        "unable to send",
+        "could not send",
+        "send failed",
+        "failed to send",
+        "transport failed",
+        "error sending",
+    ];
+    if markers.iter().any(|marker| lower.contains(marker)) {
+        return Some(truncate(&redact::redact_sensitive_text(&text), 240));
+    }
+    None
+}
+
+fn controls_to_guarded_send_final_post_pairs(form: &ElementRef<'_>) -> Vec<(String, String)> {
+    let mut submit_pair = None;
+    let mut pairs = Vec::new();
+    for control in forms::parse_form_controls(form) {
+        match control.kind {
+            forms::FormControlKind::Hidden
+            | forms::FormControlKind::Text
+            | forms::FormControlKind::Textarea
+            | forms::FormControlKind::Select => {
+                pairs.push((control.original_name.clone(), control.value.clone()));
+            }
+            forms::FormControlKind::Checkbox | forms::FormControlKind::Radio => {
+                if control.checked {
+                    pairs.push((control.original_name.clone(), control.value.clone()));
+                }
+            }
+            forms::FormControlKind::Submit => {
+                let lower_name = control.lower_name.to_ascii_lowercase();
+                let lower_value = control.value.to_ascii_lowercase();
+                let looks_like_send = (lower_name.contains("send")
+                    || lower_value.contains("send")
+                    || lower_value.contains("finish"))
+                    && !lower_name.contains("schedule")
+                    && !lower_value.contains("schedule");
+                if looks_like_send && submit_pair.is_none() {
+                    submit_pair = Some((control.original_name.clone(), control.value.clone()));
+                }
+            }
+            forms::FormControlKind::Password => {}
+        }
+    }
+    if let Some(pair) = submit_pair {
+        pairs.push(pair);
+    }
+    pairs
+}
+
+fn form_action_url_for_parse(action: &str) -> Result<Url, InterspireError> {
+    Url::parse("https://example.test/admin/")
+        .unwrap_or_else(|err| panic!("static URL should parse: {err}"))
+        .join(action)
+        .map_err(|err| InterspireError::HtmlParse(format!("invalid form action: {err}")))
 }
 
 fn send_step2_action_path(html: &str) -> Option<String> {
@@ -435,6 +2042,44 @@ fn send_start_hidden_pairs(html: &str) -> Result<Vec<(String, String)>, Interspi
     Ok(pairs)
 }
 
+fn append_csrf_pair_if_missing(pairs: &mut Vec<(String, String)>, html: &str) {
+    if csrf_pair(pairs).is_some() {
+        return;
+    }
+    if let Some(token) = extract_login_csrf_token(html) {
+        pairs.push((token.field_name, token.value));
+    }
+}
+
+fn csrf_pair(pairs: &[(String, String)]) -> Option<(String, String)> {
+    pairs
+        .iter()
+        .find(|(name, value)| is_csrf_field_name(name) && !value.trim().is_empty())
+        .map(|(name, value)| (name.clone(), value.clone()))
+}
+
+fn is_csrf_field_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "csrf" | "csrftoken" | "csrf_token" | "token" | "_token" | "form_token" | "iem_csrf_token"
+    ) || lower.ends_with("token")
+}
+
+fn admin_origin(base_url: &str) -> Result<String, InterspireError> {
+    let url = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| InterspireError::Safety("admin base url has no host".to_string()))?;
+    let mut origin = format!("{}://{}", url.scheme(), host);
+    if let Some(port) = url.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
+    }
+    Ok(origin)
+}
+
 fn upsert_post_pair(pairs: &mut Vec<(String, String)>, name: &str, value: &str) {
     if let Some((_, existing)) = pairs
         .iter_mut()
@@ -467,11 +2112,26 @@ fn parse_send_wizard_final_page(
 ) -> Result<SendWizardReadbackReport, InterspireError> {
     let fields = parse_form_values_exact(html)?;
     let selected_campaign = selected_option(html, "newsletter")?;
-    let final_form_action = first_form_action(html, "frmSend")?;
+    let requested_campaign = option_by_value(html, "newsletter", campaign_id)?;
+    let requested_campaign_available = requested_campaign.is_some()
+        || selected_campaign
+            .as_ref()
+            .and_then(|option| option.value.parse::<u64>().ok())
+            == Some(campaign_id);
+    let campaign_label = selected_campaign
+        .as_ref()
+        .filter(|option| option.value.parse::<u64>().ok() == Some(campaign_id))
+        .or(requested_campaign.as_ref())
+        .map(|option| redact::redact_sensitive_text(&option.label));
+    let final_form_action = match first_form_action(html, "frmSend")? {
+        Some(action) => Some(action),
+        None => first_send_form_action(html)?,
+    };
     let final_form_posts_to_send_boundary = final_form_action
         .as_deref()
         .is_some_and(is_send_boundary_action);
     let selected_list_ids = selected_or_hidden_list_ids(html)?.unwrap_or_default();
+    let recipient_count = recipient_count_marker(html);
     let mut warnings = Vec::new();
     if !final_form_posts_to_send_boundary {
         warnings.push(
@@ -491,9 +2151,10 @@ fn parse_send_wizard_final_page(
         selected_campaign_id: selected_campaign
             .as_ref()
             .and_then(|option| option.value.parse().ok()),
-        campaign_label: selected_campaign
-            .map(|option| redact::redact_sensitive_text(&option.label)),
-        recipient_count: recipient_count_marker(html),
+        requested_campaign_available,
+        requested_list_ids_proven_by_recipient_count: false,
+        campaign_label,
+        recipient_count,
         from_name: value_for(&fields, &["sendfromname", "fromname"])
             .map(|value| redact::redact_sensitive_text(&value)),
         from_email_redacted: value_for(&fields, &["sendfromemail", "fromemail"])
@@ -551,9 +2212,38 @@ fn selected_option(html: &str, select_name: &str) -> Result<Option<SelectOption>
         }
         let selected = select
             .select(&option_selector)
-            .find(|option| option.value().attr("selected").is_some())
-            .or_else(|| select.select(&option_selector).next());
+            .find(|option| option.value().attr("selected").is_some());
         return Ok(selected.map(|option| SelectOption {
+            value: option.value().attr("value").unwrap_or_default().to_string(),
+            label: compact_text(&option.text().collect::<Vec<_>>().join(" ")),
+        }));
+    }
+    Ok(None)
+}
+
+fn option_by_value(
+    html: &str,
+    select_name: &str,
+    expected_value: u64,
+) -> Result<Option<SelectOption>, InterspireError> {
+    let document = Html::parse_document(html);
+    let select_selector =
+        Selector::parse("select").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let option_selector =
+        Selector::parse("option").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let expected = expected_value.to_string();
+    for select in document.select(&select_selector) {
+        if !select
+            .value()
+            .attr("name")
+            .is_some_and(|name| name.eq_ignore_ascii_case(select_name))
+        {
+            continue;
+        }
+        let matching = select
+            .select(&option_selector)
+            .find(|option| option.value().attr("value") == Some(expected.as_str()));
+        return Ok(matching.map(|option| SelectOption {
             value: option.value().attr("value").unwrap_or_default().to_string(),
             label: compact_text(&option.text().collect::<Vec<_>>().join(" ")),
         }));
@@ -691,6 +2381,21 @@ fn first_form_action(html: &str, form_name: &str) -> Result<Option<String>, Inte
     Ok(None)
 }
 
+fn first_send_form_action(html: &str) -> Result<Option<String>, InterspireError> {
+    let document = Html::parse_document(html);
+    let form_selector =
+        Selector::parse("form").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    for form in document.select(&form_selector) {
+        let Some(action) = form.value().attr("action") else {
+            continue;
+        };
+        if is_send_boundary_action(action) {
+            return Ok(Some(action.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 fn is_send_boundary_action(action: &str) -> bool {
     let lower = action.to_ascii_lowercase();
     lower.contains("page=send")
@@ -772,8 +2477,11 @@ fn sha256_hex(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        campaign_body_audit_from_html, parse_send_wizard_final_page, recipient_count_marker,
-        selected_or_hidden_list_ids, send_step2_action_path,
+        append_csrf_pair_if_missing, campaign_body_audit_from_html, campaign_body_step1_pairs,
+        campaign_body_step2_action_path, csrf_pair, guarded_send_final_form_post,
+        guarded_send_popup_url, list_ids_warning, parse_send_wizard_final_page,
+        recipient_count_marker, selected_or_hidden_list_ids, send_step2_action_path,
+        transport_failure_reason,
     };
 
     #[test]
@@ -798,6 +2506,73 @@ mod tests {
         assert!(report.html_sha256.is_some());
         assert!(!serialized.contains("%%UNSUBSCRIBELINK%%"));
         assert!(!serialized.contains("<html>"));
+    }
+
+    #[test]
+    fn campaign_body_audit_understands_interspire_8_editor_fields() {
+        let html = r#"
+            <form action="index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7">
+              <input name="subject" value="Subject">
+              <textarea name="myDevEditControl_html"><div><a href="https://example.invalid">Read</a><img src="x.png" alt="Logo">%%UNSUBSCRIBELINK%%</div></textarea>
+              <textarea name="myDevEditControl_text">Plain text</textarea>
+            </form>
+        "#;
+
+        let report = campaign_body_audit_from_html(7, html).expect("campaign body audit");
+        let serialized = serde_json::to_string(&report).expect("serialize report");
+
+        assert_eq!(report.unsubscribe_token_count, 1);
+        assert!(report.html_bytes > 0);
+        assert_eq!(report.http_url_count, 0);
+        assert_eq!(report.https_url_count, 1);
+        assert_eq!(report.image_count, 1);
+        assert_eq!(report.missing_alt_image_count, 0);
+        assert!(!serialized.contains("myDevEditControl_html"));
+        assert!(!serialized.contains("%%UNSUBSCRIBELINK%%"));
+    }
+
+    #[test]
+    fn campaign_body_step1_post_preserves_required_fields_without_final_save() {
+        let html = r#"
+            <form action="index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7">
+              <input type="hidden" name="csrfToken" value="abc123">
+              <input name="Name" value="Launch">
+              <input type="radio" name="Format" value="t">
+              <input type="radio" name="Format" value="h" checked>
+              <input type="hidden" name="usewysiwyg" value="3">
+              <input type="submit" name="NextButton" value="Next &gt;&gt;">
+            </form>
+        "#;
+
+        assert_eq!(
+            campaign_body_step2_action_path(7, html)
+                .expect("parse action")
+                .as_deref(),
+            Some("index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7")
+        );
+        let pairs = campaign_body_step1_pairs(7, html).expect("step1 pairs");
+
+        assert!(pairs.contains(&("Name".to_string(), "Launch".to_string())));
+        assert!(pairs.contains(&("Format".to_string(), "h".to_string())));
+        assert!(!pairs.contains(&("Format".to_string(), "t".to_string())));
+        assert!(pairs.contains(&("usewysiwyg".to_string(), "3".to_string())));
+        assert!(pairs.contains(&("csrfToken".to_string(), "abc123".to_string())));
+    }
+
+    #[test]
+    fn csrf_header_token_ignores_non_token_hidden_replay_fields() {
+        let mut pairs = vec![("ShowFilteringOptions".to_string(), "2".to_string())];
+        assert!(csrf_pair(&pairs).is_none());
+
+        append_csrf_pair_if_missing(
+            &mut pairs,
+            r#"<script>window.IEM_CSRF_TOKEN = "token-123";</script>"#,
+        );
+
+        assert_eq!(
+            csrf_pair(&pairs),
+            Some(("csrfToken".to_string(), "token-123".to_string()))
+        );
     }
 
     #[test]
@@ -851,6 +2626,111 @@ mod tests {
     }
 
     #[test]
+    fn final_send_wizard_page_handles_interspire_8_unnamed_send_form() {
+        let html = r#"
+            <form action="index.php?Page=Send&Action=Step4">
+              <select name="newsletter">
+                <option value="0" selected>Please select an email campaign</option>
+                <option value="7">Launch campaign</option>
+              </select>
+              <input name="sendfromname" value="Example Update">
+              <input name="sendfromemail" value="sender@example.invalid">
+              <input name="replytoemail" value="editor@example.invalid">
+              <input name="bounceemail" value="bounces@example.invalid">
+              <input type="checkbox" name="sendimmediately" checked>
+              <input type="checkbox" name="trackopens" checked>
+              <input type="checkbox" name="tracklinks" checked>
+              <input type="checkbox" name="sendmultipart" checked>
+              <p>1 recipient selected</p>
+            </form>
+        "#;
+
+        let report = parse_send_wizard_final_page(7, &[3], html).expect("parse final page");
+
+        assert_eq!(report.selected_campaign_id, Some(0));
+        assert!(report.requested_campaign_available);
+        assert_eq!(report.campaign_label.as_deref(), Some("Launch campaign"));
+        assert!(report.selected_list_ids.is_empty());
+        assert_eq!(report.recipient_count, Some(1));
+        assert!(report.final_form_posts_to_send_boundary);
+        assert!(!report.send_performed);
+        assert!(!report.scheduled);
+        assert!(!report.production_send_authorized);
+    }
+
+    #[test]
+    fn guarded_send_final_form_post_captures_only_guarded_final_send_form() {
+        let html = r#"
+            <form action="index.php?Page=Send&Action=Step2">
+              <input name="newsletter" value="7">
+            </form>
+            <form action="index.php?Page=Send&Action=Step4&csrfToken=abc">
+              <input type="hidden" name="csrfToken" value="abc">
+              <input type="hidden" name="newsletter" value="7">
+              <input type="hidden" name="lists[]" value="3">
+              <input name="sendfromemail" value="sender@example.invalid">
+              <input type="checkbox" name="trackopens" value="1" checked>
+              <input type="checkbox" name="embedimages" value="1">
+              <input type="password" name="smtp_password" value="secret">
+              <input type="submit" name="SendButton" value="Send now">
+            </form>
+        "#;
+
+        let (url, pairs) = guarded_send_final_form_post("https://example.test/admin/", html)
+            .expect("guarded send final form post");
+
+        assert!(url.as_str().contains("Page=Send&Action=Step4"));
+        assert!(pairs.contains(&("newsletter".to_string(), "7".to_string())));
+        assert!(pairs.contains(&("lists[]".to_string(), "3".to_string())));
+        assert!(pairs.contains(&("trackopens".to_string(), "1".to_string())));
+        assert!(pairs.contains(&("SendButton".to_string(), "Send now".to_string())));
+        assert!(!pairs.iter().any(|(name, _)| name == "embedimages"));
+        assert!(!pairs.iter().any(|(name, _)| name == "smtp_password"));
+    }
+
+    #[test]
+    fn guarded_send_final_form_post_rejects_schedule_only_forms() {
+        let html = r#"
+            <form action="index.php?Page=Send&Action=Schedule">
+              <input type="hidden" name="newsletter" value="7">
+              <input type="submit" name="ScheduleButton" value="Schedule">
+            </form>
+        "#;
+
+        assert!(guarded_send_final_form_post("https://example.test/admin/", html).is_err());
+    }
+
+    #[test]
+    fn guarded_send_popup_url_finds_started_continuation() {
+        let html = r#"
+            <html><body>
+              <script>
+                window.location = 'index.php?Page=Send&Action=Send&Job=2&Started=1&csrfToken=abc';
+              </script>
+            </body></html>
+        "#;
+
+        let url = guarded_send_popup_url("https://example.test/admin/", html)
+            .expect("popup parser")
+            .expect("popup continuation");
+
+        assert!(url.as_str().contains("Action=Send"));
+        assert!(url.as_str().contains("Started=1"));
+    }
+
+    #[test]
+    fn transport_failure_reason_is_redacted_and_bounded() {
+        let reason = transport_failure_reason(
+            "<html><body>SMTP error: authentication failed for recipient@example.invalid using fixture credential</body></html>",
+        )
+        .expect("failure marker");
+
+        assert!(reason.contains("SMTP error") || reason.contains("smtp error"));
+        assert!(!reason.contains("recipient@example.invalid"));
+        assert!(reason.len() <= 260);
+    }
+
+    #[test]
     fn final_send_wizard_page_requires_list_evidence() {
         let html = r#"
             <form name="frmSend" action="index.php?Page=Send&Action=Step3">
@@ -869,6 +2749,18 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("did not expose selected list ids")));
+    }
+
+    #[test]
+    fn list_ids_warning_accepts_recipient_count_proof() {
+        assert!(list_ids_warning(&[], &[1], true).is_none());
+        assert!(list_ids_warning(&[1], &[1], false).is_none());
+
+        let missing = list_ids_warning(&[], &[1], false).expect("missing warning");
+        assert!(missing.contains("could not be proven"));
+
+        let mismatch = list_ids_warning(&[2], &[1], false).expect("mismatch warning");
+        assert!(mismatch.contains("did not match"));
     }
 
     #[test]

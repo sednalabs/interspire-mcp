@@ -197,6 +197,233 @@
       "name": "interspire_campaign_readback"
     },
     {
+      "_meta": {
+        "approval_required": false,
+        "mutation_prohibited": true,
+        "openai/widgetAccessible": false,
+        "operation_class": "no_mutation_proof",
+        "production_action_authorized": false,
+        "proof_boundary": "write private render artifacts for native-browser screenshot inspection without mutating Interspire",
+        "securitySchemes": [
+          {
+            "type": "noauth"
+          }
+        ],
+        "ui": {
+          "visibility": [
+            "model"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Campaign render artifact"
+      },
+      "description": "Write private persisted-campaign render artifacts for native-browser screenshot inspection without returning raw HTML.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "artifact_prefix": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "include_image_blocked_variant": {
+            "default": false,
+            "type": "boolean"
+          },
+          "output_dir": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "campaign_id"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_render_artifact"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Campaign template update apply"
+      },
+      "description": "Apply a previously previewed semantic EDM template edit.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "embed_images": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "html_body": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "send_multipart": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "subject": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text_body": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "track_links": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "track_opens": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "campaign_id",
+          "plan_id"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_template_update_apply"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Campaign template update preview"
+      },
+      "description": "Preview semantic EDM template edits such as subject, HTML body, text body, multipart, tracking, and embed-image flags.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "embed_images": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "html_body": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "send_multipart": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "subject": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text_body": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "track_links": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "track_opens": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "campaign_id"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_template_update_preview"
+    },
+    {
       "description": "Apply a guarded campaign content or sender metadata edit.",
       "inputSchema": {
         "$defs": {
@@ -303,7 +530,7 @@
       "name": "interspire_campaign_update_preview"
     },
     {
-      "description": "Check one redacted contact's Interspire XML list presence.",
+      "description": "Check one redacted contact's Interspire list presence with XML first and exact admin-HTML fallback.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -472,6 +699,88 @@
       "name": "interspire_list_update_preview"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Production send apply"
+      },
+      "description": "Apply an explicitly acknowledged production send after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "acknowledge_production_send": {
+            "type": "boolean"
+          },
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "confirmation_phrase": {
+            "type": "string"
+          },
+          "expected_from_email": {
+            "type": "string"
+          },
+          "expected_html_sha256": {
+            "type": "string"
+          },
+          "expected_recipient_count": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "expected_reply_to_email": {
+            "type": "string"
+          },
+          "expected_subject": {
+            "type": "string"
+          },
+          "list_ids": {
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "max_queue_rows": {
+            "default": null,
+            "format": "uint",
+            "maximum": 100,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ops_work_item_ref": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "campaign_id",
+          "list_ids",
+          "expected_recipient_count",
+          "expected_from_email",
+          "expected_reply_to_email",
+          "expected_subject",
+          "expected_html_sha256",
+          "acknowledge_production_send",
+          "confirmation_phrase"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_production_send_apply"
+    },
+    {
       "description": "Apply a previously previewed Interspire scheduled queue cancel/delete plan. Requires guarded write environment flags.",
       "inputSchema": {
         "$defs": {
@@ -615,6 +924,90 @@
         "type": "object"
       },
       "name": "interspire_seed_readiness_gate"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Seed send apply"
+      },
+      "description": "Apply one explicitly acknowledged seed send after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "acknowledge_seed_send": {
+            "type": "boolean"
+          },
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_from_email": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_html_sha256": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_recipient_count": {
+            "format": "uint64",
+            "maximum": 20,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "expected_reply_to_email": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_subject": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "list_ids": {
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "max_queue_rows": {
+            "default": null,
+            "format": "uint",
+            "maximum": 100,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "campaign_id",
+          "list_ids",
+          "expected_recipient_count",
+          "acknowledge_seed_send"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_seed_send_apply"
     },
     {
       "_meta": {

@@ -48,7 +48,7 @@ impl LiveInterspireBackend {
         let source_list_ids = approved_warmup_source_list_ids(request);
         let mut lists = filter_requested_source_lists(lists, &source_list_ids);
         let mut warnings = Vec::new();
-        let mut notes = vec!["user/GetLists XML API read".to_string()];
+        let mut notes = vec!["lists/GetLists XML API read".to_string()];
 
         if request.include_html_enrichment {
             let html = self.html_client()?;
@@ -220,7 +220,7 @@ impl LiveInterspireBackend {
             missing_list_ids,
             inputs,
             xml_api::xml_evidence(vec![
-                "user/GetLists XML API read".to_string(),
+                "lists/GetLists XML API read".to_string(),
                 "subscribers/GetSubscribers XML API read for each matched explicit source list; large lists use bounded domain-prefix shards to avoid truncated XML responses".to_string(),
                 "private local artifacts written outside repository with aggregate MCP response"
                     .to_string(),

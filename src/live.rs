@@ -8,6 +8,7 @@ mod audience;
 mod checkpoint;
 mod guarded;
 mod reads;
+mod send;
 mod support;
 
 use crate::{
@@ -19,13 +20,15 @@ use crate::{
         AudienceHygieneExportReport, AudienceHygieneExportRequest,
         AudienceHygieneExportResumeRequest, AudienceHygieneExportStatusRequest,
         CampaignBodyAuditReport, CampaignBodyAuditRequest, CampaignReadbackReport,
-        CampaignReadbackRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
-        ContactStateReport, ContactStateRequest, GuardedWriteApplyReport,
-        GuardedWritePreviewReport, ListOwnerReadbackReport, ListOwnerReadbackRequest,
-        ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
-        QueueControlApplyReport, QueueControlApplyRequest, QueueControlPreviewReport,
-        QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
-        SeedReadinessGateReport, SeedReadinessGateRequest, SendWizardReadbackReport,
+        CampaignReadbackRequest, CampaignRenderArtifactReport, CampaignRenderArtifactRequest,
+        CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactStateReport,
+        ContactStateRequest, GuardedWriteApplyReport, GuardedWritePreviewReport,
+        ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest,
+        ListUpdateApplyRequest, ListUpdatePreviewRequest, ProductionSendApplyReport,
+        ProductionSendApplyRequest, QueueControlApplyReport, QueueControlApplyRequest,
+        QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
+        QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
+        SeedSendApplyReport, SeedSendApplyRequest, SendWizardReadbackReport,
         SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
         SettingsAuditReport, SettingsAuditRequest, SettingsUpdateApplyRequest,
         SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
@@ -139,6 +142,14 @@ impl InterspireReadBackend for LiveInterspireBackend {
         html.campaign_body_audit(request.campaign_id)
     }
 
+    fn campaign_render_artifact(
+        &self,
+        request: &CampaignRenderArtifactRequest,
+    ) -> Result<CampaignRenderArtifactReport, InterspireError> {
+        let html = self.html_client()?;
+        html.campaign_render_artifact(request)
+    }
+
     fn send_wizard_readback(
         &self,
         request: &SendWizardReadbackRequest,
@@ -153,6 +164,20 @@ impl InterspireReadBackend for LiveInterspireBackend {
     ) -> Result<SeedReadinessGateReport, InterspireError> {
         let html = self.html_client()?;
         html.seed_readiness_gate(request)
+    }
+
+    fn seed_send_apply(
+        &self,
+        request: &SeedSendApplyRequest,
+    ) -> Result<SeedSendApplyReport, InterspireError> {
+        self.seed_send_apply_impl(request)
+    }
+
+    fn production_send_apply(
+        &self,
+        request: &ProductionSendApplyRequest,
+    ) -> Result<ProductionSendApplyReport, InterspireError> {
+        self.production_send_apply_impl(request)
     }
 
     fn campaign_update_preview(

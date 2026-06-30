@@ -1,10 +1,10 @@
 //! URL safety policy for Interspire admin HTML.
 //!
-//! Only explicitly known GET pages are admitted. Send, schedule, cron, import,
-//! export, save, delete, unsubscribe, and parameter-smuggling variants are
-//! blocked before the HTTP client can request them. The one mutating exception
-//! is a narrow Schedule-page cancel/delete route used by guarded queue-control
-//! apply tools.
+//! Only explicitly known GET pages are admitted. Unreviewed send, schedule,
+//! cron, import, export, save, delete, unsubscribe, and parameter-smuggling
+//! variants are blocked before the HTTP client can request them. Mutating
+//! exceptions are narrow guarded routes: Schedule-page cancel/delete and the
+//! explicitly enabled guarded-send final form post.
 
 use crate::{error::InterspireError, response::QueueControlAction};
 use std::collections::HashSet;
@@ -14,6 +14,7 @@ use url::Url;
 pub enum AdminReadPage {
     Lists,
     ListEdit { id: u64 },
+    SubscriberExactSearch { list_id: u64 },
     Settings { tab: u8 },
     Users,
     UserEdit { id: u64 },
@@ -53,6 +54,11 @@ impl AdminReadPage {
         match self {
             Self::Lists => "index.php?Page=Lists".to_string(),
             Self::ListEdit { id } => format!("index.php?Page=Lists&Action=Edit&id={id}"),
+            Self::SubscriberExactSearch { list_id } => {
+                format!(
+                    "index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D={list_id}&emailaddress=redacted%40example.invalid&search_rule=exact"
+                )
+            }
             Self::Settings { tab } => format!("index.php?Page=Settings&Tab={tab}"),
             Self::Users => "index.php?Page=Users".to_string(),
             Self::UserEdit { id } => format!("index.php?Page=Users&Action=Edit&UserID={id}"),
@@ -118,6 +124,23 @@ pub fn ensure_allowed_queue_control_delete_post(
     Ok(url)
 }
 
+pub fn ensure_allowed_queue_control_pause(
+    base_url: &str,
+    relative_path: &str,
+) -> Result<(Url, u64), InterspireError> {
+    let base = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let base = normalize_admin_base(base);
+    let url = base.join(relative_path).map_err(|err| {
+        InterspireError::Safety(format!("invalid queue control pause path: {err}"))
+    })?;
+
+    ensure_admin_base_scope(&base, &url)?;
+    ensure_admin_front_controller_path(&base, &url)?;
+    let job_id = classify_allowed_queue_control_pause(&url)?;
+    Ok((url, job_id))
+}
+
 pub fn ensure_allowed_send_wizard_step2_post(
     base_url: &str,
     relative_path: &str,
@@ -132,6 +155,58 @@ pub fn ensure_allowed_send_wizard_step2_post(
     ensure_admin_base_scope(&base, &url)?;
     ensure_admin_front_controller_path(&base, &url)?;
     classify_allowed_send_wizard_step2_post(&url)?;
+    Ok(url)
+}
+
+pub fn ensure_allowed_campaign_body_step2_post(
+    base_url: &str,
+    relative_path: &str,
+    campaign_id: u64,
+) -> Result<Url, InterspireError> {
+    let base = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let base = normalize_admin_base(base);
+    let url = base.join(relative_path).map_err(|err| {
+        InterspireError::Safety(format!("invalid campaign body proof post path: {err}"))
+    })?;
+
+    ensure_admin_base_scope(&base, &url)?;
+    ensure_admin_front_controller_path(&base, &url)?;
+    classify_allowed_campaign_body_step2_post(&url, campaign_id)?;
+    Ok(url)
+}
+
+pub fn ensure_allowed_guarded_send_final_post(
+    base_url: &str,
+    relative_path: &str,
+) -> Result<Url, InterspireError> {
+    let base = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let base = normalize_admin_base(base);
+    let url = base.join(relative_path).map_err(|err| {
+        InterspireError::Safety(format!("invalid guarded send final post path: {err}"))
+    })?;
+
+    ensure_admin_base_scope(&base, &url)?;
+    ensure_admin_front_controller_path(&base, &url)?;
+    classify_allowed_guarded_send_final_post(&url)?;
+    Ok(url)
+}
+
+pub fn ensure_allowed_guarded_send_popup(
+    base_url: &str,
+    relative_path: &str,
+) -> Result<Url, InterspireError> {
+    let base = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let base = normalize_admin_base(base);
+    let url = base.join(relative_path).map_err(|err| {
+        InterspireError::Safety(format!("invalid guarded send popup path: {err}"))
+    })?;
+
+    ensure_admin_base_scope(&base, &url)?;
+    ensure_admin_front_controller_path(&base, &url)?;
+    classify_allowed_guarded_send_popup(&url)?;
     Ok(url)
 }
 
@@ -188,6 +263,27 @@ pub fn classify_allowed_admin_get(url: &Url) -> Result<AdminReadPage, Interspire
                     InterspireError::Safety("list edit page missing numeric id".to_string())
                 })?;
             Ok(AdminReadPage::ListEdit { id })
+        }
+        (Some("Subscribers"), Some("Manage")) => {
+            ensure_only_query_keys(
+                &pairs,
+                &[
+                    "Page",
+                    "Action",
+                    "SubAction",
+                    "List",
+                    "Lists",
+                    "Lists[]",
+                    "listid",
+                    "emailaddress",
+                    "search_rule",
+                ],
+            )?;
+            let list_id = subscriber_search_list_id(&pairs)?;
+            let _ = subscriber_exact_search_email(&pairs)?;
+            ensure_exact_subscriber_search_rule(&pairs)?;
+            ensure_exact_subscriber_search_subaction(&pairs)?;
+            Ok(AdminReadPage::SubscriberExactSearch { list_id })
         }
         (Some("Settings"), None) => {
             ensure_only_query_keys(&pairs, &["Page", "Tab"])?;
@@ -257,7 +353,15 @@ pub fn classify_allowed_send_wizard_step2_post(url: &Url) -> Result<(), Interspi
     ensure_no_duplicate_query_keys(&pairs)?;
     ensure_only_query_keys(
         &pairs,
-        &["Page", "Action", "token", "csrf", "csrf_token", "_token"],
+        &[
+            "Page",
+            "Action",
+            "token",
+            "csrf",
+            "csrfToken",
+            "csrf_token",
+            "_token",
+        ],
     )?;
 
     let page = pairs
@@ -278,6 +382,203 @@ pub fn classify_allowed_send_wizard_step2_post(url: &Url) -> Result<(), Interspi
         return Err(InterspireError::Safety(format!(
             "send wizard proof post action is not the no-send Step2 allowlist: {action:?}"
         )));
+    }
+
+    Ok(())
+}
+
+pub fn classify_allowed_campaign_body_step2_post(
+    url: &Url,
+    campaign_id: u64,
+) -> Result<(), InterspireError> {
+    if url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_none_or(|segment| segment != "index.php")
+    {
+        return Err(InterspireError::Safety(
+            "campaign body proof post path is not index.php".to_string(),
+        ));
+    }
+
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    ensure_no_duplicate_query_keys(&pairs)?;
+    ensure_only_query_keys(
+        &pairs,
+        &[
+            "Page",
+            "Action",
+            "SubAction",
+            "id",
+            "token",
+            "csrf",
+            "csrfToken",
+            "csrf_token",
+            "_token",
+        ],
+    )?;
+
+    let page = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Page"))
+        .map(|(_, value)| value.to_string());
+    let action = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Action"))
+        .map(|(_, value)| value.to_string());
+    let sub_action = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("SubAction"))
+        .map(|(_, value)| value.to_string());
+    let id = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("id"))
+        .and_then(|(_, value)| value.parse::<u64>().ok());
+
+    if !matches!(page.as_deref(), Some("Newsletters")) {
+        return Err(InterspireError::Safety(
+            "campaign body proof post must target the Newsletters page".to_string(),
+        ));
+    }
+    if !matches!(action.as_deref(), Some("Edit")) {
+        return Err(InterspireError::Safety(format!(
+            "campaign body proof post action is not the edit allowlist: {action:?}"
+        )));
+    }
+    if !sub_action
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("Step2"))
+    {
+        return Err(InterspireError::Safety(format!(
+            "campaign body proof post subaction is not the no-save Step2 allowlist: {sub_action:?}"
+        )));
+    }
+    if id != Some(campaign_id) {
+        return Err(InterspireError::Safety(
+            "campaign body proof post id does not match the requested campaign".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn classify_allowed_guarded_send_final_post(url: &Url) -> Result<(), InterspireError> {
+    if url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_none_or(|segment| segment != "index.php")
+    {
+        return Err(InterspireError::Safety(
+            "guarded send final post path is not index.php".to_string(),
+        ));
+    }
+
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    ensure_no_duplicate_query_keys(&pairs)?;
+    ensure_only_query_keys(
+        &pairs,
+        &[
+            "Page",
+            "Action",
+            "token",
+            "csrf",
+            "csrfToken",
+            "csrf_token",
+            "_token",
+        ],
+    )?;
+
+    let page = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Page"))
+        .map(|(_, value)| value.to_string());
+    let action = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Action"))
+        .map(|(_, value)| value.to_string());
+
+    if !matches!(page.as_deref(), Some("Send")) {
+        return Err(InterspireError::Safety(
+            "guarded send final post must target the Send page".to_string(),
+        ));
+    }
+    if !matches!(
+        action.as_deref(),
+        Some("Step3") | Some("Step4") | Some("Send")
+    ) {
+        return Err(InterspireError::Safety(format!(
+            "guarded send final post action is not in the final-send allowlist: {action:?}"
+        )));
+    }
+
+    Ok(())
+}
+
+pub fn classify_allowed_guarded_send_popup(url: &Url) -> Result<(), InterspireError> {
+    if url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_none_or(|segment| segment != "index.php")
+    {
+        return Err(InterspireError::Safety(
+            "guarded send popup path is not index.php".to_string(),
+        ));
+    }
+
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    ensure_no_duplicate_query_keys(&pairs)?;
+    ensure_only_query_keys(
+        &pairs,
+        &[
+            "Page",
+            "Action",
+            "job",
+            "Job",
+            "jobid",
+            "JobID",
+            "id",
+            "sendid",
+            "SendID",
+            "Started",
+            "started",
+            "token",
+            "csrf",
+            "csrfToken",
+            "csrf_token",
+            "_token",
+        ],
+    )?;
+
+    let page = query_value(&pairs, "Page");
+    let action = query_value(&pairs, "Action");
+    if !matches!(page.as_deref(), Some("Send")) {
+        return Err(InterspireError::Safety(
+            "guarded send popup must target the Send page".to_string(),
+        ));
+    }
+    if !matches!(action.as_deref(), Some("Send")) {
+        return Err(InterspireError::Safety(format!(
+            "guarded send popup action is not Send: {action:?}"
+        )));
+    }
+
+    let has_numeric_job = ["job", "jobid", "id", "sendid"].iter().any(|key| {
+        query_value(&pairs, key)
+            .as_deref()
+            .is_some_and(|value| value.parse::<u64>().is_ok())
+    });
+    if !has_numeric_job {
+        return Err(InterspireError::Safety(
+            "guarded send popup route missing numeric job identifier".to_string(),
+        ));
+    }
+    if let Some(started) = query_value(&pairs, "Started").or_else(|| query_value(&pairs, "started"))
+    {
+        if !matches!(started.as_str(), "0" | "1") {
+            return Err(InterspireError::Safety(
+                "guarded send popup Started value is not 0 or 1".to_string(),
+            ));
+        }
     }
 
     Ok(())
@@ -372,6 +673,60 @@ pub fn classify_allowed_queue_control_delete_post(url: &Url) -> Result<(), Inter
     Ok(())
 }
 
+pub fn classify_allowed_queue_control_pause(url: &Url) -> Result<u64, InterspireError> {
+    if url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_none_or(|segment| segment != "index.php")
+    {
+        return Err(InterspireError::Safety(
+            "queue control pause path is not index.php".to_string(),
+        ));
+    }
+
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    ensure_no_duplicate_query_keys(&pairs)?;
+    ensure_only_query_keys(
+        &pairs,
+        &[
+            "Page",
+            "Action",
+            "id",
+            "job",
+            "Job",
+            "jobid",
+            "JobID",
+            "token",
+            "csrf",
+            "csrfToken",
+            "csrf_token",
+            "_token",
+        ],
+    )?;
+
+    let page = query_value(&pairs, "Page");
+    let action = query_value(&pairs, "Action");
+    if !matches!(page.as_deref(), Some("Schedule")) {
+        return Err(InterspireError::Safety(
+            "queue control pause must target the Schedule page".to_string(),
+        ));
+    }
+    if !matches!(action.as_deref(), Some("Pause")) {
+        return Err(InterspireError::Safety(format!(
+            "queue control pause action is not Pause: {action:?}"
+        )));
+    }
+
+    ["job", "jobid", "id"]
+        .iter()
+        .find_map(|key| query_value(&pairs, key).and_then(|value| value.parse::<u64>().ok()))
+        .ok_or_else(|| {
+            InterspireError::Safety(
+                "queue control pause route missing numeric job identifier".to_string(),
+            )
+        })
+}
+
 pub fn classify_allowed_admin_write(url: &Url) -> Result<AdminWriteRoute, InterspireError> {
     if url
         .path_segments()
@@ -448,6 +803,7 @@ pub fn classify_allowed_admin_write(url: &Url) -> Result<AdminWriteRoute, Inters
                 &[
                     "Page",
                     "Action",
+                    "SubAction",
                     "id",
                     "token",
                     "csrf",
@@ -456,6 +812,7 @@ pub fn classify_allowed_admin_write(url: &Url) -> Result<AdminWriteRoute, Inters
                 ],
             )?;
             ensure_write_action_allowed(action.as_deref())?;
+            ensure_newsletter_write_subaction_allowed(query_value(&pairs, "SubAction").as_deref())?;
             let (key, id) = required_numeric_query_value(&pairs, "id")?;
             Ok(AdminWriteRoute {
                 page,
@@ -611,6 +968,7 @@ fn ensure_only_queue_control_query_keys(
         "CampaignID",
         "token",
         "csrf",
+        "csrfToken",
         "csrf_token",
         "_token",
     ];
@@ -637,6 +995,24 @@ fn ensure_write_action_allowed(action: Option<&str>) -> Result<(), InterspireErr
 
     Err(InterspireError::Safety(format!(
         "admin write action is not in the guarded allowlist: {action}"
+    )))
+}
+
+fn ensure_newsletter_write_subaction_allowed(
+    sub_action: Option<&str>,
+) -> Result<(), InterspireError> {
+    let Some(sub_action) = sub_action else {
+        return Ok(());
+    };
+    if matches!(
+        sub_action.to_ascii_lowercase().as_str(),
+        "complete" | "save"
+    ) {
+        return Ok(());
+    }
+
+    Err(InterspireError::Safety(format!(
+        "campaign write SubAction is not in the guarded allowlist: {sub_action}"
     )))
 }
 
@@ -694,6 +1070,127 @@ fn required_numeric_query_value(
                 "admin write route missing numeric identifier {key_name}"
             ))
         })
+}
+
+fn query_value(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+    key_name: &str,
+) -> Option<String> {
+    pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(key_name))
+        .map(|(_, value)| value.to_string())
+}
+
+fn subscriber_search_list_id(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+) -> Result<u64, InterspireError> {
+    let keys = ["list", "lists", "lists[]", "listid"];
+    let matches = keys
+        .iter()
+        .filter_map(|wanted| {
+            pairs
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(wanted))
+                .and_then(|(_, value)| value.parse::<u64>().ok())
+        })
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [single] if *single > 0 => Ok(*single),
+        [] => Err(InterspireError::Safety(
+            "subscriber exact search missing numeric list id".to_string(),
+        )),
+        _ => Err(InterspireError::Safety(
+            "subscriber exact search must target exactly one list id".to_string(),
+        )),
+    }
+}
+
+fn subscriber_exact_search_email(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+) -> Result<String, InterspireError> {
+    let keys = ["emailaddress"];
+    let matches = keys
+        .iter()
+        .filter_map(|wanted| {
+            pairs
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(wanted))
+                .map(|(_, value)| value.trim().to_string())
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    let email = match matches.as_slice() {
+        [single] => single,
+        [] => {
+            return Err(InterspireError::Safety(
+                "subscriber exact search missing email query".to_string(),
+            ))
+        }
+        _ => {
+            return Err(InterspireError::Safety(
+                "subscriber exact search must include exactly one email query".to_string(),
+            ))
+        }
+    };
+
+    if email.len() > 254
+        || email.chars().any(|ch| ch.is_control())
+        || email.contains('*')
+        || !email.contains('@')
+        || email.starts_with('@')
+        || email.ends_with('@')
+    {
+        return Err(InterspireError::Safety(
+            "subscriber exact search email query is not exact enough".to_string(),
+        ));
+    }
+
+    Ok(email.to_string())
+}
+
+fn ensure_exact_subscriber_search_rule(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+) -> Result<(), InterspireError> {
+    let Some(rule) = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("search_rule"))
+        .map(|(_, value)| value.trim().to_ascii_lowercase())
+    else {
+        return Err(InterspireError::Safety(
+            "subscriber exact search missing search_rule=exact".to_string(),
+        ));
+    };
+
+    if rule == "exact" {
+        return Ok(());
+    }
+
+    Err(InterspireError::Safety(
+        "subscriber exact search must use search_rule=exact".to_string(),
+    ))
+}
+
+fn ensure_exact_subscriber_search_subaction(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+) -> Result<(), InterspireError> {
+    let Some(subaction) = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("SubAction"))
+        .map(|(_, value)| value.trim().to_ascii_lowercase())
+    else {
+        return Ok(());
+    };
+
+    if matches!(subaction.as_str(), "step3" | "simplesearch") {
+        return Ok(());
+    }
+
+    Err(InterspireError::Safety(
+        "subscriber exact search SubAction must be Step3 or SimpleSearch".to_string(),
+    ))
 }
 
 fn optional_numeric_query_value(
@@ -795,6 +1292,27 @@ mod tests {
             Some(AdminReadPage::ListEdit { id: 42 })
         );
         assert_eq!(
+            classify_allowed_admin_get(&url(
+                "index.php?Page=Subscribers&Action=Manage&Lists%5B%5D=42&emailaddress=person%40example.test&search_rule=exact"
+            ))
+            .ok(),
+            Some(AdminReadPage::SubscriberExactSearch { list_id: 42 })
+        );
+        assert_eq!(
+            classify_allowed_admin_get(&url(
+                "index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D=42&emailaddress=person%40example.test&search_rule=exact"
+            ))
+            .ok(),
+            Some(AdminReadPage::SubscriberExactSearch { list_id: 42 })
+        );
+        assert_eq!(
+            classify_allowed_admin_get(&url(
+                "index.php?Page=Subscribers&Action=Manage&SubAction=SimpleSearch&Lists%5B%5D=42&emailaddress=person%40example.test&search_rule=exact"
+            ))
+            .ok(),
+            Some(AdminReadPage::SubscriberExactSearch { list_id: 42 })
+        );
+        assert_eq!(
             classify_allowed_admin_get(&url("index.php?Page=Settings&Tab=2")).ok(),
             Some(AdminReadPage::Settings { tab: 2 })
         );
@@ -877,6 +1395,109 @@ mod tests {
     }
 
     #[test]
+    fn allows_only_guarded_send_final_form_posts() {
+        let base_url = "https://example.test/admin/";
+        for path in [
+            "index.php?Page=Send&Action=Step3&token=abc",
+            "index.php?Page=Send&Action=Step4",
+            "index.php?Page=Send&Action=Send&csrfToken=abc",
+        ] {
+            assert!(
+                ensure_allowed_guarded_send_final_post(base_url, path).is_ok(),
+                "{path} should be allowed"
+            );
+        }
+
+        for path in [
+            "index.php?Page=Send&Action=Step2&token=abc",
+            "index.php?Page=Send&Action=Schedule",
+            "index.php?Page=Send&Action=Step4&Action=Schedule",
+            "index.php?Page=Newsletters&Action=Send&id=9",
+            "index.php?Page=Schedule&Action=Send&id=1",
+            "cron/index.php?Page=Send&Action=Step4",
+        ] {
+            assert!(
+                ensure_allowed_guarded_send_final_post(base_url, path).is_err(),
+                "{path} should be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_only_guarded_send_popup_routes() {
+        let base_url = "https://example.test/admin/";
+        let popup = ensure_allowed_guarded_send_popup(
+            base_url,
+            "index.php?Page=Send&Action=Send&Job=2&Started=1&csrfToken=abc",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(popup.as_str().contains("Action=Send"));
+
+        for path in [
+            "index.php?Page=Send&Action=Send",
+            "index.php?Page=Send&Action=Step4&Job=2",
+            "index.php?Page=Schedule&Action=Send&Job=2",
+            "index.php?Page=Send&Action=Send&Job=abc",
+            "index.php?Page=Send&Action=Send&Job=2&Started=maybe",
+            "cron/index.php?Page=Send&Action=Send&Job=2",
+        ] {
+            assert!(
+                ensure_allowed_guarded_send_popup(base_url, path).is_err(),
+                "{path} should be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_only_schedule_pause_preflight_routes() {
+        let base_url = "https://example.test/admin/";
+        let (_, job_id) = ensure_allowed_queue_control_pause(
+            base_url,
+            "index.php?Page=Schedule&Action=Pause&job=42&csrfToken=abc",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(job_id, 42);
+
+        for path in [
+            "index.php?Page=Schedule&Action=Resume&job=42",
+            "index.php?Page=Schedule&Action=Pause&job=abc",
+            "index.php?Page=Send&Action=Pause&job=42",
+            "cron/index.php?Page=Schedule&Action=Pause&job=42",
+        ] {
+            assert!(
+                ensure_allowed_queue_control_pause(base_url, path).is_err(),
+                "{path} should be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_only_campaign_body_step2_no_save_proof_post() {
+        let base_url = "https://example.test/admin/";
+        let step2 = ensure_allowed_campaign_body_step2_post(
+            base_url,
+            "index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=9&csrfToken=abc",
+            9,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(step2.as_str().contains("SubAction=Step2"));
+
+        for path in [
+            "index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=9",
+            "index.php?Page=Newsletters&Action=Save&id=9",
+            "index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=10",
+            "index.php?Page=Newsletters&Action=Send&id=9",
+            "index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=9&Action=Send",
+            "cron/index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=9",
+        ] {
+            assert!(
+                ensure_allowed_campaign_body_step2_post(base_url, path, 9).is_err(),
+                "{path} should be blocked"
+            );
+        }
+    }
+
+    #[test]
     fn allows_guarded_form_write_routes_for_expected_targets() {
         let base_url = "https://example.test/admin/";
         let list_url = ensure_allowed_admin_post_for(
@@ -894,6 +1515,16 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("{err}"));
         assert!(campaign_url.as_str().contains("Page=Newsletters"));
+
+        let campaign_step2_complete_url = ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=9",
+            &AdminWriteIntent::NewsletterEdit { id: 9 },
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(campaign_step2_complete_url
+            .as_str()
+            .contains("SubAction=Complete"));
     }
 
     #[test]
@@ -908,6 +1539,18 @@ mod tests {
         assert!(ensure_allowed_admin_post_for(
             base_url,
             "index.php?Page=Newsletters&Action=Send&id=9",
+            &AdminWriteIntent::NewsletterEdit { id: 9 },
+        )
+        .is_err());
+        assert!(ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=9",
+            &AdminWriteIntent::NewsletterEdit { id: 9 },
+        )
+        .is_err());
+        assert!(ensure_allowed_admin_post_for(
+            base_url,
+            "index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=10",
             &AdminWriteIntent::NewsletterEdit { id: 9 },
         )
         .is_err());
@@ -983,6 +1626,14 @@ mod tests {
             "admin/cron/cron.php",
             "index.php?Page=Subscribers&Action=Import",
             "index.php?Page=Subscribers&Action=Export",
+            "index.php?Page=Subscribers&Action=Manage",
+            "index.php?Page=Subscribers&Action=Manage&Lists=1",
+            "index.php?Page=Subscribers&Action=Manage&Search=person%40example.test",
+            "index.php?Page=Subscribers&Action=Manage&Lists=1&Search=*%40example.test",
+            "index.php?Page=Subscribers&Action=Manage&Lists=1&emailaddress=person%40example.test&search_rule=includes",
+            "index.php?Page=Subscribers&Action=Manage&SubAction=Delete&Lists%5B%5D=1&emailaddress=person%40example.test&search_rule=exact",
+            "index.php?Page=Subscribers&Action=Manage&Lists=1&Lists=2&Search=person%40example.test",
+            "index.php?Page=Subscribers&Action=Manage&Lists=1&Search=person%40example.test&Action=Delete",
             "index.php?Page=Settings&Tab=3",
             "index.php?Page=Lists&Action=Save&id=1",
             "index.php?Page=Users&Action=Save&UserID=1",

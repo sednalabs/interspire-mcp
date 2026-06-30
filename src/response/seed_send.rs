@@ -1,0 +1,159 @@
+use super::{
+    CampaignBodyAuditReport, Evidence, SeedReadinessGate, SendReconciliationReport,
+    SendWizardReadbackReport,
+};
+use crate::redact;
+use serde::Serialize;
+
+pub const MAX_SEED_SEND_RECIPIENTS: u64 = 20;
+
+#[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
+pub struct SeedSendApplyRequest {
+    pub campaign_id: u64,
+    #[schemars(length(min = 1))]
+    pub list_ids: Vec<u64>,
+    #[schemars(range(min = 1, max = 20))]
+    pub expected_recipient_count: u64,
+    #[serde(default)]
+    pub expected_from_email: Option<String>,
+    #[serde(default)]
+    pub expected_reply_to_email: Option<String>,
+    #[serde(default)]
+    pub expected_subject: Option<String>,
+    #[serde(default)]
+    pub expected_html_sha256: Option<String>,
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 100))]
+    pub max_queue_rows: Option<usize>,
+    pub acknowledge_seed_send: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SeedSendApplyReport {
+    pub ok: bool,
+    pub configured: bool,
+    pub guarded_writes_enabled: bool,
+    pub send_controls_enabled: bool,
+    pub sent: bool,
+    pub campaign_id: u64,
+    pub requested_list_ids: Vec<u64>,
+    pub recipient_count: Option<u64>,
+    pub from_name: Option<String>,
+    pub from_email_redacted: Option<String>,
+    pub reply_to_email_redacted: Option<String>,
+    pub bounce_email_redacted: Option<String>,
+    pub subject: Option<String>,
+    pub html_sha256: Option<String>,
+    pub gates: Vec<SeedReadinessGate>,
+    pub send_wizard: SendWizardReadbackReport,
+    pub campaign_body: CampaignBodyAuditReport,
+    pub post_status_code: Option<u16>,
+    pub post_redirected: bool,
+    pub reconciliation: SendReconciliationReport,
+    pub queue_rows_before: usize,
+    pub queue_rows_after: usize,
+    pub stats_rows_before: usize,
+    pub stats_rows_after: usize,
+    pub production_send_authorized: bool,
+    pub warnings: Vec<String>,
+    pub evidence: Evidence,
+}
+
+impl SeedSendApplyReport {
+    pub fn denied(
+        request: &SeedSendApplyRequest,
+        guarded_writes_enabled: bool,
+        send_controls_enabled: bool,
+        warning: String,
+    ) -> Self {
+        Self {
+            ok: false,
+            configured: true,
+            guarded_writes_enabled,
+            send_controls_enabled,
+            sent: false,
+            campaign_id: request.campaign_id,
+            requested_list_ids: request.list_ids.clone(),
+            recipient_count: None,
+            from_name: None,
+            from_email_redacted: request
+                .expected_from_email
+                .as_ref()
+                .map(|email| redact::redact_email(email)),
+            reply_to_email_redacted: request
+                .expected_reply_to_email
+                .as_ref()
+                .map(|email| redact::redact_email(email)),
+            bounce_email_redacted: None,
+            subject: request
+                .expected_subject
+                .as_ref()
+                .map(|subject| redact::redact_sensitive_text(subject)),
+            html_sha256: request.expected_html_sha256.clone(),
+            gates: Vec::new(),
+            send_wizard: SendWizardReadbackReport::fixture(),
+            campaign_body: CampaignBodyAuditReport::fixture(),
+            post_status_code: None,
+            post_redirected: false,
+            reconciliation: SendReconciliationReport::refused(
+                0,
+                0,
+                0,
+                0,
+                "no send request sent".to_string(),
+            ),
+            queue_rows_before: 0,
+            queue_rows_after: 0,
+            stats_rows_before: 0,
+            stats_rows_after: 0,
+            production_send_authorized: false,
+            warnings: vec![redact::redact_sensitive_text(&warning)],
+            evidence: Evidence {
+                source: "interspire_admin_html".to_string(),
+                notes: vec!["no send request sent".to_string()],
+            },
+        }
+    }
+
+    pub fn fixture() -> Self {
+        let send_wizard = SendWizardReadbackReport::fixture();
+        let campaign_body = CampaignBodyAuditReport::fixture();
+        Self {
+            ok: true,
+            configured: true,
+            guarded_writes_enabled: true,
+            send_controls_enabled: true,
+            sent: true,
+            campaign_id: send_wizard.campaign_id,
+            requested_list_ids: send_wizard.requested_list_ids.clone(),
+            recipient_count: send_wizard.recipient_count,
+            from_name: send_wizard.from_name.clone(),
+            from_email_redacted: send_wizard.from_email_redacted.clone(),
+            reply_to_email_redacted: send_wizard.reply_to_email_redacted.clone(),
+            bounce_email_redacted: send_wizard.bounce_email_redacted.clone(),
+            subject: campaign_body.subject.clone(),
+            html_sha256: campaign_body.html_sha256.clone(),
+            gates: vec![SeedReadinessGate {
+                name: "seed_send_acknowledged".to_string(),
+                passed: true,
+                severity: "blocker".to_string(),
+                detail: "seed send was explicitly acknowledged".to_string(),
+            }],
+            send_wizard,
+            campaign_body,
+            post_status_code: Some(302),
+            post_redirected: true,
+            reconciliation: SendReconciliationReport::fixture_seed(),
+            queue_rows_before: 0,
+            queue_rows_after: 0,
+            stats_rows_before: 0,
+            stats_rows_after: 1,
+            production_send_authorized: false,
+            warnings: Vec::new(),
+            evidence: Evidence {
+                source: "fixture".to_string(),
+                notes: vec!["synthetic fixture".to_string()],
+            },
+        }
+    }
+}

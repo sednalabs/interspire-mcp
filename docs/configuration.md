@@ -32,6 +32,11 @@ INTERSPIRE_XML_TOKEN=redacted-token
 
 Explicit environment variables take precedence over file values.
 
+The supported XML calls are documented in
+[`interspire-xml-compatibility.md`](interspire-xml-compatibility.md). In
+particular, list summary reads use `lists/GetLists`; subscriber reads use the
+`subscribers` request type.
+
 ## Admin HTML
 
 ```bash
@@ -101,13 +106,31 @@ Current public behavior:
 - `INTERSPIRE_QUEUE_WRITE_CONTROLS=1` enables guarded queue cancel/delete apply.
 - `INTERSPIRE_FORM_WRITE_CONTROLS=1` enables guarded campaign, list, user, and
   non-secret settings apply.
-- `INTERSPIRE_CONTACT_WRITE_CONTROLS`, `INTERSPIRE_SEND_CONTROLS`, and
-  `INTERSPIRE_PRODUCTION_SEND_CONTROLS` are reserved for later phases and
-  should remain disabled.
+- `INTERSPIRE_SEND_CONTROLS=1` enables explicitly acknowledged bounded seed
+  sends through `interspire_seed_send_apply`.
+- `INTERSPIRE_PRODUCTION_SEND_CONTROLS=1` additionally enables
+  `interspire_production_send_apply`, which requires exact expected recipient
+  count, From, Reply-To, subject, HTML SHA-256, and confirmation phrase.
+- `INTERSPIRE_CONTACT_WRITE_CONTROLS` is reserved for later phases and should
+  remain disabled.
 - The public build always requires preview/apply with an exact `plan_id`.
 
 Use write flags only for the process that should apply an already-reviewed
 plan. Preview remains available without them.
+
+## Private Render Artifacts
+
+Render artifacts are private local files used for native-browser screenshot
+inspection. The public build writes them under a fixed local directory:
+
+```bash
+/tmp/interspire-mcp-render-artifacts
+```
+
+Per-request `output_dir` and `artifact_prefix` values are rejected for render
+artifacts in the public build. Filenames are generated from a fixed prefix and
+timestamp, and the directory is checked for symlinks before permissions are
+applied. Responses return paths, hashes, and byte counts, not raw campaign HTML.
 
 ## Sensitive Reads
 

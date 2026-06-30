@@ -14,10 +14,11 @@ use crate::{
     guarded_write, redact,
     response::{
         CampaignReadbackReport, Evidence, FormFieldUpdate, GuardedWriteApplyReport,
-        GuardedWritePreviewReport, ListSummary, QueueControlAction, QueueControlCandidate,
-        QueueStatsReadbackReport, RedactedField, SensitiveFieldDenial, SensitiveFieldQueryReport,
-        SensitiveFieldQueryRequest, SensitiveFieldTarget, SensitiveFieldValue, SettingsAuditReport,
-        SettingsSection, SettingsSectionName, UserSmtpReadbackReport, UserSmtpSummary,
+        GuardedWritePreviewReport, ListSummary, ListSummaryReport, QueueControlAction,
+        QueueControlCandidate, QueueStatsReadbackReport, RedactedField, SensitiveFieldDenial,
+        SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SensitiveFieldTarget,
+        SensitiveFieldValue, SettingsAuditReport, SettingsSection, SettingsSectionName,
+        UserSmtpReadbackReport, UserSmtpSummary,
     },
     safety::{self, AdminReadPage, QueueControlRoute},
 };
@@ -41,10 +42,18 @@ pub struct AdminHtmlClient {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListEditMetadata {
     pub list_id: u64,
+    pub name: Option<String>,
     pub owner_name: Option<String>,
     pub owner_email_redacted: Option<String>,
     pub reply_to_email_redacted: Option<String>,
     pub bounce_email_redacted: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactStateHtmlReadback {
+    pub found_on_list: Option<bool>,
+    pub warnings: Vec<String>,
+    pub evidence_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +71,7 @@ struct QueueControlLink {
     route: QueueControlRoute,
     url: Url,
     execution: QueueControlExecution,
+    pause_before_delete: Option<Url>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,9 +94,9 @@ struct QueueDeleteForm {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LoginCsrfToken {
-    field_name: String,
-    value: String,
+pub(super) struct LoginCsrfToken {
+    pub(super) field_name: String,
+    pub(super) value: String,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +175,67 @@ impl AdminHtmlClient {
         Ok(notes)
     }
 
+    pub fn list_summary_readback(
+        &self,
+        max_lists: usize,
+    ) -> Result<ListSummaryReport, InterspireError> {
+        if !self.config.is_configured() {
+            return Err(InterspireError::AdminHtmlNotConfigured);
+        }
+        self.login()?;
+
+        let lists_html = self.get_allowed(&AdminReadPage::Lists.path())?;
+        let list_ids = extract_ids_from_links(&lists_html, "Page=Lists", "id");
+        let mut lists = Vec::new();
+        let mut warnings = Vec::new();
+        for list_id in list_ids.iter().take(max_lists) {
+            let html = self.get_allowed(&AdminReadPage::ListEdit { id: *list_id }.path())?;
+            match parse_list_edit_metadata(*list_id, &html) {
+                Ok(metadata) => lists.push(ListSummary {
+                    list_id: *list_id,
+                    name: metadata.name.unwrap_or_else(|| format!("list-{list_id}")),
+                    subscribed_count: None,
+                    unsubscribed_count: None,
+                    autoresponder_count: None,
+                    owner_name: metadata.owner_name,
+                    owner_email_redacted: metadata.owner_email_redacted,
+                    reply_to_email_redacted: metadata.reply_to_email_redacted,
+                    bounce_email_redacted: metadata.bounce_email_redacted,
+                    source: "admin_html".to_string(),
+                }),
+                Err(err) => warnings.push(format!(
+                    "list {} html parse skipped: {}",
+                    list_id,
+                    redact::redact_sensitive_text(&err.to_string())
+                )),
+            }
+        }
+        if list_ids.len() > max_lists {
+            warnings.push(format!(
+                "admin HTML list readback limited to {max_lists} of {} lists",
+                list_ids.len()
+            ));
+        }
+        if lists.is_empty() {
+            warnings.push(
+                "admin HTML list readback did not find list edit links on the Lists page"
+                    .to_string(),
+            );
+        }
+
+        Ok(ListSummaryReport {
+            ok: true,
+            configured: true,
+            lists,
+            warnings,
+            evidence: admin_evidence(vec![
+                "allowlisted Lists GET read".to_string(),
+                "allowlisted List edit GET reads for redacted metadata".to_string(),
+                "subscriber/contact rows were not exported".to_string(),
+            ]),
+        })
+    }
+
     pub fn settings_audit(
         &self,
         include_cron: bool,
@@ -194,6 +265,77 @@ impl AdminHtmlClient {
             sections,
             warnings: Vec::new(),
             evidence: admin_evidence(vec!["allowlisted Settings tab GET reads".to_string()]),
+        })
+    }
+
+    pub fn contact_state_readback(
+        &self,
+        email: &str,
+        list_id: u64,
+    ) -> Result<ContactStateHtmlReadback, InterspireError> {
+        if !self.config.is_configured() {
+            return Err(InterspireError::AdminHtmlNotConfigured);
+        }
+        self.login()?;
+
+        let email = normalize_exact_email_query(email)?;
+        let paths = subscriber_exact_search_paths(list_id, &email);
+        let mut warnings = Vec::new();
+        let mut attempted = 0usize;
+        let mut saw_search_page = false;
+        let mut route_http_failures = 0usize;
+
+        for path in paths {
+            attempted += 1;
+            let html = match self.get_allowed(&path) {
+                Ok(html) => html,
+                Err(err) => {
+                    route_http_failures += 1;
+                    warnings.push(format!(
+                        "subscriber exact-search route candidate skipped: {}",
+                        redact::redact_sensitive_text(&err.to_string())
+                    ));
+                    continue;
+                }
+            };
+            let parsed = parse_subscriber_exact_search_page(&html, &email)?;
+            warnings.extend(parsed.warnings);
+            saw_search_page |= parsed.looks_like_subscriber_page;
+            if parsed.exact_email_found {
+                return Ok(ContactStateHtmlReadback {
+                    found_on_list: Some(true),
+                    warnings,
+                    evidence_notes: vec![
+                        "allowlisted Subscribers exact-search GET read".to_string(),
+                        "exact requested email was found on the selected list page; raw subscriber row was not returned".to_string(),
+                    ],
+                });
+            }
+        }
+
+        if attempted == route_http_failures {
+            warnings.push(
+                "all subscriber exact-search route candidates failed before returning HTML"
+                    .to_string(),
+            );
+            return Ok(ContactStateHtmlReadback {
+                found_on_list: None,
+                warnings,
+                evidence_notes: vec![
+                    "allowlisted Subscribers exact-search GET attempted".to_string(),
+                    "no subscriber search HTML was available to corroborate contact state"
+                        .to_string(),
+                ],
+            });
+        }
+
+        Ok(ContactStateHtmlReadback {
+            found_on_list: if saw_search_page { Some(false) } else { None },
+            warnings,
+            evidence_notes: vec![
+                "allowlisted Subscribers exact-search GET read".to_string(),
+                "exact requested email was not found; absence remains low-confidence unless corroborated elsewhere".to_string(),
+            ],
         })
     }
 
@@ -453,9 +595,40 @@ impl AdminHtmlClient {
                 )
             })?;
 
+        let mut notes = Vec::new();
+        if selected.candidate.action == QueueControlAction::Delete {
+            if let Some(pause_url) = selected.pause_before_delete.clone() {
+                let response =
+                    self.queue_control_get_request(pause_url)?
+                        .send()
+                        .map_err(|err| {
+                            InterspireError::Http(format!(
+                                "queue control pause preflight failed: {err}"
+                            ))
+                        })?;
+                let pause_status = response.status();
+                if !pause_status.is_success() && !pause_status.is_redirection() {
+                    return Err(InterspireError::Http(format!(
+                        "queue control pause preflight returned HTTP {}",
+                        pause_status.as_u16()
+                    )));
+                }
+                if pause_status.is_success() {
+                    let body = response
+                        .text()
+                        .map_err(|err| InterspireError::Http(err.to_string()))?;
+                    ensure_authenticated_html(&body)?;
+                }
+                notes.push(format!(
+                    "allowlisted Schedule pause preflight returned HTTP {} before delete",
+                    pause_status.as_u16()
+                ));
+            }
+        }
+
         let response = match &selected.execution {
             QueueControlExecution::Get => self
-                .with_access_headers(self.http.get(selected.url.clone()))
+                .queue_control_get_request(selected.url.clone())?
                 .send()
                 .map_err(|err| InterspireError::Http(err.to_string()))?,
             QueueControlExecution::DeletePost {
@@ -468,7 +641,7 @@ impl AdminHtmlClient {
                 let mut post_pairs = hidden_pairs.clone();
                 post_pairs.push((checkbox_name.clone(), identifier_value));
                 post_pairs.push((submit_name.clone(), submit_value.clone()));
-                self.with_access_headers(self.http.post(selected.url.clone()))
+                self.queue_control_post_request(selected.url.clone(), &post_pairs)?
                     .form(&post_pairs)
                     .send()
                     .map_err(|err| InterspireError::Http(err.to_string()))?
@@ -501,22 +674,66 @@ impl AdminHtmlClient {
             ));
         }
 
+        notes.extend([
+            format!(
+                "allowlisted Schedule queue {} route applied via guarded plan id",
+                action.as_str()
+            ),
+            format!(
+                "admin returned HTTP {}; Schedule page re-read after apply",
+                status.as_u16()
+            ),
+        ]);
+
         Ok(QueueControlApplyEvidence {
             before_candidate_count,
             before_row_summary,
             after_candidate_count: after.len(),
             after_row_still_present,
-            notes: vec![
-                format!(
-                    "allowlisted Schedule queue {} route applied via guarded plan id",
-                    action.as_str()
-                ),
-                format!(
-                    "admin returned HTTP {}; Schedule page re-read after apply",
-                    status.as_u16()
-                ),
-            ],
+            notes,
         })
+    }
+
+    fn queue_control_get_request(&self, url: Url) -> Result<RequestBuilder, InterspireError> {
+        Ok(self
+            .with_access_headers(self.http.get(url))
+            .header(
+                "referer",
+                safety::ensure_allowed_admin_get(
+                    self.config.base_url.as_deref().unwrap_or_default(),
+                    &AdminReadPage::Schedule.path(),
+                )?
+                .as_str(),
+            )
+            .header(
+                "origin",
+                admin_origin(self.config.base_url.as_deref().unwrap_or_default())?,
+            ))
+    }
+
+    fn queue_control_post_request(
+        &self,
+        url: Url,
+        post_pairs: &[(String, String)],
+    ) -> Result<RequestBuilder, InterspireError> {
+        let mut request = self
+            .with_access_headers(self.http.post(url))
+            .header(
+                "referer",
+                safety::ensure_allowed_admin_get(
+                    self.config.base_url.as_deref().unwrap_or_default(),
+                    &AdminReadPage::Schedule.path(),
+                )?
+                .as_str(),
+            )
+            .header(
+                "origin",
+                admin_origin(self.config.base_url.as_deref().unwrap_or_default())?,
+            );
+        if let Some((_, token)) = csrf_pair(post_pairs) {
+            request = request.header("x-csrf-token", token);
+        }
+        Ok(request)
     }
 
     pub fn campaign_readback(
@@ -663,6 +880,10 @@ impl AdminHtmlClient {
     }
 
     fn login(&self) -> Result<(), InterspireError> {
+        if self.get_allowed(&AdminReadPage::Lists.path()).is_ok() {
+            return Ok(());
+        }
+
         let base_url = self.config.base_url.as_deref().unwrap_or_default();
         let username = self.config.username.as_deref().unwrap_or_default();
         let password = self.config.password.as_deref().unwrap_or_default();
@@ -842,7 +1063,7 @@ fn ensure_authenticated_html(html: &str) -> Result<(), InterspireError> {
     Ok(())
 }
 
-fn extract_login_csrf_token(html: &str) -> Option<LoginCsrfToken> {
+pub(super) fn extract_login_csrf_token(html: &str) -> Option<LoginCsrfToken> {
     let document = Html::parse_document(html);
     let input_selector = Selector::parse("input").ok()?;
     for input in document.select(&input_selector) {
@@ -1116,6 +1337,8 @@ pub fn parse_list_edit_metadata(
 
     Ok(ListEditMetadata {
         list_id,
+        name: first_value(&values, &["name", "listname", "list_name"])
+            .map(|value| redact::redact_sensitive_text(&value)),
         owner_name: first_value(&values, &["ownername", "owner_name", "listownername"])
             .and_then(|value| redact_field_value("ownername", &value)),
         owner_email_redacted: first_value(&values, &["owneremail", "owner_email", "fromemail"])
@@ -1134,6 +1357,127 @@ fn first_value(values: &HashMap<String, String>, keys: &[&str]) -> Option<String
     keys.iter()
         .find_map(|key| values.get(*key).cloned())
         .filter(|value| !value.trim().is_empty())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubscriberExactSearchParse {
+    exact_email_found: bool,
+    looks_like_subscriber_page: bool,
+    warnings: Vec<String>,
+}
+
+fn subscriber_exact_search_paths(list_id: u64, email: &str) -> Vec<String> {
+    let email = url::form_urlencoded::byte_serialize(email.trim().as_bytes()).collect::<String>();
+    vec![
+        format!(
+            "index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D={list_id}&emailaddress={email}&search_rule=exact"
+        ),
+        format!(
+            "index.php?Page=Subscribers&Action=Manage&SubAction=SimpleSearch&Lists%5B%5D={list_id}&emailaddress={email}&search_rule=exact"
+        ),
+        format!(
+            "index.php?Page=Subscribers&Action=Manage&Lists%5B%5D={list_id}&emailaddress={email}&search_rule=exact"
+        ),
+        format!(
+            "index.php?Page=Subscribers&Action=Manage&List={list_id}&emailaddress={email}&search_rule=exact"
+        ),
+        format!(
+            "index.php?Page=Subscribers&Action=Manage&Lists={list_id}&emailaddress={email}&search_rule=exact"
+        ),
+    ]
+}
+
+fn normalize_exact_email_query(email: &str) -> Result<String, InterspireError> {
+    let email = email.trim().to_ascii_lowercase();
+    if email.len() > 254
+        || email.chars().any(|ch| ch.is_control())
+        || email.contains('*')
+        || !email.contains('@')
+        || email.starts_with('@')
+        || email.ends_with('@')
+    {
+        return Err(InterspireError::Safety(
+            "contact-state HTML fallback requires one exact email address".to_string(),
+        ));
+    }
+    Ok(email)
+}
+
+fn parse_subscriber_exact_search_page(
+    html: &str,
+    email: &str,
+) -> Result<SubscriberExactSearchParse, InterspireError> {
+    let document = Html::parse_document(html);
+    let row_selector =
+        Selector::parse("tr").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let link_selector =
+        Selector::parse("a").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let email = email.trim().to_ascii_lowercase();
+    let mut exact_email_found = false;
+    let mut looks_like_subscriber_page = false;
+    let mut warnings = Vec::new();
+    let mut inspected_rows = 0usize;
+    let mut email_like_cells = 0usize;
+
+    for row in document.select(&row_selector) {
+        if row_contains_nested_rows(&row, &row_selector) {
+            continue;
+        }
+        let row_text = compact_text(&row.text().collect::<Vec<_>>().join(" "));
+        if row_text.len() < 3 {
+            continue;
+        }
+        inspected_rows += 1;
+        let row_lower = row_text.to_ascii_lowercase();
+        looks_like_subscriber_page |= row_lower.contains("subscriber")
+            || row_lower.contains("email")
+            || row_lower.contains("contact");
+        email_like_cells += row_text
+            .split_whitespace()
+            .filter(|part| part.contains('@'))
+            .count();
+        if row_contains_exact_email(&row_text, &email) {
+            exact_email_found = true;
+            break;
+        }
+        for link in row.select(&link_selector) {
+            if let Some(href) = link.value().attr("href") {
+                let href_lower = href.to_ascii_lowercase();
+                looks_like_subscriber_page |= href_lower.contains("page=subscribers");
+            }
+        }
+    }
+
+    if inspected_rows == 0 {
+        warnings.push("subscriber exact-search page contained no parseable rows".to_string());
+    }
+    if email_like_cells > 5 && !exact_email_found {
+        warnings.push(
+            "subscriber exact-search page contained multiple email-like values; result treated as low-confidence absence"
+                .to_string(),
+        );
+    }
+
+    Ok(SubscriberExactSearchParse {
+        exact_email_found,
+        looks_like_subscriber_page,
+        warnings,
+    })
+}
+
+fn row_contains_exact_email(row_text: &str, email: &str) -> bool {
+    row_text.split(email_token_separator).any(|part| {
+        let candidate = part.trim_matches(email_token_trim).to_ascii_lowercase();
+        candidate == email
+    })
+}
+
+fn email_token_separator(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '\'' | '(' | ')' | '[' | ']' | ',')
+}
+
+fn email_token_trim(ch: char) -> bool {
+    matches!(ch, '.' | ';' | ':' | '!' | '?' | '\u{00a0}')
 }
 
 pub fn parse_settings_fields(
@@ -1263,6 +1607,8 @@ fn parse_queue_control_links(
         }
         let row_summary = redact::redact_sensitive_text(&row_text);
         let row_checkbox = extract_row_checkbox(&row)?;
+        let pause_before_delete =
+            parse_row_pause_control(base_url, &row, &link_selector, row_checkbox.as_ref())?;
         for link in row.select(&link_selector) {
             let action_label = compact_text(&link.text().collect::<Vec<_>>().join(" "));
             if !looks_like_queue_control_label(&action_label) {
@@ -1287,10 +1633,11 @@ fn parse_queue_control_links(
                 &route_key,
                 &row_summary,
             ]);
+            let route_action = route.action;
             links.push(QueueControlLink {
                 candidate: QueueControlCandidate {
                     plan_id,
-                    action: route.action,
+                    action: route_action,
                     action_label: redact::redact_sensitive_text(&action_label),
                     row_summary: row_summary.clone(),
                     route_fingerprint: route_fingerprint(&route_key),
@@ -1299,11 +1646,44 @@ fn parse_queue_control_links(
                 route,
                 url,
                 execution,
+                pause_before_delete: if route_action == QueueControlAction::Delete {
+                    pause_before_delete.clone()
+                } else {
+                    None
+                },
             });
         }
     }
 
     Ok(links)
+}
+
+fn parse_row_pause_control(
+    base_url: &str,
+    row: &ElementRef<'_>,
+    link_selector: &Selector,
+    row_checkbox: Option<&(String, u64)>,
+) -> Result<Option<Url>, InterspireError> {
+    for link in row.select(link_selector) {
+        let action_label = compact_text(&link.text().collect::<Vec<_>>().join(" "));
+        if !action_label.to_ascii_lowercase().contains("pause") {
+            continue;
+        }
+        let Some(href) = link.value().attr("href") else {
+            continue;
+        };
+        let Ok((url, pause_job)) = safety::ensure_allowed_queue_control_pause(base_url, href)
+        else {
+            continue;
+        };
+        if let Some((_, row_job)) = row_checkbox {
+            if pause_job != *row_job {
+                continue;
+            }
+        }
+        return Ok(Some(url));
+    }
+    Ok(None)
 }
 
 fn row_contains_nested_rows(row: &ElementRef<'_>, row_selector: &Selector) -> bool {
@@ -1459,6 +1839,38 @@ fn route_key(url: &Url) -> String {
 fn route_fingerprint(route_key: &str) -> String {
     let digest = Sha256::digest(route_key.as_bytes());
     format!("route:{}", &hex::encode(digest)[..12])
+}
+
+fn csrf_pair(pairs: &[(String, String)]) -> Option<(&str, &str)> {
+    pairs.iter().find_map(|(name, value)| {
+        if is_csrf_field_name(name) {
+            Some((name.as_str(), value.as_str()))
+        } else {
+            None
+        }
+    })
+}
+
+fn is_csrf_field_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "csrf" | "csrftoken" | "csrf_token" | "token" | "_token" | "form_token" | "iem_csrf_token"
+    ) || lower.ends_with("token")
+}
+
+fn admin_origin(base_url: &str) -> Result<String, InterspireError> {
+    let url = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| InterspireError::Safety("admin base url has no host".to_string()))?;
+    let mut origin = format!("{}://{}", url.scheme(), host);
+    if let Some(port) = url.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
+    }
+    Ok(origin)
 }
 
 fn same_queue_control_target(left: &QueueControlRoute, right: &QueueControlRoute) -> bool {
@@ -2013,6 +2425,95 @@ mod tests {
     }
 
     #[test]
+    fn subscriber_exact_search_parser_detects_exact_email_without_returning_row() {
+        let html = r#"
+            <table>
+              <tr><th>Email</th><th>Status</th></tr>
+              <tr>
+                <td>person@example.test</td>
+                <td>Active Confirmed <a href="index.php?Page=Subscribers&Action=Edit&id=12">Edit</a></td>
+              </tr>
+            </table>
+        "#;
+
+        let parsed = parse_subscriber_exact_search_page(html, "person@example.test")
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(parsed.exact_email_found);
+        assert!(parsed.looks_like_subscriber_page);
+        assert!(format!("{parsed:?}").contains("exact_email_found"));
+        assert!(!format!("{parsed:?}").contains("person@example.test"));
+    }
+
+    #[test]
+    fn subscriber_exact_search_parser_does_not_match_email_substrings() {
+        let html = r#"
+            <table>
+              <tr><th>Email</th><th>Status</th></tr>
+              <tr><td>notperson@example.test</td><td>Active Confirmed</td></tr>
+            </table>
+        "#;
+
+        let parsed = parse_subscriber_exact_search_page(html, "person@example.test")
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!parsed.exact_email_found);
+        assert!(parsed.looks_like_subscriber_page);
+    }
+
+    #[test]
+    fn subscriber_exact_search_client_uses_allowlisted_read_and_redacts_evidence() {
+        let server = spawn_contact_state_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = client
+            .contact_state_readback("person@example.test", 7)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.found_on_list, Some(true));
+        assert!(report
+            .evidence_notes
+            .iter()
+            .any(|note| note.contains("Subscribers exact-search GET read")));
+        let rendered =
+            serde_json::to_string(&report.evidence_notes).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!rendered.contains("person@example.test"));
+        assert!(server.requests().iter().any(|request| {
+            request.starts_with(
+                "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+            )
+        }));
+    }
+
+    #[test]
+    fn subscriber_exact_search_client_falls_back_to_simple_search() {
+        let server = spawn_contact_state_simple_search_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = client
+            .contact_state_readback("person@example.test", 7)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.found_on_list, Some(true));
+        let rendered =
+            serde_json::to_string(&report.evidence_notes).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!rendered.contains("person@example.test"));
+        let requests = server.requests();
+        assert!(requests.iter().any(|request| {
+            request.starts_with(
+                "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+            )
+        }));
+        assert!(requests.iter().any(|request| {
+            request.starts_with(
+                "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=SimpleSearch&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+            )
+        }));
+    }
+
+    #[test]
     fn campaign_sender_display_name_is_redacted() {
         let html = r#"
             <form>
@@ -2032,6 +2533,104 @@ mod tests {
         assert!(body.contains("Campaign label"));
         assert!(body.contains("Campaign subject"));
         assert!(!body.contains("Staff Sender"));
+    }
+
+    #[test]
+    fn campaign_render_artifact_uses_interspire_8_step2_body_page() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let report = client
+            .campaign_render_artifact(&crate::response::CampaignRenderArtifactRequest {
+                campaign_id: 7,
+                output_dir: None,
+                artifact_prefix: None,
+                include_image_blocked_variant: true,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.ok);
+        assert_eq!(report.subject.as_deref(), Some("Original subject"));
+        assert!(report.html_bytes > 0);
+        assert_eq!(report.artifacts.len(), 3);
+        assert!(report
+            .evidence
+            .notes
+            .iter()
+            .any(|note| { note.contains("Step1 POST rendered Interspire 8 Step2 body page") }));
+    }
+
+    #[test]
+    fn campaign_template_preview_uses_interspire_8_step2_body_form() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = client
+            .campaign_update_preview(
+                7,
+                &[FormFieldUpdate {
+                    name: "html_body".to_string(),
+                    value: Some("<p>Updated body %%UNSUBSCRIBELINK%%</p>".to_string()),
+                    checked: None,
+                }],
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.ok);
+        assert!(report
+            .available_fields
+            .iter()
+            .any(|field| field.name == "mydeveditcontrol_html"));
+        assert_eq!(report.changes.len(), 1);
+        assert_eq!(report.changes[0].name, "html_body->mydeveditcontrol_html");
+        assert!(report
+            .evidence
+            .notes
+            .iter()
+            .any(|note| { note.contains("Step1 POST rendered Interspire 8 Step2 form") }));
+    }
+
+    #[test]
+    fn campaign_template_apply_posts_step2_body_and_preserves_tracking_flags() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [FormFieldUpdate {
+            name: "html_body".to_string(),
+            value: Some("<p>Applied body %%UNSUBSCRIBELINK%%</p>".to_string()),
+            checked: None,
+        }];
+        let preview = client
+            .campaign_update_preview(7, &updates)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let apply = client
+            .campaign_update_apply(
+                7,
+                &preview.plan_id,
+                &updates,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(apply.ok);
+        assert!(apply.applied);
+        assert_eq!(apply.changes.len(), 1);
+        assert_eq!(apply.changes[0].name, "html_body->mydeveditcontrol_html");
+        let requests = server.requests();
+        let complete_post = requests
+            .iter()
+            .find(|request| {
+                request.starts_with(
+                    "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7 ",
+                )
+            })
+            .unwrap_or_else(|| panic!("Complete/save request should be posted"));
+        assert!(complete_post.contains("myDevEditControl_html=%3Cp%3EApplied+body"));
+        assert!(complete_post.contains("Subject=Original+subject"));
+        assert!(complete_post.contains("trackopens=1"));
+        assert!(complete_post.contains("tracklinks=1"));
     }
 
     #[test]
@@ -2157,6 +2756,215 @@ mod tests {
         }
     }
 
+    fn spawn_campaign_step2_fixture_server() -> TestAdminServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+        let body_html = Arc::new(Mutex::new(
+            r#"<p>Original body <a href="https://example.invalid">Read</a><img src="x.png" alt="Logo">%%UNSUBSCRIBELINK%%</p>"#
+                .to_string(),
+        ));
+        let thread_body_html = Arc::clone(&body_html);
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 8192];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("test request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while push: {err}")
+                            })
+                            .push(request.clone());
+                        write_campaign_step2_fixture_response(
+                            &mut stream,
+                            &request,
+                            &thread_body_html,
+                        );
+                        if thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while count: {err}")
+                            })
+                            .len()
+                            >= 12
+                        {
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("test server accept failed: {err}"),
+                }
+            }
+        });
+
+        TestAdminServer {
+            base_url: format!("http://{address}/admin/"),
+            requests,
+            handle: Some(handle),
+        }
+    }
+
+    fn spawn_contact_state_fixture_server() -> TestAdminServer {
+        spawn_contact_state_fixture_server_with(false)
+    }
+
+    fn spawn_contact_state_simple_search_fixture_server() -> TestAdminServer {
+        spawn_contact_state_fixture_server_with(true)
+    }
+
+    fn spawn_contact_state_fixture_server_with(simple_search_only: bool) -> TestAdminServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 8192];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("test request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while push: {err}")
+                            })
+                            .push(request.clone());
+                        write_contact_state_fixture_response(
+                            &mut stream,
+                            &request,
+                            simple_search_only,
+                        );
+                        let expected_requests = if simple_search_only { 3 } else { 2 };
+                        if thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while count: {err}")
+                            })
+                            .len()
+                            >= expected_requests
+                        {
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("test server accept failed: {err}"),
+                }
+            }
+        });
+
+        TestAdminServer {
+            base_url: format!("http://{address}/admin/"),
+            requests,
+            handle: Some(handle),
+        }
+    }
+
+    fn write_campaign_step2_fixture_response(
+        stream: &mut std::net::TcpStream,
+        request: &str,
+        body_html: &Arc<Mutex<String>>,
+    ) {
+        let body = if request.starts_with("GET /admin/index.php?Page=Login&Action=Login ") {
+            r#"<form method="post" action="index.php?Page=Login&Action=Login">
+                <input type="hidden" name="csrf_token" value="fixture-csrf">
+                <input name="ss_username">
+                <input name="ss_password">
+              </form>"#
+                .to_string()
+        } else if request.starts_with("POST /admin/index.php?Page=Login&Action=Login ") {
+            "<html><body>logged in</body></html>".to_string()
+        } else if request.starts_with("GET /admin/index.php?Page=Newsletters&Action=Edit&id=7 ") {
+            r#"<form action="index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7">
+                <input type="hidden" name="csrf_token" value="fixture-csrf">
+                <input name="Name" value="Fixture campaign">
+                <input type="radio" name="Format" value="t">
+                <input type="radio" name="Format" value="h" checked>
+                <input type="hidden" name="usewysiwyg" value="3">
+                <input type="submit" name="NextButton" value="Next &gt;&gt;">
+              </form>"#
+                .to_string()
+        } else if request
+            .starts_with("POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7 ")
+        {
+            let html = body_html
+                .lock()
+                .unwrap_or_else(|err| panic!("body html lock poisoned: {err}"))
+                .clone();
+            format!(
+                r#"<form action="index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7">
+                <input type="hidden" name="csrf_token" value="fixture-csrf">
+                <input name="Subject" value="Original subject">
+                <textarea name="myDevEditControl_html">{html}</textarea>
+                <textarea name="myDevEditControl_text">Original text</textarea>
+                <input type="checkbox" name="trackopens" value="1" checked>
+                <input type="checkbox" name="tracklinks" value="1" checked>
+                <input type="submit" name="SaveButton" value="Save">
+              </form>"#
+            )
+        } else if request.starts_with(
+            "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7 ",
+        ) {
+            let request_body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body)
+                .unwrap_or_default();
+            if let Some((_, value)) = url::form_urlencoded::parse(request_body.as_bytes())
+                .find(|(name, _)| name == "myDevEditControl_html")
+            {
+                *body_html
+                    .lock()
+                    .unwrap_or_else(|err| panic!("body html lock poisoned while update: {err}")) =
+                    value.into_owned();
+            }
+            "<html><body>saved</body></html>".to_string()
+        } else {
+            "<html><body>unexpected request</body></html>".to_string()
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .unwrap_or_else(|err| panic!("test response write failed: {err}"));
+    }
+
     fn write_fixture_response(stream: &mut std::net::TcpStream, request: &str) {
         let body = if request.starts_with("GET /admin/index.php?Page=Login&Action=Login ") {
             r#"<form method="post" action="index.php?Page=Login&Action=Login">
@@ -2173,6 +2981,56 @@ mod tests {
                 <input name="smtp_server" value="smtp.example.test">
                 <input name="smtp_u" value="smtp-user">
               </form>"#
+        } else {
+            "<html><body>unexpected request</body></html>"
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .unwrap_or_else(|err| panic!("test response write failed: {err}"));
+    }
+
+    fn write_contact_state_fixture_response(
+        stream: &mut std::net::TcpStream,
+        request: &str,
+        simple_search_only: bool,
+    ) {
+        let body = if request.starts_with("GET /admin/index.php?Page=Lists ") {
+            "<html><body><a href=\"index.php?Page=Lists&Action=Edit&id=7\">List</a></body></html>"
+        } else if simple_search_only && request.starts_with(
+            "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+        ) {
+            r#"<table>
+                <tr><th>Email</th><th>Status</th><th>Action</th></tr>
+                <tr>
+                  <td>other@example.test</td>
+                  <td>Active Confirmed</td>
+                  <td><a href="index.php?Page=Subscribers&Action=Edit&id=99">Edit</a></td>
+                </tr>
+              </table>"#
+        } else if (simple_search_only
+            && request.starts_with(
+                "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=SimpleSearch&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+            ))
+            || (!simple_search_only
+                && (request.starts_with(
+                    "GET /admin/index.php?Page=Subscribers&Action=Manage&SubAction=Step3&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+                ) || request.starts_with(
+                    "GET /admin/index.php?Page=Subscribers&Action=Manage&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
+                )))
+        {
+            r#"<table>
+                <tr><th>Email</th><th>Status</th><th>Action</th></tr>
+                <tr>
+                  <td>person@example.test</td>
+                  <td>Active Confirmed</td>
+                  <td><a href="index.php?Page=Subscribers&Action=Edit&id=12">Edit</a></td>
+                </tr>
+              </table>"#
         } else {
             "<html><body>unexpected request</body></html>"
         };
@@ -2310,6 +3168,58 @@ mod tests {
         assert_eq!(delete.route.identifier_value, 182744);
         assert!(!delete.candidate.row_summary.contains("person@example.com"));
         assert_eq!(delete.candidate.route_fingerprint.len(), 18);
+    }
+
+    #[test]
+    fn queue_control_delete_candidates_capture_same_job_pause_preflight() {
+        let html = r#"
+            <table>
+              <tr>
+                <th>Campaign</th><th>Actions</th>
+              </tr>
+              <tr>
+                <td><input type="checkbox" name="jobs[]" value="2"></td>
+                <td>Launch seed send to recipient@example.invalid</td>
+                <td>
+                  <a href="index.php?Page=Schedule&Action=Pause&job=2&csrfToken=abc">Pause</a>
+                  <a href="index.php?Page=Schedule&Action=Delete&job=2&csrfToken=abc">Delete</a>
+                </td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" name="jobs[]" value="3"></td>
+                <td>Other job</td>
+                <td>
+                  <a href="index.php?Page=Schedule&Action=Pause&job=99&csrfToken=abc">Pause</a>
+                  <a href="index.php?Page=Schedule&Action=Delete&job=3&csrfToken=abc">Delete</a>
+                </td>
+              </tr>
+            </table>
+        "#;
+
+        let links = parse_queue_control_links("https://example.test/admin/", html, 25)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let delete = links
+            .iter()
+            .find(|link| {
+                link.candidate.action == QueueControlAction::Delete
+                    && link.route.identifier_value == 2
+            })
+            .unwrap_or_else(|| panic!("delete candidate should be present"));
+        assert!(delete.pause_before_delete.is_some());
+        let candidate_json =
+            serde_json::to_string(&delete.candidate).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!candidate_json.contains("index.php"));
+        assert!(!candidate_json.contains("csrfToken"));
+
+        let mismatched = links
+            .iter()
+            .find(|link| {
+                link.candidate.action == QueueControlAction::Delete
+                    && link.route.identifier_value == 3
+            })
+            .unwrap_or_else(|| panic!("second delete candidate should be present"));
+        assert!(mismatched.pause_before_delete.is_none());
     }
 
     #[test]

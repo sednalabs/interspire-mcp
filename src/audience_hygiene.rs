@@ -527,7 +527,7 @@ pub(crate) fn safe_output_dir(raw: Option<&str>) -> Result<PathBuf, InterspireEr
             "audience hygiene output_dir must not contain dot path components".to_string(),
         ));
     }
-    let repo_root = canonical_path(Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let repo_root = artifact_guard_repo_root()?;
     let allowed_roots = approved_output_roots()?;
     if allowed_roots.contains(&path) {
         return Err(InterspireError::Safety(
@@ -547,7 +547,10 @@ pub(crate) fn safe_output_dir(raw: Option<&str>) -> Result<PathBuf, InterspireEr
                     .to_string(),
             ));
         }
-        if canonical_target.starts_with(&repo_root) {
+        if repo_root
+            .as_ref()
+            .is_some_and(|root| canonical_target.starts_with(root))
+        {
             return Err(InterspireError::Safety(
                 "audience hygiene artifacts must be outside the repository".to_string(),
             ));
@@ -565,7 +568,10 @@ pub(crate) fn safe_output_dir(raw: Option<&str>) -> Result<PathBuf, InterspireEr
 
     let existing_ancestor = nearest_existing_ancestor(&path)?;
     let canonical_ancestor = canonical_path(&existing_ancestor)?;
-    if canonical_ancestor.starts_with(&repo_root) {
+    if repo_root
+        .as_ref()
+        .is_some_and(|root| canonical_ancestor.starts_with(root))
+    {
         return Err(InterspireError::Safety(
             "audience hygiene artifacts must be outside the repository".to_string(),
         ));
@@ -646,7 +652,7 @@ pub(crate) fn ensure_output_dir_still_approved(path: &Path) -> Result<(), Inters
         ));
     }
 
-    let repo_root = canonical_path(Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let repo_root = artifact_guard_repo_root()?;
     let allowed_roots = approved_output_roots()?;
     let canonical_target = canonical_path(path)?;
     if allowed_roots.contains(&canonical_target) {
@@ -654,7 +660,10 @@ pub(crate) fn ensure_output_dir_still_approved(path: &Path) -> Result<(), Inters
             "audience hygiene output_dir must be a subdirectory, not an allowed root".to_string(),
         ));
     }
-    if canonical_target.starts_with(&repo_root) {
+    if repo_root
+        .as_ref()
+        .is_some_and(|root| canonical_target.starts_with(root))
+    {
         return Err(InterspireError::Safety(
             "audience hygiene artifacts must be outside the repository".to_string(),
         ));
@@ -694,6 +703,14 @@ fn canonical_path(path: &Path) -> Result<PathBuf, InterspireError> {
             "failed to canonicalize audience hygiene path: {err}"
         ))
     })
+}
+
+fn artifact_guard_repo_root() -> Result<Option<PathBuf>, InterspireError> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    canonical_path(path).map(Some)
 }
 
 pub(crate) fn set_private_dir_permissions(path: &Path) -> Result<(), InterspireError> {
@@ -1015,6 +1032,11 @@ mod tests {
         let repo_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("private-output");
         let err = safe_output_dir(Some(&repo_path.display().to_string())).unwrap_err();
         assert_eq!(err.code(), "safety_policy_blocked");
+    }
+
+    #[test]
+    fn compile_time_manifest_root_guard_is_non_fatal() {
+        let _ = artifact_guard_repo_root().expect("manifest root guard should not fail");
     }
 
     #[test]

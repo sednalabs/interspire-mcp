@@ -22,13 +22,18 @@ before newsletter work goes wrong:
   apply only that narrow plan with explicit write gates?
 - Can we stage a no-send campaign, list, user, or non-secret settings edit
   with preview/apply proof instead of clicking through the brittle admin UI?
+- Can we update EDM body fields, generate private render artifacts, and inspect
+  desktop/mobile previews before sending?
+- Can we apply a seed or production send only after fresh proof, exact expected
+  values, runtime send gates, and explicit acknowledgement?
 - When server setup requires a saved admin value, can we query one exact
   approved field without turning normal readbacks into secret dumps?
 
 The server is read-only by default. Its write-class capabilities are limited to
-guarded queue cancel/delete plus guarded no-send campaign, list, user, and
-non-secret settings edits. All apply paths stay disabled unless the runtime
-explicitly enables guarded writes and the matching control flags.
+guarded queue cancel/delete, guarded campaign/list/user/settings/template
+edits, private render artifacts, and separately gated seed or production send
+apply tools. All apply paths stay disabled unless the runtime explicitly
+enables guarded writes and the matching control flags.
 The narrow sensitive-read tool is also disabled by default and requires both a
 runtime gate and per-call acknowledgement before it can return unredacted setup
 values.
@@ -47,8 +52,8 @@ server. It is a curated MCP facade over a split newsletter control plane:
   readback, and redacted apply evidence;
 - private recipient artifacts stay outside git and MCP output remains
   aggregate-only;
-- send, schedule, import, contact mutation, suppression mutation, secret,
-  provider, DNS, and generic admin tools are intentionally absent.
+- generic send, schedule, import, contact mutation, suppression mutation,
+  secret, provider, DNS, and generic admin tools are intentionally absent.
 
 The result is a concrete example of the constrained adapter pattern described
 in [`mcp-toolkit-rs`](https://github.com/sednalabs/mcp-toolkit-rs/blob/main/docs/legacy-system-adapter-pattern.md):
@@ -73,7 +78,7 @@ questions, not for generic administrative access.
 | --- | --- | --- |
 | `interspire_status` | Read | Report configuration, safety posture, and available capabilities. |
 | `interspire_list_summary` | Read | Summarize lists and aggregate subscriber-state counts. |
-| `interspire_contact_state` | Read | Check one redacted contact's XML list presence, with low-confidence warnings for uncorroborated absence. |
+| `interspire_contact_state` | Read | Check one redacted contact's list presence with XML first and exact admin-HTML fallback, while keeping negative absence low confidence. |
 | `interspire_list_owner_readback` | Read | Read list owner, reply-to, and bounce metadata. |
 | `interspire_settings_audit` | Read | Read redacted global email, bounce, and cron settings. |
 | `interspire_admin_session_probe` | Read | Probe authenticated admin reachability through allowlisted read pages. |
@@ -83,8 +88,13 @@ questions, not for generic administrative access.
 | `interspire_queue_control_apply` | Guarded apply | Apply one previously previewed queue cancel/delete plan when write gates are enabled. |
 | `interspire_campaign_readback` | Read | Read campaign rows or one campaign edit-page summary. |
 | `interspire_campaign_body_audit` | Read | Audit redacted campaign body safety signals without returning raw HTML. |
-| `interspire_send_wizard_readback` | No-mutation proof | Render the Send wizard through the no-send proof boundary and verify queue/stat invariants. |
+| `interspire_campaign_render_artifact` | Private artifact | Write private persisted-campaign render artifacts for native-browser screenshot inspection without returning raw HTML. |
+| `interspire_send_wizard_readback` | No-mutation proof | Render the Send wizard through the no-send proof boundary and verify queue/stat invariants, including Interspire 8 wizard shapes that echo recipient count rather than selected list ids. |
 | `interspire_seed_readiness_gate` | No-mutation proof | Combine campaign body audit and Send wizard readback into seed-readiness gates. |
+| `interspire_seed_send_apply` | Guarded send | Apply one explicitly acknowledged bounded seed send after immediate readiness proof and send-control runtime gates. |
+| `interspire_production_send_apply` | Guarded send | Apply an explicitly acknowledged production send after strict readiness proof, exact expected count/sender/subject/hash, and production-send runtime gates. |
+| `interspire_campaign_template_update_preview` | Read preview | Preview semantic EDM template edits such as subject, HTML body, text body, and tracking flags. |
+| `interspire_campaign_template_update_apply` | Guarded apply | Apply one previously previewed semantic EDM template edit. |
 | `interspire_campaign_update_preview` | Read preview | Preview guarded campaign content or sender-metadata edits. |
 | `interspire_campaign_update_apply` | Guarded apply | Apply one previously previewed campaign edit when guarded form-write gates are enabled. |
 | `interspire_list_update_preview` | Read preview | Preview guarded list metadata edits. |
@@ -101,8 +111,8 @@ questions, not for generic administrative access.
 | `interspire_audience_hygiene_export_status` | Read | Read aggregate status for a checkpointed audience export job. |
 
 There is intentionally no generic admin URL fetch tool, raw contact dump tool,
-send tool, schedule tool, import tool, unsubscribe mutation tool, suppression
-mutation tool, SMTP password tool, provider tool, or DNS tool.
+generic send tool, schedule tool, import tool, unsubscribe mutation tool,
+suppression mutation tool, SMTP password tool, provider tool, or DNS tool.
 
 ## Quick Start
 
@@ -179,6 +189,8 @@ INTERSPIRE_XML_TOKEN='redacted-token'
 `INTERSPIRE_VERSION` accepts `auto`, `6.2.3`, and `8.x`. The default is
 `auto`. Set `6.2.3` for older installations and `8.x` for newer admin login
 surfaces that expose JavaScript CSRF tokens such as `IEM_CSRF_TOKEN`.
+The supported XML request profile is documented in
+[`docs/interspire-xml-compatibility.md`](docs/interspire-xml-compatibility.md).
 
 Admin HTML fallback variables:
 
@@ -261,8 +273,9 @@ Queue apply remains limited to Schedule-page cancel/delete actions.
 
 The apply route is limited to Interspire Schedule-page cancel actions and the
 built-in Schedule delete form for one selected job.
-It does not send, schedule, import, export, edit contacts, edit suppressions,
-change provider APIs, DNS, or secrets, or authorize any later send.
+It does not use Interspire's queue controls to send, schedule, import, export,
+edit contacts, edit suppressions, change provider APIs, DNS, or secrets, or
+authorize any later send.
 
 ### Guarded Form Writes
 
@@ -281,13 +294,67 @@ design:
 
 Within that boundary, the public phase does allow non-secret Interspire
 delivery and cron configuration edits such as SMTP host/username/port, bounce
-host/username/IMAP mode, hourly throttle, and cron toggles. It still does not
-expose provider APIs, DNS, password/secret fields, contact mutations,
-suppression mutations, or send controls.
+host/username/IMAP mode, hourly throttle, cron toggles, and the Interspire
+test-mode send toggle. It still does not expose provider APIs, DNS,
+password/secret fields, contact mutations, suppression mutations, or generic
+send execution controls.
 
-This phase intentionally does not expose send, schedule, cron-trigger,
-contact-mutation, suppression-mutation, SMTP password, bounce password,
-provider APIs, or DNS tools.
+### EDM Template And Render Artifacts
+
+`interspire_campaign_template_update_preview` and
+`interspire_campaign_template_update_apply` are friendly wrappers around the
+guarded campaign edit surface. They accept semantic fields such as `subject`,
+`html_body`, `text_body`, `track_opens`, `track_links`, `send_multipart`, and
+`embed_images`, then map those to the actual Interspire form controls present
+on the current campaign, including Interspire 8 editor fields such as
+`myDevEditControl_html`.
+
+`interspire_campaign_render_artifact` fetches the persisted campaign body and
+writes private local files outside the repository. The response contains file
+paths, hashes, byte counts, and a native-browser next step; it does not return
+raw campaign HTML. Visual signoff still requires opening the preview artifact
+with a browser and inspecting desktop/mobile screenshots.
+
+Render artifacts require a private output root:
+
+```bash
+export INTERSPIRE_RENDER_ARTIFACT_ROOTS=/secure/private
+```
+
+Then pass `output_dir` as a subdirectory under that root, or set
+`INTERSPIRE_RENDER_ARTIFACT_OUTPUT_DIR`.
+
+### Guarded Send Apply
+
+The MCP exposes two explicit send tools. They are not generic admin POST tools;
+both re-run the campaign body audit and Send wizard proof immediately before
+posting the final send form captured from the live Interspire page.
+
+`interspire_seed_send_apply` is bounded to small seed sends. It requires:
+
+- `INTERSPIRE_GUARDED_WRITES=1`
+- `INTERSPIRE_SEND_CONTROLS=1`
+- `acknowledge_seed_send=true`
+- an explicit list id set and `expected_recipient_count` from 1 to 20
+
+`interspire_production_send_apply` is the full-send boundary. It requires:
+
+- `INTERSPIRE_GUARDED_WRITES=1`
+- `INTERSPIRE_SEND_CONTROLS=1`
+- `INTERSPIRE_PRODUCTION_SEND_CONTROLS=1`
+- `acknowledge_production_send=true`
+- `confirmation_phrase="SEND_PRODUCTION_CAMPAIGN"`
+- exact expected recipient count, From email, Reply-To email, subject, and
+  campaign HTML SHA-256
+
+Both tools return redacted aggregate evidence plus a post-send reconciliation
+object. HTTP success from the final form post is reported only as `posted`.
+The tools then follow the allowlisted Interspire popup send loop, reread
+Schedule and Stats, and classify the result as `posted`, `queued`, `processed`,
+`transport_failed`, `delivered_unverified`, or `seed_proven`. The legacy
+`sent` boolean is true only when reconciliation reaches a terminal success
+state. Production sending should still be paired with provider-side monitoring
+and an Ops work item reference.
 
 ### No-Mutation Send Proof
 
@@ -298,11 +365,17 @@ be parsed to prove selected campaign/list metadata, recipient estimates,
 tracking checkboxes, sender fields, and form fingerprints, but it is never
 submitted.
 
+For Interspire 8.x campaign drafts, `interspire_campaign_body_audit` may render
+the campaign editor's Step2 body form through an allowlisted no-save Step1 POST
+when the initial edit page only contains metadata fields. It parses the Step2
+HTML body controls such as `myDevEditControl_html`, then stops before the
+Complete/save form.
+
 `interspire_send_wizard_readback` records Schedule and Stats rows before and
 after the proof render and reports whether those invariants changed.
 `interspire_seed_readiness_gate` combines that proof with campaign-body safety
-signals so an operator can decide what still needs review before a seed send in
-another approved system. Both tools report `send_performed: false`,
+signals so an operator can decide what still needs review before a guarded
+seed or production send. Both tools report `send_performed: false`,
 `scheduled: false`, and `production_send_authorized: false`.
 
 See [Safety Model](docs/safety-model.md).

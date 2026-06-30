@@ -1,7 +1,8 @@
 //! # Interspire MCP
 //!
 //! Curated stdio MCP server for safe Interspire Email Marketer
-//! operational readback plus guarded no-send queue and form-write paths.
+//! operational readback plus guarded queue, form-write, template, artifact, and
+//! send paths.
 //!
 //! ## Rationale
 //!
@@ -16,13 +17,19 @@
 //! * Uses the Interspire XML API first.
 //! * Allows authenticated admin HTML only for login plus explicitly allowlisted
 //!   safe GET pages and guarded queue/form apply routes.
-//! * Blocks send, schedule, cron, generic import/export, contact mutation,
-//!   suppression mutation, provider mutation, and raw admin escape paths.
+//! * Blocks generic send, schedule, cron, generic import/export, contact
+//!   mutation, suppression mutation, provider mutation, and raw admin escape
+//!   paths.
 //! * Allows one narrow, explicit audience-hygiene artifact export that writes
 //!   private local files and returns aggregate metadata only.
 //! * Allows queue cancel/delete plus guarded campaign/list/user/settings edits
 //!   only through deterministic preview/apply plan ids and explicit runtime
 //!   write flags.
+//! * Allows a guarded seed-send apply tool only when send controls are
+//!   explicitly enabled and the immediate seed-readiness proof passes.
+//! * Allows a guarded production-send apply tool only when production send
+//!   controls are explicitly enabled and the strict immediate readiness proof
+//!   plus confirmation phrase pass.
 //! * Redacts credentials, cookies, raw contacts, private headers, SMTP secrets,
 //!   bounce secrets, and license values from tool output.
 //!
@@ -39,6 +46,7 @@ mod config;
 mod error;
 mod guarded_write;
 mod live;
+mod private_artifacts;
 mod redact;
 mod response;
 mod safety;
@@ -58,22 +66,26 @@ pub use response::{
     AudienceHygieneExportBeginRequest, AudienceHygieneExportReport, AudienceHygieneExportRequest,
     AudienceHygieneExportResumeRequest, AudienceHygieneExportStatusRequest,
     AudienceHygieneListSummary, CampaignBodyAuditReport, CampaignBodyAuditRequest,
-    CampaignReadbackReport, CampaignReadbackRequest, CampaignUpdateApplyRequest,
-    CampaignUpdatePreviewRequest, ContactStateReport, ContactStateRequest, Evidence,
-    FormFieldChange, FormFieldDescriptor, FormFieldUpdate, GuardedWriteApplyReport,
-    GuardedWritePreviewReport, ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary,
-    ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
-    QueueControlAction, QueueControlApplyReport, QueueControlApplyRequest, QueueControlCandidate,
-    QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
-    QueueStatsReadbackRequest, SeedReadinessGate, SeedReadinessGateReport,
-    SeedReadinessGateRequest, SendWizardReadbackReport, SendWizardReadbackRequest,
-    SensitiveFieldDenial, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
-    SensitiveFieldTarget, SensitiveFieldValue, SensitiveToolMetadata, SettingsAuditReport,
-    SettingsAuditRequest, SettingsSectionName, SettingsUpdateApplyRequest,
-    SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
-    UserSmtpReadbackRequest, UserUpdateApplyRequest, UserUpdatePreviewRequest,
-    WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, DEFAULT_HYGIENE_QUERY_BUDGET,
-    DEFAULT_LIST_READ_LIMIT, HARD_HYGIENE_QUERY_BUDGET, HARD_LIST_READ_LIMIT,
+    CampaignReadbackReport, CampaignReadbackRequest, CampaignRenderArtifactReport,
+    CampaignRenderArtifactRequest, CampaignTemplateUpdateApplyRequest,
+    CampaignTemplateUpdatePreviewRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
+    ContactStateReport, ContactStateRequest, Evidence, FormFieldChange, FormFieldDescriptor,
+    FormFieldUpdate, GuardedWriteApplyReport, GuardedWritePreviewReport, ListOwnerReadbackReport,
+    ListOwnerReadbackRequest, ListSummary, ListSummaryReport, ListSummaryRequest,
+    ListUpdateApplyRequest, ListUpdatePreviewRequest, ProductionSendApplyReport,
+    ProductionSendApplyRequest, QueueControlAction, QueueControlApplyReport,
+    QueueControlApplyRequest, QueueControlCandidate, QueueControlPreviewReport,
+    QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
+    RenderArtifact, SeedReadinessGate, SeedReadinessGateReport, SeedReadinessGateRequest,
+    SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus, SendReconciliationReport,
+    SendWizardReadbackReport, SendWizardReadbackRequest, SensitiveFieldDenial,
+    SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SensitiveFieldTarget,
+    SensitiveFieldValue, SensitiveToolMetadata, SettingsAuditReport, SettingsAuditRequest,
+    SettingsSectionName, SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport,
+    StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
+    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
+    DEFAULT_HYGIENE_QUERY_BUDGET, DEFAULT_LIST_READ_LIMIT, HARD_HYGIENE_QUERY_BUDGET,
+    HARD_LIST_READ_LIMIT,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -163,6 +175,10 @@ pub trait InterspireReadBackend: Send + Sync {
         &self,
         request: &CampaignBodyAuditRequest,
     ) -> Result<CampaignBodyAuditReport, InterspireError>;
+    fn campaign_render_artifact(
+        &self,
+        request: &CampaignRenderArtifactRequest,
+    ) -> Result<CampaignRenderArtifactReport, InterspireError>;
     fn send_wizard_readback(
         &self,
         request: &SendWizardReadbackRequest,
@@ -171,6 +187,14 @@ pub trait InterspireReadBackend: Send + Sync {
         &self,
         request: &SeedReadinessGateRequest,
     ) -> Result<SeedReadinessGateReport, InterspireError>;
+    fn seed_send_apply(
+        &self,
+        request: &SeedSendApplyRequest,
+    ) -> Result<SeedSendApplyReport, InterspireError>;
+    fn production_send_apply(
+        &self,
+        request: &ProductionSendApplyRequest,
+    ) -> Result<ProductionSendApplyReport, InterspireError>;
     fn campaign_update_preview(
         &self,
         request: &CampaignUpdatePreviewRequest,
@@ -266,7 +290,7 @@ impl InterspireMcpServer {
                     .with_group("read")
                     .with_read_only(true)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Check one redacted contact's Interspire XML list presence.",
+                        "Check one redacted contact's Interspire list presence with XML first and exact admin-HTML fallback.",
                         ["interspire", "contact", "presence"],
                     )),
                 ToolCapability::new("interspire_list_owner_readback")
@@ -332,6 +356,19 @@ impl InterspireMcpServer {
                         "Audit redacted campaign body safety signals without returning raw HTML.",
                         ["interspire", "campaign", "body", "audit"],
                     )),
+                ToolCapability::new("interspire_campaign_render_artifact")
+                    .with_group("read")
+                    .with_risk_posture(GuardedActionPosture::no_mutation_proof())
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Write private persisted-campaign render artifacts for native-browser screenshot inspection.",
+                        [
+                            "interspire",
+                            "campaign",
+                            "render",
+                            "artifact",
+                            "native-browser",
+                        ],
+                    )),
                 ToolCapability::new("interspire_send_wizard_readback")
                     .with_group("read")
                     .with_risk_posture(GuardedActionPosture::no_mutation_proof())
@@ -345,6 +382,40 @@ impl InterspireMcpServer {
                     .with_discovery(ToolDiscoveryMetadata::new(
                         "Combine campaign body audit and no-send wizard proof into seed-readiness gates.",
                         ["interspire", "seed", "readiness", "gate", "no-send"],
+                    )),
+                ToolCapability::new("interspire_seed_send_apply")
+                    .with_group("guarded-send")
+                    .with_read_only(false)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Apply one explicitly acknowledged seed send after immediate readiness proof.",
+                        ["interspire", "seed", "send", "apply", "guarded-send"],
+                    )),
+                ToolCapability::new("interspire_production_send_apply")
+                    .with_group("guarded-send")
+                    .with_read_only(false)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Apply an explicitly acknowledged production send after strict immediate readiness proof.",
+                        [
+                            "interspire",
+                            "production",
+                            "send",
+                            "apply",
+                            "guarded-send",
+                        ],
+                    )),
+                ToolCapability::new("interspire_campaign_template_update_preview")
+                    .with_group("guarded-write")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Preview semantic EDM template edits such as subject, HTML body, text body, and tracking flags.",
+                        ["interspire", "campaign", "template", "preview", "edm"],
+                    )),
+                ToolCapability::new("interspire_campaign_template_update_apply")
+                    .with_group("guarded-write")
+                    .with_read_only(false)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Apply a previously previewed semantic EDM template edit.",
+                        ["interspire", "campaign", "template", "apply", "edm"],
                     )),
                 ToolCapability::new("interspire_campaign_update_preview")
                     .with_group("guarded-write")
@@ -482,7 +553,9 @@ impl InterspireMcpServer {
         response::tool_json(self.backend.list_summary(&request))
     }
 
-    #[tool(description = "Check one redacted contact's Interspire XML list presence.")]
+    #[tool(
+        description = "Check one redacted contact's Interspire list presence with XML first and exact admin-HTML fallback."
+    )]
     fn interspire_contact_state(
         &self,
         Parameters(request): Parameters<ContactStateRequest>,
@@ -569,6 +642,16 @@ impl InterspireMcpServer {
     }
 
     #[tool(
+        description = "Write private persisted-campaign render artifacts for native-browser screenshot inspection without returning raw HTML."
+    )]
+    fn interspire_campaign_render_artifact(
+        &self,
+        Parameters(request): Parameters<CampaignRenderArtifactRequest>,
+    ) -> String {
+        response::tool_json(self.backend.campaign_render_artifact(&request))
+    }
+
+    #[tool(
         description = "Render the send wizard through the no-send preview boundary and verify queue/stat invariants."
     )]
     fn interspire_send_wizard_readback(
@@ -586,6 +669,58 @@ impl InterspireMcpServer {
         Parameters(request): Parameters<SeedReadinessGateRequest>,
     ) -> String {
         response::tool_json(self.backend.seed_readiness_gate(&request))
+    }
+
+    #[tool(
+        description = "Apply one explicitly acknowledged seed send after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count."
+    )]
+    fn interspire_seed_send_apply(
+        &self,
+        Parameters(request): Parameters<SeedSendApplyRequest>,
+    ) -> String {
+        response::tool_json(self.backend.seed_send_apply(&request))
+    }
+
+    #[tool(
+        description = "Apply an explicitly acknowledged production send after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase."
+    )]
+    fn interspire_production_send_apply(
+        &self,
+        Parameters(request): Parameters<ProductionSendApplyRequest>,
+    ) -> String {
+        response::tool_json(self.backend.production_send_apply(&request))
+    }
+
+    #[tool(
+        description = "Preview semantic EDM template edits such as subject, HTML body, text body, multipart, tracking, and embed-image flags."
+    )]
+    fn interspire_campaign_template_update_preview(
+        &self,
+        Parameters(request): Parameters<CampaignTemplateUpdatePreviewRequest>,
+    ) -> String {
+        response::tool_json(
+            self.backend
+                .campaign_update_preview(&CampaignUpdatePreviewRequest {
+                    campaign_id: request.campaign_id,
+                    updates: request.updates(),
+                }),
+        )
+    }
+
+    #[tool(description = "Apply a previously previewed semantic EDM template edit.")]
+    fn interspire_campaign_template_update_apply(
+        &self,
+        Parameters(request): Parameters<CampaignTemplateUpdateApplyRequest>,
+    ) -> String {
+        let updates = request.updates();
+        response::tool_json(
+            self.backend
+                .campaign_update_apply(&CampaignUpdateApplyRequest {
+                    campaign_id: request.campaign_id,
+                    plan_id: request.plan_id,
+                    updates,
+                }),
+        )
     }
 
     #[tool(description = "Preview guarded campaign content or sender metadata edits.")]
@@ -717,7 +852,7 @@ impl InterspireMcpServer {
 impl ServerHandler for InterspireMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Safe Interspire Email Marketer evidence tools. Mutations are disabled by default and limited to guarded queue cancel/delete plus explicitly gated campaign, list, user, and settings apply plans.")
+            .with_instructions("Safe Interspire Email Marketer evidence tools. Mutations are disabled by default and limited to guarded queue cancel/delete, campaign/list/user/settings/template apply plans, private render artifacts, and separately gated seed or production send apply tools.")
     }
 
     fn list_tools(
@@ -777,6 +912,48 @@ fn with_interspire_tool_metadata(tool: Tool) -> Tool {
             )
             .with_meta(meta)
         }
+        "interspire_campaign_render_artifact" => {
+            let meta = with_mcp_apps_no_mutation_proof_metadata(
+                Some(Meta::new()),
+                "write private render artifacts for native-browser screenshot inspection without mutating Interspire",
+            );
+            tool.with_annotations(
+                ToolAnnotations::with_title("Campaign render artifact")
+                    .read_only(true)
+                    .destructive(false)
+                    .idempotent(false)
+                    .open_world(false),
+            )
+            .with_meta(meta)
+        }
+        "interspire_seed_send_apply" => tool.with_annotations(
+            ToolAnnotations::with_title("Seed send apply")
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
+        "interspire_production_send_apply" => tool.with_annotations(
+            ToolAnnotations::with_title("Production send apply")
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
+        "interspire_campaign_template_update_preview" => tool.with_annotations(
+            ToolAnnotations::with_title("Campaign template update preview")
+                .read_only(true)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
+        "interspire_campaign_template_update_apply" => tool.with_annotations(
+            ToolAnnotations::with_title("Campaign template update apply")
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
         _ => tool,
     }
 }
@@ -871,6 +1048,13 @@ mod tests {
             Ok(CampaignBodyAuditReport::fixture())
         }
 
+        fn campaign_render_artifact(
+            &self,
+            _request: &CampaignRenderArtifactRequest,
+        ) -> Result<CampaignRenderArtifactReport, InterspireError> {
+            Ok(CampaignRenderArtifactReport::fixture())
+        }
+
         fn send_wizard_readback(
             &self,
             _request: &SendWizardReadbackRequest,
@@ -883,6 +1067,20 @@ mod tests {
             _request: &SeedReadinessGateRequest,
         ) -> Result<SeedReadinessGateReport, InterspireError> {
             Ok(SeedReadinessGateReport::fixture())
+        }
+
+        fn seed_send_apply(
+            &self,
+            _request: &SeedSendApplyRequest,
+        ) -> Result<SeedSendApplyReport, InterspireError> {
+            Ok(SeedSendApplyReport::fixture())
+        }
+
+        fn production_send_apply(
+            &self,
+            _request: &ProductionSendApplyRequest,
+        ) -> Result<ProductionSendApplyReport, InterspireError> {
+            Ok(ProductionSendApplyReport::fixture())
         }
 
         fn campaign_update_preview(
@@ -1035,6 +1233,9 @@ mod tests {
                 "interspire_audience_hygiene_export_status",
                 "interspire_campaign_body_audit",
                 "interspire_campaign_readback",
+                "interspire_campaign_render_artifact",
+                "interspire_campaign_template_update_apply",
+                "interspire_campaign_template_update_preview",
                 "interspire_campaign_update_apply",
                 "interspire_campaign_update_preview",
                 "interspire_contact_state",
@@ -1042,10 +1243,12 @@ mod tests {
                 "interspire_list_summary",
                 "interspire_list_update_apply",
                 "interspire_list_update_preview",
+                "interspire_production_send_apply",
                 "interspire_queue_control_apply",
                 "interspire_queue_control_preview",
                 "interspire_queue_stats_readback",
                 "interspire_seed_readiness_gate",
+                "interspire_seed_send_apply",
                 "interspire_send_wizard_readback",
                 "interspire_sensitive_field_query",
                 "interspire_settings_audit",
