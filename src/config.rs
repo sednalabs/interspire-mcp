@@ -156,7 +156,7 @@ impl CloudflareAccessConfig {
     }
 
     fn apply_secret_file(&mut self, path: &Path) {
-        let Some(contents) = read_secret_file(path) else {
+        let Some(contents) = read_secret_file(path, SecretFileSlot::CloudflareAccess) else {
             return;
         };
 
@@ -286,7 +286,7 @@ impl XmlApiConfig {
     }
 
     fn apply_secret_file(&mut self, path: &Path) {
-        let Some(contents) = read_secret_file(path) else {
+        let Some(contents) = read_secret_file(path, SecretFileSlot::XmlApi) else {
             return;
         };
 
@@ -345,7 +345,7 @@ impl AdminHtmlConfig {
     }
 
     fn apply_secret_file(&mut self, path: &Path) {
-        let Some(contents) = read_secret_file(path) else {
+        let Some(contents) = read_secret_file(path, SecretFileSlot::AdminHtml) else {
             return;
         };
 
@@ -389,15 +389,35 @@ fn normalize_secret_file_value(value: &str) -> String {
         .to_string()
 }
 
-fn read_secret_file(path: &Path) -> Option<String> {
-    let path = validated_secret_file_path(path)?;
+#[derive(Debug, Clone, Copy)]
+enum SecretFileSlot {
+    CloudflareAccess,
+    AdminHtml,
+    XmlApi,
+}
+
+impl SecretFileSlot {
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::CloudflareAccess => "interspire-cloudflare-access.env",
+            Self::AdminHtml => "interspire-admin.env",
+            Self::XmlApi => "interspire-xml.env",
+        }
+    }
+}
+
+fn read_secret_file(path: &Path, slot: SecretFileSlot) -> Option<String> {
+    let path = validated_secret_file_path(path, slot)?;
     fs::read_to_string(path).ok()
 }
 
-fn validated_secret_file_path(path: &Path) -> Option<PathBuf> {
+fn validated_secret_file_path(path: &Path, slot: SecretFileSlot) -> Option<PathBuf> {
     let file_name = safe_secret_file_name(path)?;
+    if file_name != std::ffi::OsStr::new(slot.file_name()) {
+        return None;
+    }
     let root = secret_file_root().canonicalize().ok()?;
-    let candidate = root.join(file_name);
+    let candidate = root.join(slot.file_name());
     let metadata = fs::symlink_metadata(&candidate).ok()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return None;
@@ -468,15 +488,25 @@ mod tests {
     use super::{
         safe_secret_file_name, secret_file_root, validated_secret_file_path, AdminHtmlConfig,
         CloudflareAccessConfig, GuardedWriteConfig, ImportPreflightConfig, InterspireVersion,
-        XmlApiConfig,
+        SecretFileSlot, XmlApiConfig,
     };
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Mutex, MutexGuard},
+    };
 
-    fn write_secret_file(name: &str, contents: &str) -> PathBuf {
+    fn secret_file_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().expect("lock secret-file fixtures")
+    }
+
+    fn write_secret_file(slot: SecretFileSlot, contents: &str) -> PathBuf {
         let root = secret_file_root();
         fs::create_dir_all(&root).expect("create secret-file test root");
-        fs::write(root.join(name), contents).expect("write secret-file fixture");
-        PathBuf::from(name)
+        let path = PathBuf::from(slot.file_name());
+        fs::write(root.join(&path), contents).expect("write secret-file fixture");
+        path
     }
 
     fn remove_secret_file(path: &PathBuf) {
@@ -485,32 +515,53 @@ mod tests {
 
     #[test]
     fn secret_file_path_validation_rejects_paths_traversal_and_missing_files() {
+        let _guard = secret_file_lock();
+        let root = secret_file_root();
+        fs::create_dir_all(&root).expect("create secret-file test root");
+        let alternate = root.join("admin-key-value.env");
+        fs::write(&alternate, "INTERSPIRE_ADMIN_USERNAME=wrong\n")
+            .expect("write alternate secret-file fixture");
+
         assert!(safe_secret_file_name(PathBuf::from("interspire.env").as_path()).is_some());
         assert!(safe_secret_file_name(PathBuf::from("/tmp/interspire.env").as_path()).is_none());
         assert!(safe_secret_file_name(PathBuf::from("../interspire.env").as_path()).is_none());
         assert!(safe_secret_file_name(PathBuf::from("nested/interspire.env").as_path()).is_none());
-        assert!(
-            validated_secret_file_path(PathBuf::from("interspire-missing.env").as_path()).is_none()
-        );
+        assert!(validated_secret_file_path(
+            PathBuf::from("interspire-admin.env").as_path(),
+            SecretFileSlot::AdminHtml,
+        )
+        .is_none());
+        assert!(validated_secret_file_path(
+            PathBuf::from("interspire-xml.env").as_path(),
+            SecretFileSlot::AdminHtml,
+        )
+        .is_none());
+        assert!(validated_secret_file_path(
+            PathBuf::from("admin-key-value.env").as_path(),
+            SecretFileSlot::AdminHtml,
+        )
+        .is_none());
+
+        fs::remove_file(&alternate).expect("remove alternate secret-file fixture");
     }
 
     #[cfg(unix)]
     #[test]
     fn secret_file_path_validation_rejects_symlinks() {
-        let target = write_secret_file(
-            "secret-file-target.env",
-            "INTERSPIRE_ADMIN_USERNAME=admin\n",
-        );
-        let link = PathBuf::from("secret-file-link.env");
-        let link_path = secret_file_root().join(&link);
+        let _guard = secret_file_lock();
+        let root = secret_file_root();
+        fs::create_dir_all(&root).expect("create secret-file test root");
+        let target = root.join("secret-file-target.env");
+        fs::write(&target, "INTERSPIRE_ADMIN_USERNAME=admin\n").expect("write symlink target");
+        let configured_path = PathBuf::from(SecretFileSlot::AdminHtml.file_name());
+        let link_path = root.join(&configured_path);
         let _ = fs::remove_file(&link_path);
-        std::os::unix::fs::symlink(secret_file_root().join(&target), &link_path)
-            .expect("create symlink");
+        std::os::unix::fs::symlink(&target, &link_path).expect("create symlink");
 
-        assert!(validated_secret_file_path(&link).is_none());
+        assert!(validated_secret_file_path(&configured_path, SecretFileSlot::AdminHtml).is_none());
 
         fs::remove_file(&link_path).expect("remove symlink");
-        remove_secret_file(&target);
+        fs::remove_file(&target).expect("remove symlink target");
     }
 
     #[test]
@@ -554,8 +605,9 @@ mod tests {
 
     #[test]
     fn applies_key_value_secret_file() {
+        let _guard = secret_file_lock();
         let path = write_secret_file(
-            "admin-key-value.env",
+            SecretFileSlot::AdminHtml,
             "INTERSPIRE_ADMIN_USERNAME=admin\nINTERSPIRE_ADMIN_PASSWORD=secret\nINTERSPIRE_ADMIN_BASE_URL=https://example.test/admin\n",
         );
         let mut config = AdminHtmlConfig::default();
@@ -572,7 +624,8 @@ mod tests {
 
     #[test]
     fn applies_two_line_secret_file() {
-        let path = write_secret_file("admin-two-line.env", "admin\nsuper-secret-password\n");
+        let _guard = secret_file_lock();
+        let path = write_secret_file(SecretFileSlot::AdminHtml, "admin\nsuper-secret-password\n");
         let mut config = AdminHtmlConfig::default();
         config.apply_secret_file(&path);
         remove_secret_file(&path);
@@ -584,7 +637,8 @@ mod tests {
 
     #[test]
     fn two_line_secret_file_preserves_env_username_and_fills_missing_password() {
-        let path = write_secret_file("admin-preserve-username.env", "file-admin\nfile-password\n");
+        let _guard = secret_file_lock();
+        let path = write_secret_file(SecretFileSlot::AdminHtml, "file-admin\nfile-password\n");
         let mut config = AdminHtmlConfig {
             username: Some("env-admin".to_string()),
             ..AdminHtmlConfig::default()
@@ -598,7 +652,8 @@ mod tests {
 
     #[test]
     fn two_line_secret_file_preserves_env_password_and_fills_missing_username() {
-        let path = write_secret_file("admin-preserve-password.env", "file-admin\nfile-password\n");
+        let _guard = secret_file_lock();
+        let path = write_secret_file(SecretFileSlot::AdminHtml, "file-admin\nfile-password\n");
         let mut config = AdminHtmlConfig {
             password: Some("env-password".to_string()),
             ..AdminHtmlConfig::default()
@@ -612,8 +667,9 @@ mod tests {
 
     #[test]
     fn admin_secret_file_fills_blank_existing_values() {
+        let _guard = secret_file_lock();
         let path = write_secret_file(
-            "admin-fill-blank.env",
+            SecretFileSlot::AdminHtml,
             "INTERSPIRE_ADMIN_USERNAME=file-admin\nINTERSPIRE_ADMIN_PASSWORD=file-password\nINTERSPIRE_ADMIN_BASE_URL=https://file.example.test/admin\n",
         );
         let mut config = AdminHtmlConfig {
@@ -637,8 +693,9 @@ mod tests {
 
     #[test]
     fn applies_xml_key_value_secret_file() {
+        let _guard = secret_file_lock();
         let path = write_secret_file(
-            "xml-key-value.env",
+            SecretFileSlot::XmlApi,
             "INTERSPIRE_XML_ENDPOINT=https://example.test/xml.php\nINTERSPIRE_XML_USERNAME=xml-user\nINTERSPIRE_XML_TOKEN=xml-token\n",
         );
         let mut config = XmlApiConfig::default();
@@ -655,8 +712,9 @@ mod tests {
 
     #[test]
     fn xml_secret_file_preserves_explicit_env_values() {
+        let _guard = secret_file_lock();
         let path = write_secret_file(
-            "xml-preserve-explicit.env",
+            SecretFileSlot::XmlApi,
             "INTERSPIRE_XML_ENDPOINT=https://file.example.test/xml.php\nINTERSPIRE_XML_USERNAME=file-user\nINTERSPIRE_XML_TOKEN=file-token\n",
         );
         let mut config = XmlApiConfig {
@@ -678,8 +736,9 @@ mod tests {
 
     #[test]
     fn xml_secret_file_fills_blank_existing_values() {
+        let _guard = secret_file_lock();
         let path = write_secret_file(
-            "xml-fill-blank.env",
+            SecretFileSlot::XmlApi,
             "INTERSPIRE_XML_ENDPOINT=https://file.example.test/xml.php\nINTERSPIRE_XML_USERNAME=file-user\nINTERSPIRE_XML_TOKEN=file-token\n",
         );
         let mut config = XmlApiConfig {
@@ -701,8 +760,9 @@ mod tests {
 
     #[test]
     fn cloudflare_access_secret_file_configures_headers_without_exposing_values() {
+        let _guard = secret_file_lock();
         let path = write_secret_file(
-            "cloudflare-access-values.env",
+            SecretFileSlot::CloudflareAccess,
             "INTERSPIRE_CF_ACCESS_CLIENT_ID=\"client-id\"\nINTERSPIRE_CF_ACCESS_CLIENT_SECRET='client-secret'\n",
         );
         let mut config = CloudflareAccessConfig::default();
@@ -717,8 +777,9 @@ mod tests {
 
     #[test]
     fn cloudflare_access_secret_file_preserves_explicit_values() {
+        let _guard = secret_file_lock();
         let path = write_secret_file(
-            "cloudflare-access-preserve.env",
+            SecretFileSlot::CloudflareAccess,
             "INTERSPIRE_CF_ACCESS_CLIENT_ID=file-id\nINTERSPIRE_CF_ACCESS_CLIENT_SECRET=file-secret\n",
         );
         let mut config = CloudflareAccessConfig {

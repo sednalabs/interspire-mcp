@@ -22,9 +22,9 @@ Supported secret file:
 INTERSPIRE_XML_CREDENTIALS_FILE=interspire-xml.env
 ```
 
-Credential-file values are file names only. The MCP reads them from the
-host-controlled `/run/secrets/interspire-mcp/` directory and ignores absolute
-paths, nested paths, and traversal paths.
+Credential-file values are the documented file names only. The MCP reads them
+from the host-controlled `/run/secrets/interspire-mcp/` directory and ignores
+absolute paths, nested paths, traversal paths, and alternate file names.
 
 The XML secret file supports:
 
@@ -62,9 +62,9 @@ Supported secret file:
 INTERSPIRE_ADMIN_CREDENTIALS_FILE=interspire-admin.env
 ```
 
-Credential-file values are file names only. The MCP reads them from the
-host-controlled `/run/secrets/interspire-mcp/` directory and ignores absolute
-paths, nested paths, and traversal paths.
+Credential-file values are the documented file names only. The MCP reads them
+from the host-controlled `/run/secrets/interspire-mcp/` directory and ignores
+absolute paths, nested paths, traversal paths, and alternate file names.
 
 The admin secret file supports key/value format:
 
@@ -89,9 +89,9 @@ INTERSPIRE_CF_ACCESS_CLIENT_SECRET='redacted-service-token-secret'
 INTERSPIRE_CF_ACCESS_CREDENTIALS_FILE=interspire-cloudflare-access.env
 ```
 
-Credential-file values are file names only. The MCP reads them from the
-host-controlled `/run/secrets/interspire-mcp/` directory and ignores absolute
-paths, nested paths, and traversal paths.
+Credential-file values are the documented file names only. The MCP reads them
+from the host-controlled `/run/secrets/interspire-mcp/` directory and ignores
+absolute paths, nested paths, traversal paths, and alternate file names.
 
 The Access secret file supports:
 

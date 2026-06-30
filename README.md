@@ -245,9 +245,9 @@ INTERSPIRE_XML_CREDENTIALS_FILE=interspire-xml.env
 INTERSPIRE_ADMIN_CREDENTIALS_FILE=interspire-admin.env
 ```
 
-Credential-file values are file names only. The MCP reads them from
-`/run/secrets/interspire-mcp/`; absolute paths, nested paths, and traversal
-paths are ignored.
+Credential-file values are the documented file names only. The MCP reads them
+from `/run/secrets/interspire-mcp/`; absolute paths, nested paths, traversal
+paths, and alternate file names are ignored.
 
 Cloudflare Access service-token variables for protected admin/XML origins:
 
