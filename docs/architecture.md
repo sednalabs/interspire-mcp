@@ -138,9 +138,14 @@ The checkpointed audience export flow is deliberately transport-local rather
 than a generic background-task framework. It persists bounded progress under an
 approved private output root, advances only a limited number of subscriber XML
 queries per call, and lets operators resume safely after MCP/client timeouts.
-Checkpoint resume/status resolves jobs as direct children of that approved root
-and normalizes loaded state back to the resolved directory before any later
-checkpoint read or write.
+Checkpoint resume/status resolves jobs to deterministic direct children of that
+approved root from the validated `job_id`, not by scanning operator-controlled
+directory names, and normalizes loaded state back to the resolved directory
+before any later checkpoint read or write. A resume/status request may provide
+the old `artifact_prefix` only to recover a pre-existing legacy
+`<artifact_prefix>-<job_id>` child. The fallback uses the same prefix
+normalization as begin/export, automatically tries the default legacy prefix,
+and does not reintroduce sibling directory scanning.
 
 Sensitive field reads use the MCP Toolkit sensitive-read posture and policy
 decision helper for the generic runtime/acknowledgement/boundary checks.

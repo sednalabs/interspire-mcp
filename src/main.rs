@@ -148,6 +148,7 @@ fn parse_audience_hygiene_export_resume_args(
 ) -> Result<AudienceHygieneExportResumeRequest, String> {
     let mut job_id = None;
     let mut output_dir = None;
+    let mut artifact_prefix = None;
     let mut index = 0;
 
     while index < args.len() {
@@ -158,6 +159,11 @@ fn parse_audience_hygiene_export_resume_args(
             }
             "--output-dir" => {
                 output_dir = Some(required_value(args, index, "--output-dir")?.to_string());
+                index += 2;
+            }
+            "--artifact-prefix" => {
+                artifact_prefix =
+                    Some(required_value(args, index, "--artifact-prefix")?.to_string());
                 index += 2;
             }
             "--max-queries-per-call" => {
@@ -170,6 +176,7 @@ fn parse_audience_hygiene_export_resume_args(
     Ok(AudienceHygieneExportResumeRequest {
         job_id: job_id.ok_or_else(|| "missing --job-id".to_string())?,
         output_dir,
+        artifact_prefix,
         max_queries_per_call: parse_optional_query_budget(args)?
             .unwrap_or(DEFAULT_HYGIENE_QUERY_BUDGET),
     })
@@ -180,6 +187,7 @@ fn parse_audience_hygiene_export_status_args(
 ) -> Result<AudienceHygieneExportStatusRequest, String> {
     let mut job_id = None;
     let mut output_dir = None;
+    let mut artifact_prefix = None;
     let mut index = 0;
 
     while index < args.len() {
@@ -192,6 +200,11 @@ fn parse_audience_hygiene_export_status_args(
                 output_dir = Some(required_value(args, index, "--output-dir")?.to_string());
                 index += 2;
             }
+            "--artifact-prefix" => {
+                artifact_prefix =
+                    Some(required_value(args, index, "--artifact-prefix")?.to_string());
+                index += 2;
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -199,6 +212,7 @@ fn parse_audience_hygiene_export_status_args(
     Ok(AudienceHygieneExportStatusRequest {
         job_id: job_id.ok_or_else(|| "missing --job-id".to_string())?,
         output_dir,
+        artifact_prefix,
     })
 }
 
@@ -245,11 +259,11 @@ fn audience_hygiene_export_begin_usage() -> String {
 }
 
 fn audience_hygiene_export_resume_usage() -> String {
-    "usage: interspire-mcp audience-hygiene-export-resume --job-id iah_123 --output-dir /secure/private/interspire-audience-hygiene --max-queries-per-call 4"
+    "usage: interspire-mcp audience-hygiene-export-resume --job-id iah_123 --output-dir /secure/private/interspire-audience-hygiene [--artifact-prefix legacy-prefix] --max-queries-per-call 4"
         .to_string()
 }
 
 fn audience_hygiene_export_status_usage() -> String {
-    "usage: interspire-mcp audience-hygiene-export-status --job-id iah_123 --output-dir /secure/private/interspire-audience-hygiene"
+    "usage: interspire-mcp audience-hygiene-export-status --job-id iah_123 --output-dir /secure/private/interspire-audience-hygiene [--artifact-prefix legacy-prefix]"
         .to_string()
 }

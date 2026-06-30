@@ -22,6 +22,7 @@ use crate::{
     xml_api::{self, SubscriberRecord, XmlApiClient},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -32,6 +33,7 @@ use std::{
 
 const JOB_STATE_VERSION: u8 = 1;
 const JOB_STATE_FILE: &str = "state.json";
+const CHECKPOINT_JOB_DIR_PREFIX: &str = "checkpoint";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ExportJobState {
@@ -146,6 +148,7 @@ pub(crate) fn begin_export(
         &AudienceHygieneExportResumeRequest {
             job_id,
             output_dir: Some(output_dir.display().to_string()),
+            artifact_prefix: None,
             max_queries_per_call: request.max_queries_per_call,
         },
     )
@@ -156,7 +159,11 @@ pub(crate) fn resume_export(
     request: &AudienceHygieneExportResumeRequest,
 ) -> Result<AudienceHygieneExportReport, InterspireError> {
     let output_dir = prepare_checkpoint_output_dir(request.output_dir.as_deref(), false)?;
-    let mut state = load_state(&output_dir, &request.job_id)?;
+    let mut state = load_state(
+        &output_dir,
+        &request.job_id,
+        request.artifact_prefix.as_deref(),
+    )?;
 
     if !xml.configured() {
         let mut report = build_report(&state, 0)?;
@@ -241,7 +248,11 @@ pub(crate) fn export_status(
     request: &AudienceHygieneExportStatusRequest,
 ) -> Result<AudienceHygieneExportReport, InterspireError> {
     let output_dir = prepare_checkpoint_output_dir(request.output_dir.as_deref(), false)?;
-    let state = load_state(&output_dir, &request.job_id)?;
+    let state = load_state(
+        &output_dir,
+        &request.job_id,
+        request.artifact_prefix.as_deref(),
+    )?;
     build_report(&state, 0)
 }
 
@@ -523,8 +534,7 @@ fn create_checkpoint_job_dir(
     job_id: &str,
 ) -> Result<PathBuf, InterspireError> {
     ensure_checkpoint_segment("checkpoint artifact prefix", prefix)?;
-    let job_id = checked_job_id(job_id)?;
-    let job_dir = output_dir.join(format!("{prefix}-{job_id}"));
+    let job_dir = checkpoint_job_dir(output_dir, job_id)?;
     ensure_direct_checkpoint_child(output_dir, &job_dir)?;
     if job_dir.exists() {
         return Err(InterspireError::Io(format!(
@@ -541,9 +551,13 @@ fn create_checkpoint_job_dir(
     Ok(job_dir)
 }
 
-fn load_state(output_dir: &Path, job_id: &str) -> Result<ExportJobState, InterspireError> {
+fn load_state(
+    output_dir: &Path,
+    job_id: &str,
+    legacy_artifact_prefix: Option<&str>,
+) -> Result<ExportJobState, InterspireError> {
     let job_id = checked_job_id(job_id)?;
-    let job_dir = find_job_dir(output_dir, job_id)?;
+    let job_dir = find_job_dir(output_dir, job_id, legacy_artifact_prefix)?;
     let state_file = state_path(&job_dir)?;
     let body = read_checkpoint_state_file(&state_file)?;
     let mut state: ExportJobState = serde_json::from_slice(&body)
@@ -563,37 +577,27 @@ fn load_state(output_dir: &Path, job_id: &str) -> Result<ExportJobState, Intersp
     Ok(state)
 }
 
-fn find_job_dir(output_dir: &Path, job_id: &str) -> Result<PathBuf, InterspireError> {
+fn find_job_dir(
+    output_dir: &Path,
+    job_id: &str,
+    legacy_artifact_prefix: Option<&str>,
+) -> Result<PathBuf, InterspireError> {
     let job_id = checked_job_id(job_id)?;
-    let expected_suffix = format!("-{job_id}");
-    let entries = fs::read_dir(output_dir)
-        .map_err(|err| InterspireError::Io(format!("failed to read output dir: {err}")))?;
-    for entry in entries {
-        let entry =
-            entry.map_err(|err| InterspireError::Io(format!("failed to read dir entry: {err}")))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|err| InterspireError::Io(format!("failed to read dir entry type: {err}")))?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(&expected_suffix) {
-            continue;
-        }
-        ensure_checkpoint_job_dir(output_dir, &path)?;
-        match stored_job_id(&path) {
-            Ok(stored) if stored == job_id => return Ok(path),
-            Ok(_) => continue,
-            Err(err) => return Err(err),
-        }
+    let job_dir = checkpoint_job_dir(output_dir, job_id)?;
+    if let Some(existing) = existing_checkpoint_job_dir(output_dir, &job_dir)? {
+        return resolve_existing_job_dir(output_dir, &existing, job_id);
     }
+
+    let legacy_prefix = legacy_artifact_prefix
+        .map(|prefix| safe_prefix(Some(prefix)))
+        .unwrap_or_else(|| safe_prefix(None));
+    let legacy_job_dir = legacy_checkpoint_job_dir(output_dir, &legacy_prefix, job_id)?;
+    if let Some(existing) = existing_checkpoint_job_dir(output_dir, &legacy_job_dir)? {
+        return resolve_existing_job_dir(output_dir, &existing, job_id);
+    }
+
     Err(InterspireError::Io(format!(
-        "checkpoint job {} was not found under {}",
-        job_id,
+        "checkpoint job {job_id} was not found under {}",
         output_dir.display()
     )))
 }
@@ -730,6 +734,84 @@ fn checkpoint_file_path(job_dir: &Path, file_name: &str) -> Result<PathBuf, Inte
     Ok(path)
 }
 
+fn checkpoint_job_dir(output_dir: &Path, job_id: &str) -> Result<PathBuf, InterspireError> {
+    let job_id = checked_job_id(job_id)?;
+    let name = checkpoint_job_dir_name(job_id)?;
+    let path = output_dir.join(name);
+    ensure_direct_checkpoint_child(output_dir, &path)?;
+    Ok(path)
+}
+
+fn legacy_checkpoint_job_dir(
+    output_dir: &Path,
+    prefix: &str,
+    job_id: &str,
+) -> Result<PathBuf, InterspireError> {
+    ensure_checkpoint_segment("checkpoint artifact prefix", prefix)?;
+    let job_id = checked_job_id(job_id)?;
+    let path = output_dir.join(format!("{prefix}-{job_id}"));
+    ensure_direct_checkpoint_child(output_dir, &path)?;
+    Ok(path)
+}
+
+fn resolve_existing_job_dir(
+    output_dir: &Path,
+    job_dir: &Path,
+    job_id: &str,
+) -> Result<PathBuf, InterspireError> {
+    ensure_checkpoint_job_dir(output_dir, job_dir)?;
+    match stored_job_id(job_dir) {
+        Ok(stored) if stored == job_id => Ok(job_dir.to_path_buf()),
+        Ok(_) => Err(InterspireError::Safety(
+            "checkpoint state job_id does not match the requested job".to_string(),
+        )),
+        Err(err) => Err(err),
+    }
+}
+
+fn existing_checkpoint_job_dir(
+    output_dir: &Path,
+    job_dir: &Path,
+) -> Result<Option<PathBuf>, InterspireError> {
+    ensure_direct_checkpoint_child(output_dir, job_dir)?;
+    let canonical_output = output_dir.canonicalize().map_err(|err| {
+        InterspireError::Safety(format!(
+            "failed to resolve checkpoint output directory: {err}"
+        ))
+    })?;
+    let canonical_job = match job_dir.canonicalize() {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(InterspireError::Safety(format!(
+                "failed to resolve checkpoint job directory: {err}"
+            )));
+        }
+    };
+    if !canonical_job.starts_with(&canonical_output)
+        || canonical_job.parent() != Some(canonical_output.as_path())
+    {
+        return Err(InterspireError::Safety(
+            "checkpoint job directory must resolve as a direct child of output_dir".to_string(),
+        ));
+    }
+    if canonical_job != job_dir {
+        return Err(InterspireError::Safety(
+            "checkpoint job directory must not be a symlink".to_string(),
+        ));
+    }
+    Ok(Some(canonical_job))
+}
+
+fn checkpoint_job_dir_name(job_id: &str) -> Result<String, InterspireError> {
+    let job_id = checked_job_id(job_id)?;
+    let digest = Sha256::digest(job_id.as_bytes());
+    Ok(format!(
+        "{CHECKPOINT_JOB_DIR_PREFIX}-{}",
+        hex::encode(digest)
+    ))
+}
+
 fn ensure_checkpoint_job_dir(output_dir: &Path, job_dir: &Path) -> Result<(), InterspireError> {
     ensure_direct_checkpoint_child(output_dir, job_dir)?;
     ensure_output_dir_still_approved(job_dir)?;
@@ -783,6 +865,9 @@ fn checked_job_id(raw: &str) -> Result<&str, InterspireError> {
 fn ensure_checkpoint_segment(label: &str, value: &str) -> Result<(), InterspireError> {
     if value.is_empty()
         || value.len() > 160
+        || value.contains("..")
+        || value.contains('/')
+        || value.contains('\\')
         || !value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
@@ -841,15 +926,17 @@ fn join_ids(values: &[u64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn unique_dir(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "interspire-checkpoint-{label}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ))
+    fn unique_dir() -> PathBuf {
+        static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+        PathBuf::from("/tmp")
+            .join("interspire-checkpoint-tests")
+            .join(format!(
+                "{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ))
     }
 
     fn fixture_state(job_dir: &Path, job_id: &str) -> ExportJobState {
@@ -874,27 +961,28 @@ mod tests {
 
     #[test]
     fn find_job_dir_requires_exact_job_id_match() {
-        let output_dir = unique_dir("lookup");
-        let job_one = output_dir.join("fixture-iah_123");
-        let job_two = output_dir.join("fixture-iah_999123");
+        let output_dir = unique_dir();
+        let job_one = checkpoint_job_dir(&output_dir, "iah_123").expect("build first job dir");
+        let job_two = checkpoint_job_dir(&output_dir, "iah_999123").expect("build second job dir");
         fs::create_dir_all(&job_one).expect("create first job dir");
         fs::create_dir_all(&job_two).expect("create second job dir");
         write_state(&job_one, &fixture_state(&job_one, "iah_123")).expect("write first state");
         write_state(&job_two, &fixture_state(&job_two, "iah_999123")).expect("write second state");
 
-        let resolved = find_job_dir(&output_dir, "iah_123").expect("exact job id should resolve");
+        let resolved =
+            find_job_dir(&output_dir, "iah_123", None).expect("exact job id should resolve");
         assert_eq!(resolved, job_one);
-        assert!(find_job_dir(&output_dir, "123").is_err());
-        assert!(find_job_dir(&output_dir, "").is_err());
+        assert!(find_job_dir(&output_dir, "123", None).is_err());
+        assert!(find_job_dir(&output_dir, "", None).is_err());
 
         fs::remove_dir_all(&output_dir).unwrap_or_default();
     }
 
     #[test]
-    fn find_job_dir_skips_nonmatching_state_files_before_exact_check() {
-        let output_dir = unique_dir("lookup-fast-path");
+    fn find_job_dir_uses_deterministic_child_without_scanning_siblings() {
+        let output_dir = unique_dir();
         let broken_dir = output_dir.join("fixture-other");
-        let job_dir = output_dir.join("fixture-iah_123");
+        let job_dir = checkpoint_job_dir(&output_dir, "iah_123").expect("build target job dir");
         fs::create_dir_all(&broken_dir).expect("create broken job dir");
         fs::create_dir_all(&job_dir).expect("create target job dir");
         fs::write(
@@ -904,22 +992,134 @@ mod tests {
         .expect("write broken state");
         write_state(&job_dir, &fixture_state(&job_dir, "iah_123")).expect("write target state");
 
-        let resolved = find_job_dir(&output_dir, "iah_123").expect("target job id should resolve");
+        let resolved =
+            find_job_dir(&output_dir, "iah_123", None).expect("target job id should resolve");
         assert_eq!(resolved, job_dir);
 
         fs::remove_dir_all(&output_dir).unwrap_or_default();
     }
 
     #[test]
+    fn find_job_dir_can_recover_legacy_prefixed_jobs_without_scanning() {
+        let output_dir = unique_dir();
+        let legacy_dir =
+            legacy_checkpoint_job_dir(&output_dir, "June-run", "iah_123").expect("legacy dir");
+        fs::create_dir_all(&legacy_dir).expect("create legacy job dir");
+        write_state(&legacy_dir, &fixture_state(&legacy_dir, "iah_123"))
+            .expect("write legacy state");
+
+        assert!(find_job_dir(&output_dir, "iah_123", None).is_err());
+        let resolved = find_job_dir(&output_dir, "iah_123", Some("June run"))
+            .expect("normalized legacy prefix should resolve old checkpoint");
+        assert_eq!(resolved, legacy_dir);
+        assert!(find_job_dir(&output_dir, "iah_123", Some("wrong prefix")).is_err());
+
+        fs::remove_dir_all(&output_dir).unwrap_or_default();
+    }
+
+    #[test]
+    fn find_job_dir_recovers_default_prefix_legacy_jobs_without_prefix() {
+        let output_dir = unique_dir();
+        let default_prefix = safe_prefix(None);
+        let legacy_dir =
+            legacy_checkpoint_job_dir(&output_dir, &default_prefix, "iah_124").expect("legacy dir");
+        fs::create_dir_all(&legacy_dir).expect("create legacy job dir");
+        write_state(&legacy_dir, &fixture_state(&legacy_dir, "iah_124"))
+            .expect("write legacy state");
+
+        let resolved = find_job_dir(&output_dir, "iah_124", None)
+            .expect("default legacy prefix should resolve old checkpoint");
+        assert_eq!(resolved, legacy_dir);
+
+        fs::remove_dir_all(&output_dir).unwrap_or_default();
+    }
+
+    #[test]
+    fn find_job_dir_rejects_symlinked_deterministic_job_dir() {
+        let output_dir = unique_dir();
+        let target_dir =
+            legacy_checkpoint_job_dir(&output_dir, "fixture", "iah_125").expect("target dir");
+        let link_dir = checkpoint_job_dir(&output_dir, "iah_125").expect("link dir");
+        fs::create_dir_all(&target_dir).expect("create target dir");
+        write_state(&target_dir, &fixture_state(&target_dir, "iah_125"))
+            .expect("write target state");
+        std::os::unix::fs::symlink(&target_dir, &link_dir)
+            .expect("create deterministic checkpoint symlink");
+
+        let err = find_job_dir(&output_dir, "iah_125", None)
+            .expect_err("symlinked deterministic checkpoint dir must fail");
+
+        assert_eq!(err.code(), "safety_policy_blocked");
+
+        fs::remove_dir_all(&output_dir).unwrap_or_default();
+    }
+
+    #[test]
+    fn find_job_dir_rejects_symlinked_legacy_job_dir() {
+        let output_dir = unique_dir();
+        let target_dir =
+            legacy_checkpoint_job_dir(&output_dir, "target", "iah_126").expect("target dir");
+        let link_dir =
+            legacy_checkpoint_job_dir(&output_dir, "June-run", "iah_126").expect("link dir");
+        fs::create_dir_all(&target_dir).expect("create target dir");
+        write_state(&target_dir, &fixture_state(&target_dir, "iah_126"))
+            .expect("write target state");
+        std::os::unix::fs::symlink(&target_dir, &link_dir)
+            .expect("create legacy checkpoint symlink");
+
+        let err = find_job_dir(&output_dir, "iah_126", Some("June run"))
+            .expect_err("symlinked legacy checkpoint dir must fail");
+
+        assert_eq!(err.code(), "safety_policy_blocked");
+
+        fs::remove_dir_all(&output_dir).unwrap_or_default();
+    }
+
+    #[test]
+    fn checkpoint_job_dir_name_hashes_validated_job_id() {
+        let output_dir = unique_dir();
+        let job_dir =
+            checkpoint_job_dir(&output_dir, "iah_123").expect("valid job id should build dir");
+        let name = job_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap();
+
+        assert!(name.starts_with("checkpoint-"));
+        assert!(!name.contains("iah_123"));
+        assert_eq!(name.len(), "checkpoint-".len() + 64);
+        assert!(checkpoint_job_dir(&output_dir, "123").is_err());
+    }
+
+    #[test]
+    fn create_checkpoint_job_dir_uses_job_id_hash_not_artifact_prefix() {
+        let output_dir = unique_dir();
+        fs::create_dir_all(&output_dir).expect("create output dir");
+
+        let job_dir = create_checkpoint_job_dir(&output_dir, "custom-prefix", "iah_321")
+            .expect("create checkpoint job dir");
+        let name = job_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap();
+
+        assert!(name.starts_with("checkpoint-"));
+        assert!(!name.contains("custom-prefix"));
+        assert!(!name.contains("iah_321"));
+
+        fs::remove_dir_all(&output_dir).unwrap_or_default();
+    }
+
+    #[test]
     fn load_state_uses_resolved_job_dir_not_stored_state_path() {
-        let output_dir = unique_dir("load-resolves-job-dir");
-        let job_dir = output_dir.join("fixture-iah_777");
+        let output_dir = unique_dir();
+        let job_dir = checkpoint_job_dir(&output_dir, "iah_777").expect("build job dir");
         fs::create_dir_all(&job_dir).expect("create job dir");
         let mut state = fixture_state(&job_dir, "iah_777");
         state.job_dir = "/tmp/interspire-checkpoint-wrong-dir".to_string();
         write_state(&job_dir, &state).expect("write tampered checkpoint state");
 
-        let loaded = load_state(&output_dir, "iah_777").expect("load checkpoint state");
+        let loaded = load_state(&output_dir, "iah_777", None).expect("load checkpoint state");
 
         assert_eq!(loaded.job_dir, job_dir.display().to_string());
 
@@ -928,8 +1128,8 @@ mod tests {
 
     #[test]
     fn load_state_rejects_symlink_state_file() {
-        let output_dir = unique_dir("state-symlink-read");
-        let job_dir = output_dir.join("fixture-iah_778");
+        let output_dir = unique_dir();
+        let job_dir = checkpoint_job_dir(&output_dir, "iah_778").expect("build job dir");
         fs::create_dir_all(&job_dir).expect("create job dir");
         let target_path = output_dir.join("state-target.json");
         fs::write(
@@ -940,7 +1140,7 @@ mod tests {
         std::os::unix::fs::symlink(&target_path, state_path(&job_dir).unwrap())
             .expect("create state symlink");
 
-        let err = load_state(&output_dir, "iah_778").expect_err("symlink state must fail");
+        let err = load_state(&output_dir, "iah_778", None).expect_err("symlink state must fail");
 
         assert_eq!(err.code(), "safety_policy_blocked");
 
@@ -949,8 +1149,8 @@ mod tests {
 
     #[test]
     fn write_state_rejects_symlink_temp_state_file() {
-        let output_dir = unique_dir("state-symlink-write");
-        let job_dir = output_dir.join("fixture-iah_779");
+        let output_dir = unique_dir();
+        let job_dir = checkpoint_job_dir(&output_dir, "iah_779").expect("build job dir");
         fs::create_dir_all(&job_dir).expect("create job dir");
         let target_path = output_dir.join("temp-target.json");
         fs::write(&target_path, b"unchanged").expect("write temp target");
@@ -971,8 +1171,8 @@ mod tests {
 
     #[test]
     fn begin_output_preparation_rejects_symlink_before_chmod() {
-        let output_dir = unique_dir("output-symlink");
-        let target_dir = unique_dir("output-symlink-target");
+        let output_dir = unique_dir();
+        let target_dir = unique_dir();
         fs::create_dir_all(&target_dir).expect("create target dir");
         fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o755))
             .expect("set target mode");
@@ -993,8 +1193,8 @@ mod tests {
 
     #[test]
     fn build_report_restores_base_export_warnings() {
-        let output_dir = unique_dir("warnings");
-        let job_dir = output_dir.join("fixture-iah_456");
+        let output_dir = unique_dir();
+        let job_dir = checkpoint_job_dir(&output_dir, "iah_456").expect("build job dir");
         fs::create_dir_all(&job_dir).expect("create job dir");
         let state = fixture_state(&job_dir, "iah_456");
         write_state(&job_dir, &state).expect("write checkpoint state");

@@ -102,6 +102,13 @@
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "artifact_prefix": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "job_id": {
             "type": "string"
           },
@@ -132,6 +139,13 @@
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "artifact_prefix": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "job_id": {
             "type": "string"
           },

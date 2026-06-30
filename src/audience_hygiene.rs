@@ -593,6 +593,7 @@ fn approved_output_roots() -> Result<Vec<PathBuf>, InterspireError> {
     #[cfg(test)]
     {
         let mut roots = env_output_roots()?;
+        roots.push(canonical_path(Path::new("/tmp"))?);
         roots.push(canonical_path(&std::env::temp_dir())?);
         Ok(roots)
     }

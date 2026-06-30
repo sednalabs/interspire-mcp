@@ -45,6 +45,8 @@ pub struct AudienceHygieneExportResumeRequest {
     pub job_id: String,
     #[serde(default)]
     pub output_dir: Option<String>,
+    #[serde(default)]
+    pub artifact_prefix: Option<String>,
     #[serde(default = "default_hygiene_query_budget")]
     #[schemars(range(min = 1, max = 25))]
     pub max_queries_per_call: usize,
@@ -55,6 +57,8 @@ pub struct AudienceHygieneExportStatusRequest {
     pub job_id: String,
     #[serde(default)]
     pub output_dir: Option<String>,
+    #[serde(default)]
+    pub artifact_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
