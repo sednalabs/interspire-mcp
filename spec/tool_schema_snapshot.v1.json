@@ -169,6 +169,46 @@
       "name": "interspire_campaign_body_audit"
     },
     {
+      "description": "Apply a previously previewed campaign-copy plan and return the new draft id.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "plan_id": {
+            "type": "string"
+          },
+          "source_campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source_campaign_id",
+          "plan_id"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_copy_apply"
+    },
+    {
+      "description": "Preview a guarded campaign-copy plan for creating a draft from a known campaign.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "source_campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source_campaign_id"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_copy_preview"
+    },
+    {
       "description": "Read campaign manage rows or one campaign edit page summary.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -530,6 +570,47 @@
       "name": "interspire_campaign_update_preview"
     },
     {
+      "description": "Preflight a local cleaned CSV import candidate with aggregate counts and hash only.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "csv_path": {
+            "type": "string"
+          },
+          "email_column": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_unique_emails": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target_list_id": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "csv_path"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_contact_import_preflight"
+    },
+    {
       "description": "Check one redacted contact's Interspire list presence with XML first and exact admin-HTML fallback.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -550,6 +631,74 @@
         "type": "object"
       },
       "name": "interspire_contact_state"
+    },
+    {
+      "description": "Apply a previously previewed Interspire contact-list creation plan.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "bounce_email": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner_email": {
+            "type": "string"
+          },
+          "owner_name": {
+            "type": "string"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "reply_to_email": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "name",
+          "owner_name",
+          "owner_email",
+          "reply_to_email",
+          "bounce_email"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_list_create_apply"
+    },
+    {
+      "description": "Preview a guarded Interspire contact-list creation plan.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "bounce_email": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner_email": {
+            "type": "string"
+          },
+          "owner_name": {
+            "type": "string"
+          },
+          "reply_to_email": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "owner_name",
+          "owner_email",
+          "reply_to_email",
+          "bounce_email"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_list_create_preview"
     },
     {
       "description": "Read Interspire list owner, reply-to, and bounce metadata.",
@@ -1536,6 +1685,14 @@
         "type": "object"
       },
       "name": "interspire_warmup_audience_readiness"
+    },
+    {
+      "description": "Probe Interspire XML API authentication with authentication/XmlApiTest without reading lists or contacts.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object"
+      },
+      "name": "interspire_xml_auth_probe"
     }
   ],
   "version": 1

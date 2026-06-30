@@ -22,6 +22,8 @@ before newsletter work goes wrong:
   apply only that narrow plan with explicit write gates?
 - Can we stage a no-send campaign, list, user, or non-secret settings edit
   with preview/apply proof instead of clicking through the brittle admin UI?
+- Can we scaffold a new list, copy a known campaign into a draft, and preflight
+  a cleaned CSV candidate without importing contacts?
 - Can we update EDM body fields, generate private render artifacts, and inspect
   desktop/mobile previews before sending?
 - Can we apply a seed or production send only after fresh proof, exact expected
@@ -31,9 +33,11 @@ before newsletter work goes wrong:
 
 The server is read-only by default. Its write-class capabilities are limited to
 guarded queue cancel/delete, guarded campaign/list/user/settings/template
-edits, private render artifacts, and separately gated seed or production send
+edits, guarded list creation, guarded campaign copy, private render artifacts,
+aggregate-only import preflight, and separately gated seed or production send
 apply tools. All apply paths stay disabled unless the runtime explicitly
-enables guarded writes and the matching control flags.
+enables guarded writes and the matching control flags. Import preflight is a
+read tool and never imports contacts.
 The narrow sensitive-read tool is also disabled by default and requires both a
 runtime gate and per-call acknowledgement before it can return unredacted setup
 values.
@@ -72,13 +76,26 @@ This project takes a narrower route. It exposes first-class MCP intent tools
 with compact, redacted JSON output. The tools are designed for operator
 questions, not for generic administrative access.
 
+Operational tools also have to prove the live workflow they claim to support.
+For new or materially changed capabilities, use
+[`docs/live-proof-matrix.md`](docs/live-proof-matrix.md): compile, docs, schema,
+tool listing, hosted binary install, and restart are not enough until the exact
+target workflow has fixture coverage, negative tests, and live no-send proof on
+the intended Interspire major version.
+For source-derived compatibility work, use
+[`docs/source-compatibility-regression.md`](docs/source-compatibility-regression.md)
+and the private source checker. Public tests must use synthetic fixtures rather
+than proprietary Interspire source snippets.
+
 ## Tool Surface
 
 | Tool | Class | Purpose |
 | --- | --- | --- |
 | `interspire_status` | Read | Report configuration, safety posture, and available capabilities. |
+| `interspire_xml_auth_probe` | Read | Probe XML API authentication with `authentication/XmlApiTest` before using list or contact reads. |
 | `interspire_list_summary` | Read | Summarize lists and aggregate subscriber-state counts. |
 | `interspire_contact_state` | Read | Check one redacted contact's list presence with XML first and exact admin-HTML fallback, while keeping negative absence low confidence. |
+| `interspire_contact_import_preflight` | Read | Preflight a local cleaned CSV candidate with aggregate counts and SHA-256 only; no contacts are imported. |
 | `interspire_list_owner_readback` | Read | Read list owner, reply-to, and bounce metadata. |
 | `interspire_settings_audit` | Read | Read redacted global email, bounce, and cron settings. |
 | `interspire_admin_session_probe` | Read | Probe authenticated admin reachability through allowlisted read pages. |
@@ -86,8 +103,10 @@ questions, not for generic administrative access.
 | `interspire_queue_stats_readback` | Read | Read scheduled queue and stats rows without triggering cron. |
 | `interspire_queue_control_preview` | Read preview | Build plan IDs for cancel/delete actions found on the schedule page. |
 | `interspire_queue_control_apply` | Guarded apply | Apply one previously previewed queue cancel/delete plan when write gates are enabled. |
-| `interspire_campaign_readback` | Read | Read campaign rows or one campaign edit-page summary. |
+| `interspire_campaign_readback` | Read | Read campaign manage rows with structured campaign ids/action flags, or one campaign edit-page summary. |
 | `interspire_campaign_body_audit` | Read | Audit redacted campaign body safety signals without returning raw HTML. |
+| `interspire_campaign_copy_preview` | Read preview | Preview a guarded copy plan for creating a draft from a known campaign. |
+| `interspire_campaign_copy_apply` | Guarded apply | Apply one previously previewed campaign-copy plan and return the detected new draft id. |
 | `interspire_campaign_render_artifact` | Private artifact | Write private persisted-campaign render artifacts for native-browser screenshot inspection without returning raw HTML. |
 | `interspire_send_wizard_readback` | No-mutation proof | Render the Send wizard through the no-send proof boundary and verify queue/stat invariants, including Interspire 8 wizard shapes that echo recipient count rather than selected list ids. |
 | `interspire_seed_readiness_gate` | No-mutation proof | Combine campaign body audit and Send wizard readback into seed-readiness gates. |
@@ -99,6 +118,8 @@ questions, not for generic administrative access.
 | `interspire_campaign_update_apply` | Guarded apply | Apply one previously previewed campaign edit when guarded form-write gates are enabled. |
 | `interspire_list_update_preview` | Read preview | Preview guarded list metadata edits. |
 | `interspire_list_update_apply` | Guarded apply | Apply one previously previewed list metadata edit when guarded form-write gates are enabled. |
+| `interspire_list_create_preview` | Read preview | Preview guarded list creation with sender/reply/bounce metadata. |
+| `interspire_list_create_apply` | Guarded apply | Apply one previously previewed list creation plan and return the detected new list id. |
 | `interspire_user_update_preview` | Read preview | Preview guarded user profile, footer, or non-secret SMTP override edits. |
 | `interspire_user_update_apply` | Guarded apply | Apply one previously previewed user edit when guarded form-write gates are enabled. |
 | `interspire_settings_update_preview` | Read preview | Preview guarded non-secret application, email, bounce, or cron settings edits. |
@@ -111,24 +132,27 @@ questions, not for generic administrative access.
 | `interspire_audience_hygiene_export_status` | Read | Read aggregate status for a checkpointed audience export job. |
 
 There is intentionally no generic admin URL fetch tool, raw contact dump tool,
-generic send tool, schedule tool, import tool, unsubscribe mutation tool,
-suppression mutation tool, SMTP password tool, provider tool, or DNS tool.
+generic send tool, schedule tool, contact-import apply tool, unsubscribe
+mutation tool, suppression mutation tool, SMTP password tool, provider tool, or
+DNS tool.
 
 ## Quick Start
 
-Build from source:
-
-```bash
-git clone https://github.com/sednalabs/interspire-mcp.git
-cd interspire-mcp
-cargo build --release
-```
-
-Build a Linux release artifact on GitHub Actions:
+For operational installs, use the hosted GitHub Actions binary artifact:
 
 - Run the manual `binary-build` workflow on the branch or SHA you want.
 - Download the `interspire-mcp-linux-x86_64` artifact from the run.
+- Verify the downloaded checksum before installing or running the binary.
 - Extract `interspire-mcp` from `interspire-mcp-linux-x86_64.tar.gz`.
+
+```bash
+sha256sum -c interspire-mcp-linux-x86_64.tar.gz.sha256
+tar -xzf interspire-mcp-linux-x86_64.tar.gz interspire-mcp
+install -m 0755 interspire-mcp /opt/interspire-mcp/interspire-mcp
+```
+
+Local `cargo build` is fine for development and tests, but do not use a local
+release build as the operator handoff binary.
 
 Run as a stdio MCP server:
 
@@ -139,17 +163,18 @@ INTERSPIRE_XML_TOKEN='redacted-token' \
 INTERSPIRE_ADMIN_BASE_URL='https://example.invalid/admin/' \
 INTERSPIRE_ADMIN_USERNAME='admin-user' \
 INTERSPIRE_ADMIN_PASSWORD='redacted-password' \
-target/release/interspire-mcp
+/opt/interspire-mcp/interspire-mcp
 ```
 
-Register it with an MCP client by pointing the client at the built binary and
-passing credentials through the client's secret/environment mechanism:
+Register it with an MCP client by pointing the client at the verified hosted
+artifact binary and passing credentials through the client's secret/environment
+mechanism:
 
 ```json
 {
   "mcpServers": {
     "interspire": {
-      "command": "/path/to/interspire-mcp/target/release/interspire-mcp",
+      "command": "/opt/interspire-mcp/interspire-mcp",
       "env": {
         "INTERSPIRE_XML_ENDPOINT": "https://example.invalid/xml.php",
         "INTERSPIRE_XML_USERNAME": "xml-user",
@@ -170,6 +195,11 @@ For a default runtime it should also report `form_write_controls_enabled: false`
 and `write_execution_mode: "preview_apply"`. If the Interspire admin or XML API
 is behind Cloudflare Access, `cloudflare_access_configured: true` confirms that
 the service-token header values were loaded without revealing those values.
+Then call `interspire_xml_auth_probe`. It uses Interspire's
+`authentication/XmlApiTest` route and performs no list, contact, queue, form,
+or send action. A `xml_auth_error` means the XML username, XML token, XML API
+enablement, or admin-only policy should be fixed before relying on XML list or
+contact evidence.
 
 For real deployments, load credentials from environment variables or secret
 files outside the repository. Do not commit credentials, cookies, raw exports,
@@ -191,6 +221,10 @@ INTERSPIRE_XML_TOKEN='redacted-token'
 surfaces that expose JavaScript CSRF tokens such as `IEM_CSRF_TOKEN`.
 The supported XML request profile is documented in
 [`docs/interspire-xml-compatibility.md`](docs/interspire-xml-compatibility.md).
+Use the Interspire XML API token for `INTERSPIRE_XML_TOKEN`; it is not the
+admin-login password. Keep a separate XML credentials file per Interspire
+instance so a legacy install and a new install cannot silently share the wrong
+token.
 
 Admin HTML fallback variables:
 
@@ -279,14 +313,15 @@ authorize any later send.
 
 ### Guarded Form Writes
 
-Campaign, list, user, and settings form writes stay no-send and no-contact by
-design:
+Campaign, list, user, settings, list-creation, and campaign-copy writes stay
+no-send and no-contact by design:
 
 - they only target allowlisted edit forms;
 - they require `INTERSPIRE_GUARDED_WRITES=1` and
   `INTERSPIRE_FORM_WRITE_CONTROLS=1`;
 - they produce a deterministic preview plan before apply;
-- they require the exact preview-generated `plan_id` during apply;
+- they require the exact preview-generated `plan_id` during apply while
+  excluding volatile CSRF/session token values from the plan hash;
 - they re-fetch the page after apply, verify the requested fields persisted,
   and then report redacted readback;
 - they omit blank password fields from the submitted payload so unrelated
@@ -298,6 +333,44 @@ host/username/IMAP mode, hourly throttle, cron toggles, and the Interspire
 test-mode send toggle. It still does not expose provider APIs, DNS,
 password/secret fields, contact mutations, suppression mutations, or generic
 send execution controls.
+
+### Scaffold And Import Preflight
+
+`interspire_list_create_preview` and `interspire_list_create_apply` create a
+new Interspire list only through the captured list-create form. The apply step
+requires the preview plan id, the guarded-write runtime gates, and a before/after
+list readback that detects exactly one new list id and internally verifies the
+requested fields persisted.
+For Interspire 8.x, the native create route can ignore the visible Bounce Email
+unless local bounce polling is selected. The apply path therefore creates the
+list first, then proves and, if needed, re-saves the new list through the normal
+edit route so non-secret sender/reply/bounce metadata can persist without
+turning on local bounce polling.
+
+`interspire_campaign_copy_preview` and `interspire_campaign_copy_apply` copy a
+known campaign by following only the exact allowlisted Copy route discovered on
+the campaign manage page. The apply step reports the detected new draft id,
+confirms the source and copied campaign edit pages can be read back, and states
+that full body/settings equivalence still needs campaign readback/body audit
+before any send decision. It does not send, schedule, trigger cron, import
+contacts, or alter provider state.
+
+`interspire_campaign_readback` returns compact redacted campaign-row summaries
+for human review and a structured `campaign_manage_rows` array with campaign
+ids plus action availability flags. It does not return admin URLs, CSRF tokens,
+raw links, or recipient data.
+
+`interspire_contact_import_preflight` is deliberately not an import tool. It
+accepts a local CSV path only under configured private roots, computes generic
+column labels, aggregate row counts, duplicate/invalid-looking counts, selected
+email column position, and SHA-256, then returns no raw rows, raw headers, or
+email addresses. Explicit expected-count mismatches and hard safety caps are
+blocking errors, not warnings. Use it to prove a candidate file before a
+separate, explicitly approved import path exists.
+
+```bash
+export INTERSPIRE_IMPORT_PREFLIGHT_ALLOWED_ROOTS=/secure/private/imports
+```
 
 ### EDM Template And Render Artifacts
 
@@ -409,17 +482,17 @@ For large list exports, prefer the checkpointed flow so one MCP call does not
 have to finish the full XML traversal:
 
 ```bash
-target/release/interspire-mcp audience-hygiene-export-begin \
+interspire-mcp audience-hygiene-export-begin \
   --source-list-ids 7,8 \
   --output-dir /secure/private/interspire-audience-hygiene \
   --artifact-prefix example-run \
   --max-queries-per-call 4
 
-target/release/interspire-mcp audience-hygiene-export-status \
+interspire-mcp audience-hygiene-export-status \
   --job-id iah_123 \
   --output-dir /secure/private/interspire-audience-hygiene
 
-target/release/interspire-mcp audience-hygiene-export-resume \
+interspire-mcp audience-hygiene-export-resume \
   --job-id iah_123 \
   --output-dir /secure/private/interspire-audience-hygiene \
   --max-queries-per-call 4

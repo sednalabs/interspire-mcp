@@ -11,8 +11,9 @@ Marketer state in typed, redacted, operator-oriented tools.
   only for explicitly allowlisted pages.
 - Output: compact JSON strings shaped for MCP clients and agent workflows.
 - Safety posture: read-only by default, with guarded queue cancel/delete,
-  guarded campaign, list, user, non-secret settings, semantic template, private
-  artifact, and explicit guarded-send apply paths.
+  guarded campaign, list, user, non-secret settings, list creation, campaign
+  copy, semantic template, private artifact, aggregate CSV import preflight,
+  and explicit guarded-send apply paths.
 - No-mutation proof posture: selected admin wizard pages may be rendered for
   evidence without submitting a send. The final send form is available only to
   the separate guarded-send apply tools.
@@ -54,12 +55,14 @@ request/response profile is maintained in
 | `live.rs` | Thin backend root that keeps the trait surface stable while delegating to domain modules. |
 | `live/reads.rs` | Read-only backend handlers for status, list/contact readback, settings, queue stats, and campaign readback. |
 | `live/guarded.rs` | Guarded queue-control and form-write preview/apply handlers. |
+| `live/scaffold.rs` | Guarded list/campaign scaffold handlers plus aggregate CSV import preflight. |
 | `live/send.rs` | Guarded seed and production send apply handlers. |
 | `live/audience.rs` | Warm-up readiness and audience-hygiene handler orchestration. |
 | `live/support.rs` | Shared list caps, source-list filtering, and local helper utilities for the live backend. |
 | `xml_api.rs` | Interspire XML API reads and XML parsing. |
 | `admin_html.rs` | Authenticated admin HTML reads, queue-control extraction, and redacted parsing helpers. |
-| `admin_html/forms.rs` | Guarded form snapshotting, allowlisted field updates, preview/apply plan binding, and field-scoped POST construction. |
+| `admin_html/forms.rs` | Guarded form snapshotting, allowlisted field updates, preview/apply plan binding, list-create apply, and field-scoped POST construction. |
+| `admin_html/scaffold.rs` | Campaign-copy route discovery and before/after draft detection. |
 | `admin_html/proof.rs` | No-mutation admin proof reads plus guarded final-send form capture for admin reachability, campaign body audit, render artifacts, Send wizard readback, seed-readiness gates, seed sends, and production sends. |
 | `private_artifacts.rs` | Private local artifact root validation and atomic artifact writes outside the repository. |
 | `safety.rs` | URL allowlists for read pages, proof posts, guarded send posts, and guarded queue/form write routes. |
@@ -74,6 +77,7 @@ request/response profile is maintained in
 | `response/production_send.rs` | Guarded production-send apply request and report contracts. |
 | `response/send_outcome.rs` | Shared post-send reconciliation status and aggregate proof contracts. |
 | `response/forms.rs` | Guarded campaign/list/user/settings write request and report contracts. |
+| `response/scaffold.rs` | List-create, campaign-copy, and CSV preflight request/report contracts. |
 | `response/audience.rs` | Warm-up readiness and audience-hygiene request/report contracts. |
 | `response/send_wizard.rs` | Admin-session, campaign-body, Send wizard, and seed-readiness proof contracts. |
 | `response.rs` | Thin re-export module for the response contract tree. |
@@ -100,7 +104,11 @@ important operational state:
 - campaign edit summaries;
 - schedule and stats rows;
 - queue-control preview/action links;
-- persisted form state for guarded campaign, list, user, and settings edits.
+- persisted form state for guarded campaign, list, user, settings, and
+  list-create edits.
+- exact Copy-route discovery and before/after draft detection for campaign
+  copy.
+- aggregate-only CSV import preflight under configured private roots.
 - Send wizard proof state for selected campaign/list readiness, with the final
   editable form parsed but not submitted by proof tools.
 
@@ -156,6 +164,27 @@ then replays the resulting current form state through the matched save route.
 Blank password controls are still omitted. This preserves ordinary unchanged
 fields such as subject lines and tracking checkboxes while keeping the requested
 change list, route classifier, plan id, and post-apply readback narrow.
+Plan ids use stable route/form content and requested changes while excluding
+volatile CSRF/session token values; apply still refreshes and submits the
+current token from the live form.
+
+List creation uses the same form-write gate but has create-specific readback:
+apply rereads list summary before and after submission and accepts the result
+only when exactly one new list id appears, then reads that new list edit page
+and internally verifies the requested fields persisted.
+
+Campaign copy is route-follow scaffolding, not generic admin browsing. Preview
+discovers the exact Copy link for the requested source campaign on the manage
+page and binds the plan id to that stable route. Apply rereads the manage page
+before and after following that route, accepts the result only when exactly one
+new campaign id appears, and confirms both source and copied campaign edit
+pages are readable. Full body/settings equivalence remains a campaign
+readback/body-audit gate.
+
+CSV import preflight is intentionally outside the write path. It reads only a
+local CSV under configured private roots and returns generic column labels plus
+aggregate file evidence. Explicit expected-count mismatches and preflight caps
+block the proof; there is no import apply handler in this public build.
 
 Guarded send apply tools deliberately sit outside the no-mutation proof family.
 They re-run the same campaign-body and Send wizard proof immediately, capture

@@ -7,7 +7,7 @@
 use crate::{
     config::XmlApiConfig,
     error::InterspireError,
-    response::{Evidence, ListSummary},
+    response::{Evidence, ListSummary, XmlAuthProbeReport},
 };
 use reqwest::{
     blocking::{Client, RequestBuilder},
@@ -55,6 +55,51 @@ impl XmlApiClient {
     pub fn get_lists(&self) -> Result<Vec<ListSummary>, InterspireError> {
         let xml = self.request_xml("lists", "GetLists", "")?;
         parse_get_lists_response(&xml)
+    }
+
+    pub fn auth_probe(&self) -> XmlAuthProbeReport {
+        if !self.configured() {
+            return XmlAuthProbeReport {
+                ok: true,
+                configured: false,
+                authenticated: false,
+                user_id_present: false,
+                user_name_present: false,
+                warnings: vec![
+                    "XML API is not configured; auth probe did not send a request".to_string(),
+                ],
+                evidence: xml_evidence(vec!["no request sent".to_string()]),
+            };
+        }
+
+        match self.request_xml("authentication", "XmlApiTest", "") {
+            Ok(xml) => parse_xml_auth_probe_response(&xml).unwrap_or_else(|err| {
+                XmlAuthProbeReport {
+                    ok: false,
+                    configured: true,
+                    authenticated: false,
+                    user_id_present: false,
+                    user_name_present: false,
+                    warnings: vec![format!("XML auth probe response parse failed: {err}")],
+                    evidence: xml_evidence(vec![
+                        "authentication/XmlApiTest XML API read attempted".to_string()
+                    ]),
+                }
+            }),
+            Err(err) => XmlAuthProbeReport {
+                ok: false,
+                configured: true,
+                authenticated: false,
+                user_id_present: false,
+                user_name_present: false,
+                warnings: vec![format!(
+                    "XML auth probe failed; check XML username/token, XML API enablement, and admin-only policy: {err}"
+                )],
+                evidence: xml_evidence(vec![
+                    "authentication/XmlApiTest XML API read attempted".to_string()
+                ]),
+            },
+        }
     }
 
     pub fn is_subscriber_on_list(
@@ -402,7 +447,39 @@ fn ensure_success(doc: &roxmltree::Document<'_>) -> Result<(), InterspireError> 
         .find(|node| node.has_tag_name("errormessage"))
         .and_then(|node| node.text())
         .unwrap_or("unknown API error");
+    if is_xml_auth_error_message(message) {
+        return Err(InterspireError::XmlAuth(message.to_string()));
+    }
     Err(InterspireError::Api(message.to_string()))
+}
+
+pub fn parse_xml_auth_probe_response(xml: &str) -> Result<XmlAuthProbeReport, InterspireError> {
+    let doc = roxmltree::Document::parse(xml)
+        .map_err(|err| InterspireError::XmlParse(err.to_string()))?;
+    ensure_success(&doc)?;
+    let user_id_present = doc.descendants().any(|node| {
+        node.has_tag_name("userid") && node.text().is_some_and(|text| !text.trim().is_empty())
+    });
+    let user_name_present = doc.descendants().any(|node| {
+        node.has_tag_name("username") && node.text().is_some_and(|text| !text.trim().is_empty())
+    });
+    let mut warnings = Vec::new();
+    if !user_id_present && !user_name_present {
+        warnings.push(
+            "XML auth probe succeeded but did not expose user id/name fields in the response"
+                .to_string(),
+        );
+    }
+
+    Ok(XmlAuthProbeReport {
+        ok: true,
+        configured: true,
+        authenticated: true,
+        user_id_present,
+        user_name_present,
+        warnings,
+        evidence: xml_evidence(vec!["authentication/XmlApiTest XML API read".to_string()]),
+    })
 }
 
 fn child_text(node: roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
@@ -447,6 +524,17 @@ fn is_large_subscriber_response_error(err: &InterspireError) -> bool {
         "document too large",
         "entity too large",
         "http 413",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn is_xml_auth_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "unable to check user details",
+        "xml api access is not enabled",
+        "xml api is restricted to admin users only",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -594,6 +682,103 @@ mod tests {
         .err()
         .unwrap_or_else(|| panic!("expected error"));
         assert_eq!(err.code(), "api_error");
+    }
+
+    #[test]
+    fn classifies_xml_auth_failures_separately() {
+        let err = parse_get_lists_response(
+            "<response><status>ERROR</status><errormessage>Unable to check user details.</errormessage></response>",
+        )
+        .err()
+        .unwrap_or_else(|| panic!("expected error"));
+        assert_eq!(err.code(), "xml_auth_error");
+    }
+
+    #[test]
+    fn parses_xml_auth_probe_success_as_authenticated() {
+        let report = parse_xml_auth_probe_response(
+            "<response><status>SUCCESS</status><data><user><userid>7</userid><username>operator</username></user></data></response>",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.ok);
+        assert!(report.authenticated);
+        assert!(report.user_id_present);
+        assert!(report.user_name_present);
+    }
+
+    #[test]
+    fn auth_probe_uses_authentication_xmlapitest_method() {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 8192];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("test request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while push: {err}")
+                            })
+                            .push(request);
+                        let body = "<response><status>SUCCESS</status><data><user><userid>7</userid><username>operator</username></user></data></response>";
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/xml; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .unwrap_or_else(|err| panic!("test response write failed: {err}"));
+                        break;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("test server accept failed: {err}"),
+                }
+            }
+        });
+
+        let client = XmlApiClient::new(XmlApiConfig {
+            endpoint: Some(format!("http://{address}/xml.php")),
+            username: Some("xml-user".to_string()),
+            token: Some("xml-token".to_string()),
+            cloudflare_access: crate::config::CloudflareAccessConfig::default(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = client.auth_probe();
+        handle
+            .join()
+            .unwrap_or_else(|_| panic!("test XML server thread panicked"));
+
+        assert!(report.authenticated);
+        let captured = requests
+            .lock()
+            .unwrap_or_else(|err| panic!("test requests lock poisoned while read: {err}"));
+        assert_eq!(captured.len(), 1);
+        let request = captured[0].to_ascii_lowercase();
+        assert!(request.contains("<requesttype>authentication</requesttype>"));
+        assert!(request.contains("<requestmethod>xmlapitest</requestmethod>"));
+        assert!(request.contains("<details> </details>"));
     }
 
     #[test]

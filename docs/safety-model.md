@@ -15,6 +15,8 @@ state.
   must not submit a send, schedule, import, contact, or suppression action.
 - Sensitive reads are disabled by default and require explicit acknowledgement.
 - Private audience exports require an explicit private artifact root.
+- CSV import preflight requires an explicit private artifact root and returns
+  aggregate evidence only.
 - Tool output is redacted and aggregate wherever raw recipient or credential
   data might appear.
 
@@ -25,7 +27,7 @@ The MCP server intentionally does not provide tools for:
 - generic or unreviewed sending;
 - scheduling;
 - cron triggering;
-- imports;
+- contact-import apply;
 - generic raw contact exports;
 - contact delete/edit operations;
 - unsubscribe or resubscribe mutation;
@@ -36,9 +38,10 @@ The MCP server intentionally does not provide tools for:
 - DNS mutation.
 
 Allowlisted writes are limited to queue cancel/delete, guarded campaign, list,
-user, and non-secret settings edits, semantic template edits, private artifact
-creation, and explicit guarded send apply tools. Anything outside those targets
-stays blocked.
+user, and non-secret settings edits, list creation, campaign copy, semantic
+template edits, private artifact creation, and explicit guarded send apply
+tools. CSV import preflight is read-only and aggregate-only. Anything outside
+those targets stays blocked.
 
 ## Negative Tool Surface
 
@@ -49,9 +52,10 @@ named intent tools that answer reviewed operational questions; unreviewed admin
 actions stay unavailable even when the Interspire admin account itself could
 perform them in a browser.
 
-Private audience artifacts are also not send authorization. They can support
-hygiene review outside the repository, but the MCP response exposes aggregate
-evidence only and does not convert exported recipients into a send-ready list.
+Private audience artifacts and CSV preflight reports are also not send
+authorization. They can support hygiene review outside the repository, but the
+MCP response exposes aggregate evidence only and does not convert exported
+recipients into a send-ready list.
 
 ## Admin HTML Allowlist
 
@@ -62,7 +66,9 @@ paths:
 - selected settings tabs;
 - users and user edit pages;
 - newsletter manage and edit pages;
-- schedule and stats pages.
+- newsletter Copy routes discovered from the manage page for exact campaign ids;
+- the list create page and form;
+- schedule and stats pages;
 - the Send page for the reviewed no-send Step2 proof boundary and the
   separately gated guarded-send final form boundary.
 
@@ -81,7 +87,8 @@ No-mutation tools use it only so `interspire_send_wizard_readback` can render
 the Step2/final editable wizard state and then stop before the final send
 boundary. Guarded send apply tools have a separate final-form POST classifier
 for Send Step3/Step4/Send actions captured from the freshly proven page.
-Schedule, import, export, cron, and contact/suppression paths stay blocked.
+Schedule, contact-import apply, export, cron, and contact/suppression paths
+stay blocked.
 
 ## Preview/Apply As Transaction Guard
 
@@ -126,7 +133,7 @@ suppression state, Interspire settings, provider APIs, DNS, or secrets.
 
 ## Guarded Form Writes
 
-Form writes also have preview/apply phases.
+Form writes and scaffold writes also have preview/apply phases.
 
 Preview:
 
@@ -141,7 +148,13 @@ Apply:
 - requires `INTERSPIRE_GUARDED_WRITES=1`;
 - requires `INTERSPIRE_FORM_WRITE_CONTROLS=1`;
 - requires the exact preview-generated `plan_id`;
-- posts only to an allowlisted campaign, list, user, or settings route;
+- derives the plan id from stable route/form content and requested changes,
+  excluding volatile CSRF/session token values that are refreshed at apply time;
+- posts only to an allowlisted campaign, list, user, settings, or list-create
+  route, or follows the exact allowlisted campaign-copy route;
+- sends the current form page as Referer plus the admin Origin and accepted
+  CSRF token header when the form exposes a token, matching Interspire 8's
+  browser-side POST expectations;
 - mutates the requested controls in the captured form snapshot, then submits
   the resulting current form state plus safe hidden controls and the save submit
   control;
@@ -167,7 +180,36 @@ does not reach provider APIs, DNS, password fields, contact state, or
 suppression state.
 
 Form apply does not authorize sending and does not mutate contacts,
-suppression state, import/export state, provider APIs, or DNS.
+suppression state, contact-import state, export state, provider APIs, or DNS.
+
+List creation is the only create-style form write in this public build. It
+requires the same runtime gates and preview plan id as other guarded form
+writes, then rereads list summary and the new list edit page. Apply is
+confirmed only when exactly one new list id appears and the requested fields
+match the persisted form values internally.
+On Interspire 8.x, the create route may ignore visible Bounce Email unless
+local bounce processing is selected. The MCP must not enable local bounce
+polling just to persist metadata. Instead, list-create apply may immediately
+re-save the newly created list through the normal list edit route, using the
+same guarded metadata update model, then prove the final edit-form values.
+Existing list updates must preserve source-defined webhook and multi-select
+state, including `total_webhooks`, `WebhookUrl_*`, `webhook_event_*`,
+`AvailableFields[]`, and `VisibleFields[]`.
+
+Campaign copy is the only route-follow scaffold write. Preview reads the
+campaign manage page, finds the exact Copy link for the requested source
+campaign id, and binds the plan id to the stable current route. Apply rereads
+the manage page before and after the Copy route and is confirmed only when
+exactly one new campaign id appears and both source and copied campaign edit
+pages are readable. It does not claim full copied body/settings equivalence;
+use campaign readback/body audit before treating the copy as send-ready.
+
+CSV import preflight is not a write. It constrains the file path to configured
+private roots, requires a `.csv` extension, rejects parent-directory path
+components, and returns only generic column labels, aggregate counts, duplicate
+and invalid-looking counts, the selected email column position, and SHA-256. It
+blocks on explicit expected-count mismatches or hard byte/row/unique-email caps.
+It has no apply tool and returns no raw rows, raw headers, or email addresses.
 
 ## No-Mutation Send Proof
 

@@ -14,6 +14,7 @@ pub struct InterspireServerConfig {
     pub admin_html: AdminHtmlConfig,
     pub guarded_writes: GuardedWriteConfig,
     pub sensitive_reads: SensitiveReadConfig,
+    pub import_preflight: ImportPreflightConfig,
 }
 
 impl InterspireServerConfig {
@@ -56,6 +57,7 @@ impl InterspireServerConfig {
 
         let guarded_writes = GuardedWriteConfig::from_env();
         let sensitive_reads = SensitiveReadConfig::from_env();
+        let import_preflight = ImportPreflightConfig::from_env();
 
         Self {
             version,
@@ -64,6 +66,7 @@ impl InterspireServerConfig {
             admin_html,
             guarded_writes,
             sensitive_reads,
+            import_preflight,
         }
     }
 }
@@ -187,11 +190,33 @@ pub struct SensitiveReadConfig {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ImportPreflightConfig {
+    pub allowed_roots: Vec<String>,
+}
+
 impl SensitiveReadConfig {
     fn from_env() -> Self {
         Self {
             enabled: env_truthy("INTERSPIRE_SENSITIVE_READS"),
         }
+    }
+}
+
+impl ImportPreflightConfig {
+    fn from_env() -> Self {
+        let Some(raw) = env_non_blank("INTERSPIRE_IMPORT_PREFLIGHT_ALLOWED_ROOTS") else {
+            return Self {
+                allowed_roots: Vec::new(),
+            };
+        };
+        let allowed_roots = raw
+            .split([':', ','])
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        Self { allowed_roots }
     }
 }
 
@@ -364,8 +389,8 @@ fn env_truthy(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdminHtmlConfig, CloudflareAccessConfig, GuardedWriteConfig, InterspireVersion,
-        XmlApiConfig,
+        AdminHtmlConfig, CloudflareAccessConfig, GuardedWriteConfig, ImportPreflightConfig,
+        InterspireVersion, XmlApiConfig,
     };
     use std::{
         fs,
@@ -397,6 +422,12 @@ mod tests {
             config.execution_mode,
             super::WriteExecutionMode::PreviewApply
         );
+    }
+
+    #[test]
+    fn import_preflight_defaults_to_disabled_without_explicit_roots() {
+        let config = ImportPreflightConfig::default();
+        assert!(config.allowed_roots.is_empty());
     }
 
     #[test]

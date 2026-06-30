@@ -2,22 +2,25 @@ use interspire_mcp::{
     AdminSessionProbeReport, AdminSessionProbeRequest, AudienceHygieneExportBeginRequest,
     AudienceHygieneExportReport, AudienceHygieneExportRequest, AudienceHygieneExportResumeRequest,
     AudienceHygieneExportStatusRequest, CampaignBodyAuditReport, CampaignBodyAuditRequest,
-    CampaignReadbackReport, CampaignReadbackRequest, CampaignRenderArtifactReport,
-    CampaignRenderArtifactRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
+    CampaignCopyApplyReport, CampaignCopyApplyRequest, CampaignCopyPreviewReport,
+    CampaignCopyPreviewRequest, CampaignReadbackReport, CampaignReadbackRequest,
+    CampaignRenderArtifactReport, CampaignRenderArtifactRequest, CampaignUpdateApplyRequest,
+    CampaignUpdatePreviewRequest, ContactImportPreflightReport, ContactImportPreflightRequest,
     ContactStateReport, ContactStateRequest, Evidence, GuardedWriteApplyReport,
     GuardedWritePreviewReport, InterspireError, InterspireMcpServer, InterspireReadBackend,
-    ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary, ListSummaryReport,
-    ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
-    ProductionSendApplyReport, ProductionSendApplyRequest, QueueControlApplyReport,
-    QueueControlApplyRequest, QueueControlPreviewReport, QueueControlPreviewRequest,
-    QueueStatsReadbackReport, QueueStatsReadbackRequest, SeedReadinessGateReport,
-    SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus,
-    SendWizardReadbackReport, SendWizardReadbackRequest, SensitiveFieldQueryReport,
-    SensitiveFieldQueryRequest, SettingsAuditReport, SettingsAuditRequest,
-    SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
-    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
-    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
-    DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
+    ListCreateApplyRequest, ListCreatePreviewRequest, ListOwnerReadbackReport,
+    ListOwnerReadbackRequest, ListSummary, ListSummaryReport, ListSummaryRequest,
+    ListUpdateApplyRequest, ListUpdatePreviewRequest, ProductionSendApplyReport,
+    ProductionSendApplyRequest, QueueControlApplyReport, QueueControlApplyRequest,
+    QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
+    QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
+    SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus, SendWizardReadbackReport,
+    SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
+    SettingsAuditReport, SettingsAuditRequest, SettingsUpdateApplyRequest,
+    SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
+    UserSmtpReadbackRequest, UserUpdateApplyRequest, UserUpdatePreviewRequest,
+    WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, XmlAuthProbeReport,
+    XmlAuthProbeRequest, DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
 };
 use mcp_toolkit_testing::response_safety_contract::{
     assert_json_bool_field_false, assert_payload_excludes_substrings,
@@ -30,6 +33,13 @@ struct ContractBackend;
 impl InterspireReadBackend for ContractBackend {
     fn status(&self, _request: &StatusRequest) -> Result<StatusReport, InterspireError> {
         Ok(StatusReport::fixture())
+    }
+
+    fn xml_auth_probe(
+        &self,
+        _request: &XmlAuthProbeRequest,
+    ) -> Result<XmlAuthProbeReport, InterspireError> {
+        Ok(XmlAuthProbeReport::fixture())
     }
 
     fn list_summary(
@@ -186,6 +196,49 @@ impl InterspireReadBackend for ContractBackend {
             Some(request.list_id),
             None,
         ))
+    }
+
+    fn list_create_preview(
+        &self,
+        _request: &ListCreatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "list_create",
+            None,
+            None,
+        ))
+    }
+
+    fn list_create_apply(
+        &self,
+        _request: &ListCreateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "list_create",
+            Some(8),
+            None,
+        ))
+    }
+
+    fn campaign_copy_preview(
+        &self,
+        _request: &CampaignCopyPreviewRequest,
+    ) -> Result<CampaignCopyPreviewReport, InterspireError> {
+        Ok(CampaignCopyPreviewReport::fixture())
+    }
+
+    fn campaign_copy_apply(
+        &self,
+        _request: &CampaignCopyApplyRequest,
+    ) -> Result<CampaignCopyApplyReport, InterspireError> {
+        Ok(CampaignCopyApplyReport::fixture())
+    }
+
+    fn contact_import_preflight(
+        &self,
+        _request: &ContactImportPreflightRequest,
+    ) -> Result<ContactImportPreflightReport, InterspireError> {
+        Ok(ContactImportPreflightReport::fixture())
     }
 
     fn user_update_preview(
@@ -345,6 +398,9 @@ fn status_contract_is_redacted_and_read_only() {
         .contains(&"interspire_contact_state".to_string()));
     assert!(report
         .capabilities
+        .contains(&"interspire_xml_auth_probe".to_string()));
+    assert!(report
+        .capabilities
         .contains(&"interspire_warmup_audience_readiness".to_string()));
     assert!(report
         .capabilities
@@ -394,8 +450,37 @@ fn status_contract_is_redacted_and_read_only() {
     assert!(report
         .capabilities
         .contains(&"interspire_campaign_template_update_apply".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_list_create_preview".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_list_create_apply".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_campaign_copy_preview".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_campaign_copy_apply".to_string()));
+    assert!(report
+        .capabilities
+        .contains(&"interspire_contact_import_preflight".to_string()));
     assert!(!report.guarded_writes_enabled);
+    assert!(!report.import_preflight_configured);
     assert!(!report.queue_controls_enabled);
+}
+
+#[test]
+fn xml_auth_probe_contract_does_not_expose_credentials() {
+    let report = ContractBackend
+        .xml_auth_probe(&XmlAuthProbeRequest::default())
+        .unwrap_or_else(|err| panic!("{err}"));
+    let body = serde_json::to_string(&report).unwrap_or_else(|err| panic!("{err}"));
+
+    assert!(report.ok);
+    assert!(report.authenticated);
+    assert!(!body.contains("token"));
+    assert!(!body.contains("password"));
 }
 
 #[test]
@@ -636,6 +721,33 @@ fn campaign_render_artifact_contract_points_to_private_visual_artifacts() {
 }
 
 #[test]
+fn contact_import_preflight_contract_is_aggregate_only() {
+    let report = ContractBackend
+        .contact_import_preflight(&ContactImportPreflightRequest {
+            csv_path: "/private/fixture.csv".to_string(),
+            target_list_id: Some(1),
+            email_column: Some("email".to_string()),
+            expected_unique_emails: Some(1),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+    let body = serde_json::to_string(&report).unwrap_or_else(|err| panic!("{err}"));
+
+    assert!(report.ok);
+    assert_eq!(report.csv_sha256.len(), 64);
+    assert!(!report.import_apply_authorized);
+    assert_payload_excludes_substrings(
+        &report,
+        &[
+            "person@example.invalid",
+            "grant@example.invalid",
+            "raw_rows",
+            "/private/fixture.csv",
+        ],
+    );
+    assert!(body.contains("preflight only"));
+}
+
+#[test]
 fn send_wizard_readback_contract_is_no_send_boundary() {
     let report = ContractBackend
         .send_wizard_readback(&SendWizardReadbackRequest {
@@ -759,7 +871,7 @@ fn production_send_apply_contract_requires_explicit_authorization_and_redacts() 
 fn server_can_be_constructed_with_fixture_backend() {
     let server = InterspireMcpServer::with_backend(Arc::new(ContractBackend))
         .unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(server.tool_schema_snapshot().len(), 33);
+    assert_eq!(server.tool_schema_snapshot().len(), 39);
 }
 
 #[test]

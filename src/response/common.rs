@@ -11,6 +11,9 @@ pub struct StatusRequest {
     pub include_html_probe: bool,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema, Default)]
+pub struct XmlAuthProbeRequest {}
+
 #[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ListSummaryRequest {
     #[serde(default = "default_true")]
@@ -75,6 +78,7 @@ pub struct StatusReport {
     pub cloudflare_access_configured: bool,
     pub guarded_writes_enabled: bool,
     pub sensitive_reads_enabled: bool,
+    pub import_preflight_configured: bool,
     pub queue_controls_enabled: bool,
     pub form_write_controls_enabled: bool,
     pub contact_write_controls_enabled: bool,
@@ -84,6 +88,17 @@ pub struct StatusReport {
     pub safe_mode: bool,
     pub capabilities: Vec<String>,
     pub blocked_operations: Vec<String>,
+    pub warnings: Vec<String>,
+    pub evidence: Evidence,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct XmlAuthProbeReport {
+    pub ok: bool,
+    pub configured: bool,
+    pub authenticated: bool,
+    pub user_id_present: bool,
+    pub user_name_present: bool,
     pub warnings: Vec<String>,
     pub evidence: Evidence,
 }
@@ -197,9 +212,21 @@ pub struct CampaignReadbackReport {
     pub configured: bool,
     pub campaign_id: Option<u64>,
     pub campaign_fields: Vec<RedactedField>,
+    pub campaign_manage_rows: Vec<CampaignManageRow>,
     pub campaign_rows: Vec<String>,
     pub warnings: Vec<String>,
     pub evidence: Evidence,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CampaignManageRow {
+    pub campaign_id: u64,
+    pub row_summary: String,
+    pub action_labels: Vec<String>,
+    pub can_send: bool,
+    pub can_edit: bool,
+    pub can_copy: bool,
+    pub can_delete: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -220,6 +247,7 @@ impl StatusReport {
             cloudflare_access_configured: false,
             guarded_writes_enabled: false,
             sensitive_reads_enabled: false,
+            import_preflight_configured: false,
             queue_controls_enabled: false,
             form_write_controls_enabled: false,
             contact_write_controls_enabled: false,
@@ -229,6 +257,7 @@ impl StatusReport {
             safe_mode: true,
             capabilities: vec![
                 "interspire_status".to_string(),
+                "interspire_xml_auth_probe".to_string(),
                 "interspire_list_summary".to_string(),
                 "interspire_contact_state".to_string(),
                 "interspire_list_owner_readback".to_string(),
@@ -251,6 +280,11 @@ impl StatusReport {
                 "interspire_campaign_update_apply".to_string(),
                 "interspire_list_update_preview".to_string(),
                 "interspire_list_update_apply".to_string(),
+                "interspire_list_create_preview".to_string(),
+                "interspire_list_create_apply".to_string(),
+                "interspire_campaign_copy_preview".to_string(),
+                "interspire_campaign_copy_apply".to_string(),
+                "interspire_contact_import_preflight".to_string(),
                 "interspire_user_update_preview".to_string(),
                 "interspire_user_update_apply".to_string(),
                 "interspire_settings_update_preview".to_string(),
@@ -267,6 +301,23 @@ impl StatusReport {
             evidence: Evidence {
                 source: "fixture".to_string(),
                 notes: vec!["synthetic fixture".to_string()],
+            },
+        }
+    }
+}
+
+impl XmlAuthProbeReport {
+    pub fn fixture() -> Self {
+        Self {
+            ok: true,
+            configured: true,
+            authenticated: true,
+            user_id_present: true,
+            user_name_present: true,
+            warnings: Vec::new(),
+            evidence: Evidence {
+                source: "fixture".to_string(),
+                notes: vec!["authentication/XmlApiTest XML API read".to_string()],
             },
         }
     }
@@ -365,6 +416,7 @@ impl CampaignReadbackReport {
                 name: "subject".to_string(),
                 value: Some("Example campaign".to_string()),
             }],
+            campaign_manage_rows: Vec::new(),
             campaign_rows: Vec::new(),
             warnings: Vec::new(),
             evidence: Evidence {

@@ -2,20 +2,24 @@ use interspire_mcp::{
     AdminSessionProbeReport, AdminSessionProbeRequest, AudienceHygieneExportBeginRequest,
     AudienceHygieneExportReport, AudienceHygieneExportRequest, AudienceHygieneExportResumeRequest,
     AudienceHygieneExportStatusRequest, CampaignBodyAuditReport, CampaignBodyAuditRequest,
-    CampaignReadbackReport, CampaignReadbackRequest, CampaignRenderArtifactReport,
-    CampaignRenderArtifactRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
+    CampaignCopyApplyReport, CampaignCopyApplyRequest, CampaignCopyPreviewReport,
+    CampaignCopyPreviewRequest, CampaignReadbackReport, CampaignReadbackRequest,
+    CampaignRenderArtifactReport, CampaignRenderArtifactRequest, CampaignUpdateApplyRequest,
+    CampaignUpdatePreviewRequest, ContactImportPreflightReport, ContactImportPreflightRequest,
     ContactStateReport, ContactStateRequest, GuardedWriteApplyReport, GuardedWritePreviewReport,
-    InterspireError, InterspireMcpServer, InterspireReadBackend, ListOwnerReadbackReport,
-    ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest,
-    ListUpdatePreviewRequest, ProductionSendApplyReport, ProductionSendApplyRequest,
-    QueueControlApplyReport, QueueControlApplyRequest, QueueControlPreviewReport,
-    QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
-    SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest,
-    SendWizardReadbackReport, SendWizardReadbackRequest, SensitiveFieldQueryReport,
-    SensitiveFieldQueryRequest, SettingsAuditReport, SettingsAuditRequest,
-    SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
-    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
-    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
+    InterspireError, InterspireMcpServer, InterspireReadBackend, ListCreateApplyRequest,
+    ListCreatePreviewRequest, ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport,
+    ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
+    ProductionSendApplyReport, ProductionSendApplyRequest, QueueControlApplyReport,
+    QueueControlApplyRequest, QueueControlPreviewReport, QueueControlPreviewRequest,
+    QueueStatsReadbackReport, QueueStatsReadbackRequest, SeedReadinessGateReport,
+    SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest, SendWizardReadbackReport,
+    SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
+    SettingsAuditReport, SettingsAuditRequest, SettingsUpdateApplyRequest,
+    SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
+    UserSmtpReadbackRequest, UserUpdateApplyRequest, UserUpdatePreviewRequest,
+    WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, XmlAuthProbeReport,
+    XmlAuthProbeRequest,
 };
 use mcp_toolkit_testing::assert_tool_schema_snapshot;
 use std::{path::PathBuf, sync::Arc};
@@ -26,6 +30,13 @@ struct FixtureBackend;
 impl InterspireReadBackend for FixtureBackend {
     fn status(&self, _request: &StatusRequest) -> Result<StatusReport, InterspireError> {
         Ok(StatusReport::fixture())
+    }
+
+    fn xml_auth_probe(
+        &self,
+        _request: &XmlAuthProbeRequest,
+    ) -> Result<XmlAuthProbeReport, InterspireError> {
+        Ok(XmlAuthProbeReport::fixture())
     }
 
     fn list_summary(
@@ -182,6 +193,49 @@ impl InterspireReadBackend for FixtureBackend {
             Some(request.list_id),
             None,
         ))
+    }
+
+    fn list_create_preview(
+        &self,
+        _request: &ListCreatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "list_create",
+            None,
+            None,
+        ))
+    }
+
+    fn list_create_apply(
+        &self,
+        _request: &ListCreateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "list_create",
+            Some(8),
+            None,
+        ))
+    }
+
+    fn campaign_copy_preview(
+        &self,
+        _request: &CampaignCopyPreviewRequest,
+    ) -> Result<CampaignCopyPreviewReport, InterspireError> {
+        Ok(CampaignCopyPreviewReport::fixture())
+    }
+
+    fn campaign_copy_apply(
+        &self,
+        _request: &CampaignCopyApplyRequest,
+    ) -> Result<CampaignCopyApplyReport, InterspireError> {
+        Ok(CampaignCopyApplyReport::fixture())
+    }
+
+    fn contact_import_preflight(
+        &self,
+        _request: &ContactImportPreflightRequest,
+    ) -> Result<ContactImportPreflightReport, InterspireError> {
+        Ok(ContactImportPreflightReport::fixture())
     }
 
     fn user_update_preview(

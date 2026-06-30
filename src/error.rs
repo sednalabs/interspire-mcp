@@ -10,6 +10,8 @@ pub enum InterspireError {
     Http(String),
     #[error("Interspire XML response could not be parsed: {0}")]
     XmlParse(String),
+    #[error("Interspire XML authentication failed: {0}")]
+    XmlAuth(String),
     #[error("Interspire HTML response could not be parsed: {0}")]
     HtmlParse(String),
     #[error("Interspire local artifact operation failed: {0}")]
@@ -26,6 +28,7 @@ impl InterspireError {
             Self::Safety(_) => "safety_policy_blocked",
             Self::Http(_) => "http_error",
             Self::XmlParse(_) => "xml_parse_error",
+            Self::XmlAuth(_) => "xml_auth_error",
             Self::HtmlParse(_) => "html_parse_error",
             Self::Io(_) => "io_error",
             Self::Api(_) => "api_error",

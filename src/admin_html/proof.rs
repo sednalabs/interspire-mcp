@@ -2063,7 +2063,7 @@ fn is_csrf_field_name(name: &str) -> bool {
     matches!(
         lower.as_str(),
         "csrf" | "csrftoken" | "csrf_token" | "token" | "_token" | "form_token" | "iem_csrf_token"
-    ) || lower.ends_with("token")
+    )
 }
 
 fn admin_origin(base_url: &str) -> Result<String, InterspireError> {
@@ -2102,7 +2102,7 @@ fn is_safe_send_start_hidden(name: &str) -> bool {
             | "_token"
             | "iem_csrf_token"
             | "showfilteringoptions"
-    ) || lower.ends_with("token")
+    )
 }
 
 fn parse_send_wizard_final_page(

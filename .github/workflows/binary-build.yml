@@ -44,7 +44,7 @@ jobs:
           cp target/release/interspire-mcp dist/interspire-mcp
           strip dist/interspire-mcp || true
           tar -C dist -czf dist/interspire-mcp-linux-x86_64.tar.gz interspire-mcp
-          sha256sum dist/interspire-mcp-linux-x86_64.tar.gz > dist/interspire-mcp-linux-x86_64.tar.gz.sha256
+          (cd dist && sha256sum interspire-mcp-linux-x86_64.tar.gz > interspire-mcp-linux-x86_64.tar.gz.sha256)
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0

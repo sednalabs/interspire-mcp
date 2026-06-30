@@ -8,6 +8,7 @@ mod audience;
 mod checkpoint;
 mod guarded;
 mod reads;
+mod scaffold;
 mod send;
 mod support;
 
@@ -19,21 +20,24 @@ use crate::{
         AdminSessionProbeReport, AdminSessionProbeRequest, AudienceHygieneExportBeginRequest,
         AudienceHygieneExportReport, AudienceHygieneExportRequest,
         AudienceHygieneExportResumeRequest, AudienceHygieneExportStatusRequest,
-        CampaignBodyAuditReport, CampaignBodyAuditRequest, CampaignReadbackReport,
-        CampaignReadbackRequest, CampaignRenderArtifactReport, CampaignRenderArtifactRequest,
-        CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactStateReport,
+        CampaignBodyAuditReport, CampaignBodyAuditRequest, CampaignCopyApplyReport,
+        CampaignCopyApplyRequest, CampaignCopyPreviewReport, CampaignCopyPreviewRequest,
+        CampaignReadbackReport, CampaignReadbackRequest, CampaignRenderArtifactReport,
+        CampaignRenderArtifactRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
+        ContactImportPreflightReport, ContactImportPreflightRequest, ContactStateReport,
         ContactStateRequest, GuardedWriteApplyReport, GuardedWritePreviewReport,
-        ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest,
-        ListUpdateApplyRequest, ListUpdatePreviewRequest, ProductionSendApplyReport,
-        ProductionSendApplyRequest, QueueControlApplyReport, QueueControlApplyRequest,
-        QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
-        QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
-        SeedSendApplyReport, SeedSendApplyRequest, SendWizardReadbackReport,
-        SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
-        SettingsAuditReport, SettingsAuditRequest, SettingsUpdateApplyRequest,
-        SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
-        UserSmtpReadbackRequest, UserUpdateApplyRequest, UserUpdatePreviewRequest,
-        WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
+        ListCreateApplyRequest, ListCreatePreviewRequest, ListOwnerReadbackReport,
+        ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest,
+        ListUpdatePreviewRequest, ProductionSendApplyReport, ProductionSendApplyRequest,
+        QueueControlApplyReport, QueueControlApplyRequest, QueueControlPreviewReport,
+        QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
+        SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport,
+        SeedSendApplyRequest, SendWizardReadbackReport, SendWizardReadbackRequest,
+        SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SettingsAuditReport,
+        SettingsAuditRequest, SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest,
+        StatusReport, StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest,
+        UserUpdateApplyRequest, UserUpdatePreviewRequest, WarmupAudienceReadinessReport,
+        WarmupAudienceReadinessRequest, XmlAuthProbeReport, XmlAuthProbeRequest,
     },
     xml_api::XmlApiClient,
     InterspireReadBackend,
@@ -61,6 +65,13 @@ impl LiveInterspireBackend {
 impl InterspireReadBackend for LiveInterspireBackend {
     fn status(&self, request: &StatusRequest) -> Result<StatusReport, InterspireError> {
         self.status_impl(request)
+    }
+
+    fn xml_auth_probe(
+        &self,
+        _request: &XmlAuthProbeRequest,
+    ) -> Result<XmlAuthProbeReport, InterspireError> {
+        Ok(self.xml_client()?.auth_probe())
     }
 
     fn list_summary(
@@ -206,6 +217,41 @@ impl InterspireReadBackend for LiveInterspireBackend {
         request: &ListUpdateApplyRequest,
     ) -> Result<GuardedWriteApplyReport, InterspireError> {
         self.list_update_apply_impl(request)
+    }
+
+    fn list_create_preview(
+        &self,
+        request: &ListCreatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        self.list_create_preview_impl(request)
+    }
+
+    fn list_create_apply(
+        &self,
+        request: &ListCreateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        self.list_create_apply_impl(request)
+    }
+
+    fn campaign_copy_preview(
+        &self,
+        request: &CampaignCopyPreviewRequest,
+    ) -> Result<CampaignCopyPreviewReport, InterspireError> {
+        self.campaign_copy_preview_impl(request)
+    }
+
+    fn campaign_copy_apply(
+        &self,
+        request: &CampaignCopyApplyRequest,
+    ) -> Result<CampaignCopyApplyReport, InterspireError> {
+        self.campaign_copy_apply_impl(request)
+    }
+
+    fn contact_import_preflight(
+        &self,
+        request: &ContactImportPreflightRequest,
+    ) -> Result<ContactImportPreflightReport, InterspireError> {
+        self.contact_import_preflight_impl(request)
     }
 
     fn user_update_preview(

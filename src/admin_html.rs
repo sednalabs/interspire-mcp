@@ -7,18 +7,19 @@
 
 mod forms;
 mod proof;
+mod scaffold;
 
 use crate::{
     config::{AdminHtmlConfig, InterspireVersion, WriteExecutionMode},
     error::InterspireError,
     guarded_write, redact,
     response::{
-        CampaignReadbackReport, Evidence, FormFieldUpdate, GuardedWriteApplyReport,
-        GuardedWritePreviewReport, ListSummary, ListSummaryReport, QueueControlAction,
-        QueueControlCandidate, QueueStatsReadbackReport, RedactedField, SensitiveFieldDenial,
-        SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SensitiveFieldTarget,
-        SensitiveFieldValue, SettingsAuditReport, SettingsSection, SettingsSectionName,
-        UserSmtpReadbackReport, UserSmtpSummary,
+        CampaignManageRow, CampaignReadbackReport, Evidence, FormFieldUpdate,
+        GuardedWriteApplyReport, GuardedWritePreviewReport, ListSummary, ListSummaryReport,
+        QueueControlAction, QueueControlCandidate, QueueStatsReadbackReport, RedactedField,
+        SensitiveFieldDenial, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
+        SensitiveFieldTarget, SensitiveFieldValue, SettingsAuditReport, SettingsSection,
+        SettingsSectionName, UserSmtpReadbackReport, UserSmtpSummary,
     },
     safety::{self, AdminReadPage, QueueControlRoute},
 };
@@ -746,22 +747,42 @@ impl AdminHtmlClient {
         }
         self.login()?;
 
-        let (fields, rows, notes) = if let Some(id) = campaign_id {
+        let (fields, manage_rows, rows, notes, warnings) = if let Some(id) = campaign_id {
             let html = self.get_allowed(&AdminReadPage::NewsletterEdit { id }.path())?;
             (
                 parse_campaign_fields(&html)?,
                 Vec::new(),
+                Vec::new(),
                 vec![format!(
                     "allowlisted Newsletter edit GET read for campaign {id}"
                 )],
+                Vec::new(),
             )
         } else {
             let html = self.get_allowed(&AdminReadPage::NewslettersManage.path())?;
-            (
-                Vec::new(),
-                parse_table_rows(&html, max_rows)?,
-                vec!["allowlisted Newsletter manage GET read".to_string()],
-            )
+            let mut notes = vec!["allowlisted Newsletter manage GET read".to_string()];
+            let mut warnings = Vec::new();
+            let mut manage_rows = parse_campaign_manage_rows(&html, max_rows.saturating_add(1))?;
+            if manage_rows.len() > max_rows {
+                manage_rows.truncate(max_rows);
+                warnings.push(format!(
+                    "campaign manage readback reached max_rows cap {max_rows}; additional campaign rows may exist"
+                ));
+                notes.push(format!(
+                    "campaign manage rows truncated to max_rows cap {max_rows}"
+                ));
+            }
+            let mut rows = parse_table_rows(&html, max_rows.saturating_add(1))?;
+            if rows.len() > max_rows {
+                rows.truncate(max_rows);
+                warnings.push(format!(
+                    "redacted campaign row summaries reached max_rows cap {max_rows}; additional table rows may exist"
+                ));
+                notes.push(format!(
+                    "redacted campaign row summaries truncated to max_rows cap {max_rows}"
+                ));
+            }
+            (Vec::new(), manage_rows, rows, notes, warnings)
         };
 
         Ok(CampaignReadbackReport {
@@ -769,8 +790,9 @@ impl AdminHtmlClient {
             configured: true,
             campaign_id,
             campaign_fields: fields,
+            campaign_manage_rows: manage_rows,
             campaign_rows: rows,
-            warnings: Vec::new(),
+            warnings,
             evidence: admin_evidence(notes),
         })
     }
@@ -823,6 +845,56 @@ impl AdminHtmlClient {
             forms::GuardedFormTarget::List { list_id },
             plan_id,
             updates,
+            mode,
+        )
+    }
+
+    pub fn list_create_preview(
+        &self,
+        updates: &[FormFieldUpdate],
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        forms::guarded_write_preview(self, forms::GuardedFormTarget::ListCreate, updates)
+    }
+
+    pub fn list_create_apply(
+        &self,
+        plan_id: &str,
+        updates: &[FormFieldUpdate],
+        mode: WriteExecutionMode,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        forms::guarded_list_create_apply(self, plan_id, updates, mode)
+    }
+
+    pub fn campaign_copy_preview(
+        &self,
+        source_campaign_id: u64,
+        guarded_writes_enabled: bool,
+        form_write_controls_enabled: bool,
+        mode: WriteExecutionMode,
+    ) -> Result<scaffold::CampaignCopyPreviewResult, InterspireError> {
+        scaffold::campaign_copy_preview(
+            self,
+            source_campaign_id,
+            guarded_writes_enabled,
+            form_write_controls_enabled,
+            mode,
+        )
+    }
+
+    pub fn campaign_copy_apply(
+        &self,
+        source_campaign_id: u64,
+        plan_id: &str,
+        guarded_writes_enabled: bool,
+        form_write_controls_enabled: bool,
+        mode: WriteExecutionMode,
+    ) -> Result<scaffold::CampaignCopyApplyResult, InterspireError> {
+        scaffold::campaign_copy_apply(
+            self,
+            source_campaign_id,
+            plan_id,
+            guarded_writes_enabled,
+            form_write_controls_enabled,
             mode,
         )
     }
@@ -951,7 +1023,7 @@ impl AdminHtmlClient {
         Ok(token)
     }
 
-    fn get_allowed(&self, path: &str) -> Result<String, InterspireError> {
+    pub(super) fn get_allowed(&self, path: &str) -> Result<String, InterspireError> {
         let base_url = self.config.base_url.as_deref().unwrap_or_default();
         let url = safety::ensure_allowed_admin_get(base_url, path)?;
         let response = self
@@ -983,7 +1055,7 @@ impl AdminHtmlClient {
         )
     }
 
-    fn with_access_headers(&self, request: RequestBuilder) -> RequestBuilder {
+    pub(super) fn with_access_headers(&self, request: RequestBuilder) -> RequestBuilder {
         let access = &self.config.cloudflare_access;
         let Some(client_id) = access.client_id() else {
             return request;
@@ -1028,7 +1100,7 @@ fn looks_like_save_submit(control: &forms::FormControl) -> bool {
             || control.value.to_ascii_lowercase().contains("save"))
 }
 
-fn ensure_authenticated_html(html: &str) -> Result<(), InterspireError> {
+pub(super) fn ensure_authenticated_html(html: &str) -> Result<(), InterspireError> {
     let document = Html::parse_document(html);
     let input_selector =
         Selector::parse("input").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
@@ -1096,11 +1168,7 @@ pub(super) fn extract_login_csrf_token(html: &str) -> Option<LoginCsrfToken> {
 }
 
 fn is_login_csrf_field(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "token" | "csrf" | "csrf_token" | "csrftoken" | "_token" | "form_token" | "iem_csrf_token"
-    ) || lower.ends_with("token")
+    is_csrf_field_name(name)
 }
 
 fn extract_js_string_assignment(html: &str, name: &str) -> Option<String> {
@@ -1154,7 +1222,7 @@ fn normalize_csrf_token(value: &str) -> Option<String> {
     Some(token.to_string())
 }
 
-fn admin_evidence(notes: Vec<String>) -> Evidence {
+pub(super) fn admin_evidence(notes: Vec<String>) -> Evidence {
     Evidence {
         source: "interspire_admin_html".to_string(),
         notes,
@@ -1579,6 +1647,94 @@ pub fn parse_table_rows(html: &str, max_rows: usize) -> Result<Vec<String>, Inte
     Ok(rows)
 }
 
+pub fn parse_campaign_manage_rows(
+    html: &str,
+    max_rows: usize,
+) -> Result<Vec<CampaignManageRow>, InterspireError> {
+    let document = Html::parse_document(html);
+    let row_selector =
+        Selector::parse("tr").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let link_selector =
+        Selector::parse("a").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let mut rows = Vec::new();
+
+    for row in document.select(&row_selector) {
+        if row_contains_nested_rows(&row, &row_selector) {
+            continue;
+        }
+
+        let mut campaign_id = None;
+        let mut action_labels = Vec::new();
+        for link in row.select(&link_selector) {
+            let Some(href) = link.value().attr("href") else {
+                continue;
+            };
+            if !href.contains("Page=Newsletters") && !href.contains("Page=Send") {
+                continue;
+            }
+            if campaign_id.is_none() {
+                campaign_id = extract_query_u64(href, "id");
+            }
+            let label = compact_text(&link.text().collect::<Vec<_>>().join(" "));
+            if let Some(action_label) = campaign_action_label(href, &label) {
+                if !action_labels.contains(&action_label) {
+                    action_labels.push(action_label);
+                }
+            }
+        }
+
+        let Some(campaign_id) = campaign_id else {
+            continue;
+        };
+        let row_summary =
+            redact::redact_sensitive_text(&compact_text(&row.text().collect::<Vec<_>>().join(" ")));
+        if row_summary.len() < 3 {
+            continue;
+        }
+        let action_lookup = action_labels
+            .iter()
+            .map(|label| label.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        rows.push(CampaignManageRow {
+            campaign_id,
+            row_summary,
+            can_send: action_lookup.iter().any(|label| label == "send"),
+            can_edit: action_lookup.iter().any(|label| label == "edit"),
+            can_copy: action_lookup.iter().any(|label| label == "copy"),
+            can_delete: action_lookup.iter().any(|label| label == "delete"),
+            action_labels,
+        });
+        if rows.len() >= max_rows {
+            break;
+        }
+    }
+
+    Ok(rows)
+}
+
+fn campaign_action_label(href: &str, link_label: &str) -> Option<String> {
+    let lower_href = href.to_ascii_lowercase();
+    let lower_label = link_label.to_ascii_lowercase();
+    let action = if lower_href.contains("page=send") || lower_href.contains("action=send") {
+        "Send"
+    } else if lower_href.contains("action=edit") || lower_label == "edit" {
+        "Edit"
+    } else if lower_href.contains("action=copy") || lower_label == "copy" {
+        "Copy"
+    } else if lower_href.contains("action=delete") || lower_label == "delete" {
+        "Delete"
+    } else if lower_href.contains("action=view") || lower_label == "view" {
+        "View"
+    } else if lower_href.contains("action=activate") || lower_label == "activate" {
+        "Activate"
+    } else if lower_href.contains("action=deactivate") || lower_label == "deactivate" {
+        "Deactivate"
+    } else {
+        return None;
+    };
+    Some(action.to_string())
+}
+
 fn parse_queue_control_links(
     base_url: &str,
     html: &str,
@@ -1843,7 +1999,7 @@ fn route_fingerprint(route_key: &str) -> String {
 
 fn csrf_pair(pairs: &[(String, String)]) -> Option<(&str, &str)> {
     pairs.iter().find_map(|(name, value)| {
-        if is_csrf_field_name(name) {
+        if is_csrf_field_name(name) && !value.trim().is_empty() {
             Some((name.as_str(), value.as_str()))
         } else {
             None
@@ -1856,7 +2012,7 @@ fn is_csrf_field_name(name: &str) -> bool {
     matches!(
         lower.as_str(),
         "csrf" | "csrftoken" | "csrf_token" | "token" | "_token" | "form_token" | "iem_csrf_token"
-    ) || lower.ends_with("token")
+    )
 }
 
 fn admin_origin(base_url: &str) -> Result<String, InterspireError> {
@@ -1965,7 +2121,7 @@ fn parse_form_values(html: &str) -> Result<HashMap<String, String>, InterspireEr
     Ok(values)
 }
 
-fn extract_ids_from_links(html: &str, page_marker: &str, id_key: &str) -> Vec<u64> {
+pub(super) fn extract_ids_from_links(html: &str, page_marker: &str, id_key: &str) -> Vec<u64> {
     let document = Html::parse_document(html);
     let selector =
         Selector::parse("a").unwrap_or_else(|err| panic!("selector parse failed: {err}"));
@@ -2060,7 +2216,7 @@ fn redact_email_like(value: &str) -> String {
     }
 }
 
-fn compact_text(value: &str) -> String {
+pub(super) fn compact_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -2201,6 +2357,24 @@ mod tests {
             Some(LoginCsrfToken {
                 field_name: "_token".to_string(),
                 value: "generic-token-123".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn login_csrf_token_ignores_unrelated_token_suffix_fields() {
+        let html = r#"
+            <form method="post" action="index.php?Page=Login&Action=Login">
+              <input name="access_token" value="wrong-token">
+              <script>window.IEM_CSRF_TOKEN = 'right-token';</script>
+            </form>
+        "#;
+
+        assert_eq!(
+            extract_login_csrf_token(html),
+            Some(LoginCsrfToken {
+                field_name: "csrfToken".to_string(),
+                value: "right-token".to_string(),
             })
         );
     }
@@ -2631,6 +2805,13 @@ mod tests {
         assert!(complete_post.contains("Subject=Original+subject"));
         assert!(complete_post.contains("trackopens=1"));
         assert!(complete_post.contains("tracklinks=1"));
+        let complete_post_headers = complete_post.to_ascii_lowercase();
+        assert!(complete_post_headers.contains("referer: http://"));
+        assert!(
+            complete_post_headers.contains("/admin/index.php?page=newsletters&action=edit&id=7")
+        );
+        assert!(complete_post_headers.contains("origin: http://"));
+        assert!(complete_post_headers.contains("x-csrf-token: fixture-csrf"));
     }
 
     #[test]
@@ -2823,6 +3004,64 @@ mod tests {
         }
     }
 
+    fn spawn_campaign_manage_fixture_server() -> TestAdminServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 8192];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("test request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while push: {err}")
+                            })
+                            .push(request.clone());
+                        write_campaign_manage_fixture_response(&mut stream, &request);
+                        if thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while count: {err}")
+                            })
+                            .len()
+                            >= 3
+                        {
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("test server accept failed: {err}"),
+                }
+            }
+        });
+
+        TestAdminServer {
+            base_url: format!("http://{address}/admin/"),
+            requests,
+            handle: Some(handle),
+        }
+    }
+
     fn spawn_contact_state_fixture_server() -> TestAdminServer {
         spawn_contact_state_fixture_server_with(false)
     }
@@ -2981,6 +3220,49 @@ mod tests {
                 <input name="smtp_server" value="smtp.example.test">
                 <input name="smtp_u" value="smtp-user">
               </form>"#
+        } else {
+            "<html><body>unexpected request</body></html>"
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .unwrap_or_else(|err| panic!("test response write failed: {err}"));
+    }
+
+    fn write_campaign_manage_fixture_response(stream: &mut std::net::TcpStream, request: &str) {
+        let body = if request.starts_with("GET /admin/index.php?Page=Login&Action=Login ") {
+            r#"<form method="post" action="index.php?Page=Login&Action=Login">
+                <input type="hidden" name="csrf_token" value="fixture-csrf">
+                <input name="ss_username">
+                <input name="ss_password">
+              </form>"#
+        } else if request.starts_with("POST /admin/index.php?Page=Login&Action=Login ") {
+            "<html><body>logged in</body></html>"
+        } else if request.starts_with("GET /admin/index.php?Page=Newsletters&Action=Manage ") {
+            r#"<table>
+                <tr><th>Name</th><th>Subject</th><th>Action</th></tr>
+                <tr>
+                  <td><a href="index.php?Page=Newsletters&Action=Edit&id=101&csrfToken=secret">Campaign One</a></td>
+                  <td>News for person@example.test</td>
+                  <td>
+                    <a href="index.php?Page=Send&Action=Step1&id=101&csrfToken=secret">Send</a>
+                    <a href="index.php?Page=Newsletters&Action=Edit&id=101&csrfToken=secret">Edit</a>
+                    <a href="index.php?Page=Newsletters&Action=Copy&id=101&csrfToken=secret">Copy</a>
+                  </td>
+                </tr>
+                <tr>
+                  <td><a href="index.php?Page=Newsletters&Action=Edit&id=102&csrfToken=secret">Campaign Two</a></td>
+                  <td>News for other@example.test</td>
+                  <td>
+                    <a href="index.php?Page=Newsletters&Action=Edit&id=102&csrfToken=secret">Edit</a>
+                    <a href="index.php?Page=Newsletters&Action=Delete&id=102&csrfToken=secret">Delete</a>
+                  </td>
+                </tr>
+              </table>"#
         } else {
             "<html><body>unexpected request</body></html>"
         };
@@ -3247,6 +3529,74 @@ mod tests {
                 "Campaign Beta Paused".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parse_campaign_manage_rows_preserves_ids_without_admin_urls() {
+        let html = r#"
+            <table>
+              <tr>
+                <th>Name</th><th>Subject</th><th>Action</th>
+              </tr>
+              <tr>
+                <td><a href="index.php?Page=Newsletters&Action=Edit&id=8287&csrfToken=leak">Fixture Update</a></td>
+                <td>Fixture daily for editor@example.invalid</td>
+                <td>
+                  <a href="index.php?Page=Send&Action=Step1&id=8287&csrfToken=leak">Send</a>
+                  <a href="index.php?Page=Newsletters&Action=Edit&id=8287&csrfToken=leak">Edit</a>
+                  <a href="index.php?Page=Newsletters&Action=Copy&id=8287&csrfToken=leak">Copy</a>
+                  <a href="index.php?Page=Newsletters&Action=Delete&id=8287&csrfToken=leak">Delete</a>
+                </td>
+              </tr>
+            </table>
+        "#;
+
+        let rows = parse_campaign_manage_rows(html, 25).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.campaign_id, 8287);
+        assert!(row.can_send);
+        assert!(row.can_edit);
+        assert!(row.can_copy);
+        assert!(row.can_delete);
+        assert!(row.action_labels.contains(&"Send".to_string()));
+        assert!(row.action_labels.contains(&"Edit".to_string()));
+        assert!(row.action_labels.contains(&"Copy".to_string()));
+        assert!(row.action_labels.contains(&"Delete".to_string()));
+        let json = serde_json::to_string(row).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!json.contains("index.php"));
+        assert!(!json.contains("csrfToken"));
+        assert!(!json.contains("editor@example.invalid"));
+    }
+
+    #[test]
+    fn campaign_readback_warns_when_manage_rows_are_capped() {
+        let server = spawn_campaign_manage_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = client
+            .campaign_readback(None, 1)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.campaign_manage_rows.len(), 1);
+        assert_eq!(report.campaign_manage_rows[0].campaign_id, 101);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("max_rows cap 1")
+                && warning.contains("additional campaign rows may exist")));
+        assert!(report
+            .evidence
+            .notes
+            .iter()
+            .any(|note| note.contains("campaign manage rows truncated")));
+        let json = serde_json::to_string(&report).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!json.contains("index.php"));
+        assert!(!json.contains("csrfToken"));
+        assert!(!json.contains("person@example.test"));
+        assert!(!json.contains("other@example.test"));
     }
 
     #[test]

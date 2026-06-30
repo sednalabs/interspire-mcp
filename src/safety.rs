@@ -13,6 +13,7 @@ use url::Url;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminReadPage {
     Lists,
+    ListCreate,
     ListEdit { id: u64 },
     SubscriberExactSearch { list_id: u64 },
     Settings { tab: u8 },
@@ -34,6 +35,7 @@ pub struct QueueControlRoute {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminWriteIntent {
+    ListCreate,
     ListEdit { id: u64 },
     UserEdit { id: u64 },
     NewsletterEdit { id: u64 },
@@ -53,6 +55,7 @@ impl AdminReadPage {
     pub fn path(&self) -> String {
         match self {
             Self::Lists => "index.php?Page=Lists".to_string(),
+            Self::ListCreate => "index.php?Page=Lists&Action=create".to_string(),
             Self::ListEdit { id } => format!("index.php?Page=Lists&Action=Edit&id={id}"),
             Self::SubscriberExactSearch { list_id } => {
                 format!(
@@ -210,6 +213,89 @@ pub fn ensure_allowed_guarded_send_popup(
     Ok(url)
 }
 
+pub fn ensure_allowed_campaign_copy_get(
+    base_url: &str,
+    relative_path: &str,
+    campaign_id: u64,
+) -> Result<Url, InterspireError> {
+    let base = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let base = normalize_admin_base(base);
+    let url = base
+        .join(relative_path)
+        .map_err(|err| InterspireError::Safety(format!("invalid campaign copy path: {err}")))?;
+
+    ensure_admin_base_scope(&base, &url)?;
+    ensure_admin_front_controller_path(&base, &url)?;
+    classify_allowed_campaign_copy_get(&url, campaign_id)?;
+    Ok(url)
+}
+
+pub fn classify_allowed_campaign_copy_get(
+    url: &Url,
+    campaign_id: u64,
+) -> Result<(), InterspireError> {
+    if url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_none_or(|segment| segment != "index.php")
+    {
+        return Err(InterspireError::Safety(
+            "campaign copy path is not index.php".to_string(),
+        ));
+    }
+
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    ensure_no_duplicate_query_keys(&pairs)?;
+    ensure_only_query_keys(
+        &pairs,
+        &[
+            "Page",
+            "Action",
+            "id",
+            "token",
+            "csrf",
+            "csrfToken",
+            "csrf_token",
+            "_token",
+        ],
+    )?;
+
+    let page = query_value(&pairs, "Page");
+    let action = query_value(&pairs, "Action");
+    let id = query_value(&pairs, "id").and_then(|value| value.parse::<u64>().ok());
+    if !matches!(page.as_deref(), Some("Newsletters")) {
+        return Err(InterspireError::Safety(
+            "campaign copy must target the Newsletters page".to_string(),
+        ));
+    }
+    if !matches!(action.as_deref(), Some("Copy")) {
+        return Err(InterspireError::Safety(format!(
+            "campaign copy action is not Copy: {action:?}"
+        )));
+    }
+    if id != Some(campaign_id) {
+        return Err(InterspireError::Safety(
+            "campaign copy id does not match requested source campaign".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn is_volatile_form_or_query_key(key: &str) -> bool {
+    let normalized = key
+        .trim()
+        .chars()
+        .filter(|ch| !matches!(ch, '_' | '-'))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    normalized.contains("csrf")
+        || normalized.contains("token")
+        || normalized.contains("session")
+        || matches!(normalized.as_str(), "sid")
+}
+
 pub fn ensure_allowed_admin_post_for(
     base_url: &str,
     relative_path: &str,
@@ -253,6 +339,10 @@ pub fn classify_allowed_admin_get(url: &Url) -> Result<AdminReadPage, Interspire
 
     match (page.as_deref(), action.as_deref()) {
         (Some("Lists"), None) if only_query_keys(&pairs, &["Page"]) => Ok(AdminReadPage::Lists),
+        (Some("Lists"), Some(action)) if action.eq_ignore_ascii_case("create") => {
+            ensure_only_query_keys(&pairs, &["Page", "Action"])?;
+            Ok(AdminReadPage::ListCreate)
+        }
         (Some("Lists"), Some("Edit")) => {
             ensure_only_query_keys(&pairs, &["Page", "Action", "id"])?;
             let id = pairs
@@ -760,10 +850,28 @@ pub fn classify_allowed_admin_write(url: &Url) -> Result<AdminWriteRoute, Inters
                     "id",
                     "token",
                     "csrf",
+                    "csrfToken",
                     "csrf_token",
                     "_token",
                 ],
             )?;
+            if action
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("addlist"))
+            {
+                if query_value(&pairs, "id").is_some() {
+                    return Err(InterspireError::Safety(
+                        "list create write route must not include an id".to_string(),
+                    ));
+                }
+                return Ok(AdminWriteRoute {
+                    page,
+                    action,
+                    identifier_key: None,
+                    identifier_value: None,
+                    tab: None,
+                });
+            }
             ensure_write_action_allowed(action.as_deref())?;
             let (key, id) = required_numeric_query_value(&pairs, "id")?;
             Ok(AdminWriteRoute {
@@ -783,6 +891,7 @@ pub fn classify_allowed_admin_write(url: &Url) -> Result<AdminWriteRoute, Inters
                     "UserID",
                     "token",
                     "csrf",
+                    "csrfToken",
                     "csrf_token",
                     "_token",
                 ],
@@ -807,6 +916,7 @@ pub fn classify_allowed_admin_write(url: &Url) -> Result<AdminWriteRoute, Inters
                     "id",
                     "token",
                     "csrf",
+                    "csrfToken",
                     "csrf_token",
                     "_token",
                 ],
@@ -831,6 +941,7 @@ pub fn classify_allowed_admin_write(url: &Url) -> Result<AdminWriteRoute, Inters
                     "Tab",
                     "token",
                     "csrf",
+                    "csrfToken",
                     "csrf_token",
                     "_token",
                 ],
@@ -1215,6 +1326,19 @@ fn ensure_write_intent_matches(
     route: &AdminWriteRoute,
 ) -> Result<(), InterspireError> {
     match expected {
+        AdminWriteIntent::ListCreate => {
+            if route.page != "Lists"
+                || !route
+                    .action
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("addlist"))
+                || route.identifier_value.is_some()
+            {
+                return Err(InterspireError::Safety(
+                    "admin write route does not match the requested list create target".to_string(),
+                ));
+            }
+        }
         AdminWriteIntent::ListEdit { id } => {
             if route.page != "Lists" || route.identifier_value != Some(*id) {
                 return Err(InterspireError::Safety(
@@ -1286,6 +1410,10 @@ mod tests {
         assert_eq!(
             classify_allowed_admin_get(&url("index.php?Page=Lists")).ok(),
             Some(AdminReadPage::Lists)
+        );
+        assert_eq!(
+            classify_allowed_admin_get(&url("index.php?Page=Lists&Action=create")).ok(),
+            Some(AdminReadPage::ListCreate)
         );
         assert_eq!(
             classify_allowed_admin_get(&url("index.php?Page=Lists&Action=Edit&id=42")).ok(),
@@ -1366,6 +1494,55 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("{err}"));
         assert!(delete.as_str().contains("Page=Schedule&Action=Delete"));
+    }
+
+    #[test]
+    fn allows_only_guarded_list_create_write_route() {
+        let route =
+            classify_allowed_admin_write(&url("index.php?Page=Lists&Action=AddList&csrfToken=abc"))
+                .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(route.page, "Lists");
+        assert_eq!(route.action.as_deref(), Some("AddList"));
+        assert_eq!(route.identifier_value, None);
+
+        assert!(
+            classify_allowed_admin_write(&url("index.php?Page=Lists&Action=AddList&id=42"))
+                .is_err()
+        );
+        assert!(classify_allowed_admin_write(&url("index.php?Page=Lists&Action=create")).is_err());
+        assert!(classify_allowed_admin_write(&url("index.php?Page=Lists&Action=Import")).is_err());
+    }
+
+    #[test]
+    fn allows_only_exact_campaign_copy_route() {
+        let allowed = ensure_allowed_campaign_copy_get(
+            "https://example.test/admin/",
+            "index.php?Page=Newsletters&Action=Copy&id=42&csrfToken=abc",
+            42,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(allowed
+            .query_pairs()
+            .any(|(key, value)| key == "id" && value == "42"));
+
+        assert!(ensure_allowed_campaign_copy_get(
+            "https://example.test/admin/",
+            "index.php?Page=Newsletters&Action=Copy&id=43",
+            42,
+        )
+        .is_err());
+        assert!(ensure_allowed_campaign_copy_get(
+            "https://example.test/admin/",
+            "index.php?Page=Newsletters&Action=Send&id=42",
+            42,
+        )
+        .is_err());
+        assert!(ensure_allowed_campaign_copy_get(
+            "https://example.test/admin/",
+            "index.php?Page=Newsletters&Action=Copy&id=42&List=99",
+            42,
+        )
+        .is_err());
     }
 
     #[test]

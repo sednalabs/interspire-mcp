@@ -82,6 +82,7 @@ impl LiveInterspireBackend {
             cloudflare_access_configured,
             guarded_writes_enabled: self.config.guarded_writes.enabled,
             sensitive_reads_enabled: self.config.sensitive_reads.enabled,
+            import_preflight_configured: !self.config.import_preflight.allowed_roots.is_empty(),
             queue_controls_enabled: self.config.guarded_writes.queue_controls_enabled,
             form_write_controls_enabled: self.config.guarded_writes.form_write_controls_enabled,
             contact_write_controls_enabled: self
@@ -97,6 +98,7 @@ impl LiveInterspireBackend {
             safe_mode: true,
             capabilities: vec![
                 "interspire_status".to_string(),
+                "interspire_xml_auth_probe".to_string(),
                 "interspire_list_summary".to_string(),
                 "interspire_contact_state".to_string(),
                 "interspire_list_owner_readback".to_string(),
@@ -119,6 +121,11 @@ impl LiveInterspireBackend {
                 "interspire_campaign_update_apply".to_string(),
                 "interspire_list_update_preview".to_string(),
                 "interspire_list_update_apply".to_string(),
+                "interspire_list_create_preview".to_string(),
+                "interspire_list_create_apply".to_string(),
+                "interspire_campaign_copy_preview".to_string(),
+                "interspire_campaign_copy_apply".to_string(),
+                "interspire_contact_import_preflight".to_string(),
                 "interspire_user_update_preview".to_string(),
                 "interspire_user_update_apply".to_string(),
                 "interspire_settings_update_preview".to_string(),
@@ -137,6 +144,7 @@ impl LiveInterspireBackend {
                 notes: vec![
                     "stdio MCP only".to_string(),
                     "XML API read methods are lists/GetLists, subscribers/IsSubscriberOnList, and subscribers/GetSubscribers for the guarded audience hygiene export".to_string(),
+                    "XML auth probe uses authentication/XmlApiTest and performs no list, contact, send, queue, or form mutation".to_string(),
                     "admin HTML fallback is limited to login plus explicitly allowlisted GET read pages".to_string(),
                     "send wizard proof is limited to an allowlisted no-send Step2 render and queue/stat invariant readback".to_string(),
                     "campaign render artifacts write private local preview files for native-browser screenshots; they do not mutate Interspire".to_string(),
@@ -503,6 +511,7 @@ impl LiveInterspireBackend {
                 configured: false,
                 campaign_id: request.campaign_id,
                 campaign_fields: Vec::new(),
+                campaign_manage_rows: Vec::new(),
                 campaign_rows: Vec::new(),
                 warnings: vec![
                     "admin HTML fallback is not configured; no campaign read attempted".to_string(),
