@@ -38,6 +38,7 @@ fn stdio_initializes_and_lists_tools() {
             "interspire_send_wizard_readback",
             "interspire_sensitive_field_query",
             "interspire_settings_audit",
+            "interspire_settings_inventory",
             "interspire_settings_update_apply",
             "interspire_settings_update_preview",
             "interspire_status",

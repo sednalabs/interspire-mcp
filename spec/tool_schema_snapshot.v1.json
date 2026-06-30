@@ -1607,6 +1607,36 @@
       "name": "interspire_settings_audit"
     },
     {
+      "description": "Inventory redacted Interspire settings form fields across allowlisted tabs.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "include_cron": {
+            "default": false,
+            "type": "boolean"
+          },
+          "include_empty": {
+            "default": false,
+            "type": "boolean"
+          },
+          "include_hidden": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_fields_per_section": {
+            "default": 200,
+            "description": "Maximum returned fields per settings section. Defaults to 200 and is capped at 500.",
+            "format": "uint",
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "interspire_settings_inventory"
+    },
+    {
       "description": "Apply guarded non-secret Interspire settings edits.",
       "inputSchema": {
         "$defs": {

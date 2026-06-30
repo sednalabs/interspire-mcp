@@ -86,11 +86,11 @@ pub use response::{
     SendReconciliationReport, SendWizardReadbackReport, SendWizardReadbackRequest,
     SensitiveFieldDenial, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
     SensitiveFieldTarget, SensitiveFieldValue, SensitiveToolMetadata, SettingsAuditReport,
-    SettingsAuditRequest, SettingsSectionName, SettingsUpdateApplyRequest,
-    SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
-    UserSmtpReadbackRequest, UserUpdateApplyRequest, UserUpdatePreviewRequest,
-    WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, XmlAuthProbeReport,
-    XmlAuthProbeRequest, DEFAULT_HYGIENE_QUERY_BUDGET, DEFAULT_LIST_READ_LIMIT,
+    SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest, SettingsSectionName,
+    SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
+    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
+    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
+    XmlAuthProbeReport, XmlAuthProbeRequest, DEFAULT_HYGIENE_QUERY_BUDGET, DEFAULT_LIST_READ_LIMIT,
     HARD_HYGIENE_QUERY_BUDGET, HARD_LIST_READ_LIMIT,
 };
 use rmcp::{
@@ -157,6 +157,10 @@ pub trait InterspireReadBackend: Send + Sync {
         &self,
         request: &SettingsAuditRequest,
     ) -> Result<SettingsAuditReport, InterspireError>;
+    fn settings_inventory(
+        &self,
+        request: &SettingsInventoryRequest,
+    ) -> Result<SettingsInventoryReport, InterspireError>;
     fn admin_session_probe(
         &self,
         request: &AdminSessionProbeRequest,
@@ -343,6 +347,13 @@ impl InterspireMcpServer {
                     .with_discovery(ToolDiscoveryMetadata::new(
                         "Read redacted Interspire global settings for email, bounce, and cron.",
                         ["interspire", "settings", "audit"],
+                    )),
+                ToolCapability::new("interspire_settings_inventory")
+                    .with_group("read")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Inventory redacted Interspire settings form fields across allowlisted tabs.",
+                        ["interspire", "settings", "inventory", "audit"],
                     )),
                 ToolCapability::new("interspire_admin_session_probe")
                     .with_group("read")
@@ -904,6 +915,16 @@ impl InterspireMcpServer {
     }
 
     #[tool(
+        description = "Inventory redacted Interspire settings form fields across allowlisted tabs."
+    )]
+    fn interspire_settings_inventory(
+        &self,
+        Parameters(request): Parameters<SettingsInventoryRequest>,
+    ) -> String {
+        response::tool_json(self.backend.settings_inventory(&request))
+    }
+
+    #[tool(
         description = "Probe authenticated admin HTML reachability through allowlisted read pages."
     )]
     fn interspire_admin_session_probe(
@@ -1415,6 +1436,13 @@ mod tests {
             Ok(SettingsAuditReport::fixture())
         }
 
+        fn settings_inventory(
+            &self,
+            _request: &SettingsInventoryRequest,
+        ) -> Result<SettingsInventoryReport, InterspireError> {
+            Ok(SettingsInventoryReport::fixture())
+        }
+
         fn admin_session_probe(
             &self,
             _request: &AdminSessionProbeRequest,
@@ -1726,6 +1754,7 @@ mod tests {
                 "interspire_send_wizard_readback",
                 "interspire_sensitive_field_query",
                 "interspire_settings_audit",
+                "interspire_settings_inventory",
                 "interspire_settings_update_apply",
                 "interspire_settings_update_preview",
                 "interspire_status",

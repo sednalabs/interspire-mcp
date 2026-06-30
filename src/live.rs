@@ -34,10 +34,11 @@ use crate::{
         SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport,
         SeedSendApplyRequest, SendWizardReadbackReport, SendWizardReadbackRequest,
         SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SettingsAuditReport,
-        SettingsAuditRequest, SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest,
-        StatusReport, StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest,
-        UserUpdateApplyRequest, UserUpdatePreviewRequest, WarmupAudienceReadinessReport,
-        WarmupAudienceReadinessRequest, XmlAuthProbeReport, XmlAuthProbeRequest,
+        SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
+        SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
+        UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
+        UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
+        XmlAuthProbeReport, XmlAuthProbeRequest,
     },
     xml_api::XmlApiClient,
     InterspireReadBackend,
@@ -100,6 +101,13 @@ impl InterspireReadBackend for LiveInterspireBackend {
         request: &SettingsAuditRequest,
     ) -> Result<SettingsAuditReport, InterspireError> {
         self.settings_audit_impl(request)
+    }
+
+    fn settings_inventory(
+        &self,
+        request: &SettingsInventoryRequest,
+    ) -> Result<SettingsInventoryReport, InterspireError> {
+        self.settings_inventory_impl(request)
     }
 
     fn admin_session_probe(

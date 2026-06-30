@@ -98,6 +98,7 @@ than proprietary Interspire source snippets.
 | `interspire_contact_import_preflight` | Read | Preflight a local cleaned CSV candidate with aggregate counts and SHA-256 only; no contacts are imported. |
 | `interspire_list_owner_readback` | Read | Read list owner, reply-to, and bounce metadata. |
 | `interspire_settings_audit` | Read | Read redacted global email, bounce, and cron settings. |
+| `interspire_settings_inventory` | Read | Inventory redacted settings form fields across allowlisted tabs, with capped omitted secret/hidden/blank controls reported by name and reason. |
 | `interspire_admin_session_probe` | Read | Probe authenticated admin reachability through allowlisted read pages. |
 | `interspire_user_smtp_readback` | Read | Read redacted per-user SMTP override state. |
 | `interspire_queue_stats_readback` | Read | Read scheduled queue and stats rows without triggering cron. |

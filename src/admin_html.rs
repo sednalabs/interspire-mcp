@@ -18,8 +18,10 @@ use crate::{
         GuardedWriteApplyReport, GuardedWritePreviewReport, ListSummary, ListSummaryReport,
         QueueControlAction, QueueControlCandidate, QueueStatsReadbackReport, RedactedField,
         SensitiveFieldDenial, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
-        SensitiveFieldTarget, SensitiveFieldValue, SettingsAuditReport, SettingsSection,
-        SettingsSectionName, UserSmtpReadbackReport, UserSmtpSummary,
+        SensitiveFieldTarget, SensitiveFieldValue, SettingsAuditReport,
+        SettingsInventoryOmittedField, SettingsInventoryReport, SettingsInventoryRequest,
+        SettingsInventorySection, SettingsSection, SettingsSectionName, UserSmtpReadbackReport,
+        UserSmtpSummary,
     },
     safety::{self, AdminReadPage, QueueControlRoute},
 };
@@ -31,7 +33,10 @@ use reqwest::{
 };
 use scraper::{ElementRef, Html, Selector};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -266,6 +271,59 @@ impl AdminHtmlClient {
             sections,
             warnings: Vec::new(),
             evidence: admin_evidence(vec!["allowlisted Settings tab GET reads".to_string()]),
+        })
+    }
+
+    pub fn settings_inventory(
+        &self,
+        request: &SettingsInventoryRequest,
+    ) -> Result<SettingsInventoryReport, InterspireError> {
+        if !self.config.is_configured() {
+            return Err(InterspireError::AdminHtmlNotConfigured);
+        }
+        self.login()?;
+
+        let limit = request.max_fields_per_section.clamp(1, 500);
+        let mut sections = Vec::new();
+        let mut warnings = Vec::new();
+        let mut tabs = vec![(1, "application"), (2, "email"), (7, "bounce")];
+        if request.include_cron {
+            tabs.push((4, "cron"));
+        }
+
+        for (tab, name) in tabs {
+            let html = self.get_allowed(&AdminReadPage::Settings { tab }.path())?;
+            let section = parse_settings_inventory_section(
+                name,
+                &html,
+                request.include_empty,
+                request.include_hidden,
+                limit,
+            )?;
+            if section.capped {
+                warnings.push(format!(
+                    "settings inventory section {name} applied max_fields_per_section cap {limit}"
+                ));
+            }
+            if section.total_control_count == 0 {
+                warnings.push(format!(
+                    "settings inventory section {name} returned no form controls"
+                ));
+            }
+            sections.push(section);
+        }
+
+        Ok(SettingsInventoryReport {
+            ok: true,
+            configured: true,
+            sections,
+            warnings,
+            evidence: admin_evidence(vec![
+                "allowlisted Settings tab GET reads".to_string(),
+                "inventory redacts values and reports omitted secret/hidden/blank controls"
+                    .to_string(),
+                "settings forms were not submitted".to_string(),
+            ]),
         })
     }
 
@@ -1597,6 +1655,185 @@ pub fn parse_settings_fields(
         .collect())
 }
 
+fn parse_settings_inventory_section(
+    section: &str,
+    html: &str,
+    include_empty: bool,
+    include_hidden: bool,
+    max_fields: usize,
+) -> Result<SettingsInventorySection, InterspireError> {
+    let document = Html::parse_document(html);
+    let input_selector =
+        Selector::parse("input").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let textarea_selector =
+        Selector::parse("textarea").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let select_selector =
+        Selector::parse("select").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let option_selector =
+        Selector::parse("option").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+
+    let mut values = BTreeMap::<String, String>::new();
+    let mut omitted = BTreeMap::<String, String>::new();
+    let mut total_control_count = 0usize;
+
+    for input in document.select(&input_selector) {
+        let Some(name) = input.value().attr("name") else {
+            continue;
+        };
+        let lower_name = name.to_ascii_lowercase();
+        let kind = input
+            .value()
+            .attr("type")
+            .unwrap_or("text")
+            .to_ascii_lowercase();
+        if matches!(kind.as_str(), "submit" | "button" | "image" | "reset") {
+            continue;
+        }
+        total_control_count += 1;
+
+        if is_settings_inventory_secret_field(&lower_name) || kind == "password" {
+            omitted.insert(lower_name, "secret-shaped field omitted".to_string());
+            continue;
+        }
+        if kind == "hidden" && !include_hidden {
+            omitted.insert(lower_name, "hidden control omitted".to_string());
+            continue;
+        }
+        if matches!(kind.as_str(), "checkbox" | "radio") && input.value().attr("checked").is_none()
+        {
+            if include_empty {
+                values.entry(lower_name).or_insert_with(|| "0".to_string());
+            } else if !values.contains_key(&lower_name) {
+                omitted.insert(lower_name, "unchecked control omitted".to_string());
+            }
+            continue;
+        }
+
+        let value = input.value().attr("value").unwrap_or_default().trim();
+        if value.is_empty() && !include_empty {
+            omitted.insert(lower_name, "blank value omitted".to_string());
+            continue;
+        }
+        omitted.remove(&lower_name);
+        let value = if kind == "hidden" {
+            summarize_hidden_control_value(value)
+        } else {
+            value.to_string()
+        };
+        values.insert(lower_name, value);
+    }
+
+    for textarea in document.select(&textarea_selector) {
+        let Some(name) = textarea.value().attr("name") else {
+            continue;
+        };
+        let lower_name = name.to_ascii_lowercase();
+        total_control_count += 1;
+        if is_settings_inventory_secret_field(&lower_name) {
+            omitted.insert(lower_name, "secret-shaped field omitted".to_string());
+            continue;
+        }
+        let value = compact_text(&textarea.text().collect::<Vec<_>>().join(" "));
+        if value.is_empty() && !include_empty {
+            omitted.insert(lower_name, "blank value omitted".to_string());
+            continue;
+        }
+        omitted.remove(&lower_name);
+        values.insert(lower_name, value);
+    }
+
+    for select in document.select(&select_selector) {
+        let Some(name) = select.value().attr("name") else {
+            continue;
+        };
+        let lower_name = name.to_ascii_lowercase();
+        total_control_count += 1;
+        if is_settings_inventory_secret_field(&lower_name) {
+            omitted.insert(lower_name, "secret-shaped field omitted".to_string());
+            continue;
+        }
+        let selected = select
+            .select(&option_selector)
+            .find(|option| option.value().attr("selected").is_some())
+            .or_else(|| select.select(&option_selector).next());
+        let value = selected
+            .map(|option| {
+                option
+                    .value()
+                    .attr("value")
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| compact_text(&option.text().collect::<Vec<_>>().join(" ")))
+            })
+            .unwrap_or_default();
+        if value.trim().is_empty() && !include_empty {
+            omitted.insert(lower_name, "blank value omitted".to_string());
+            continue;
+        }
+        omitted.remove(&lower_name);
+        values.insert(lower_name, value);
+    }
+
+    let pre_cap_return_count = values.len() + omitted.len();
+    let mut capped = pre_cap_return_count > max_fields;
+    let mut fields = Vec::new();
+    let mut omitted_entries = omitted;
+    for (index, (name, value)) in values.into_iter().enumerate() {
+        if index >= max_fields {
+            omitted_entries.insert(name, "max_fields_per_section cap omitted field".to_string());
+            continue;
+        }
+        fields.push(RedactedField {
+            value: Some(summarize_field_value(&name, &value)),
+            name,
+        });
+    }
+
+    let omitted_field_count = omitted_entries.len();
+    let omitted_field_limit = max_fields.saturating_sub(fields.len());
+    let omitted_fields = omitted_entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (name, reason))| {
+            if index >= omitted_field_limit {
+                capped = true;
+                return None;
+            }
+            Some(SettingsInventoryOmittedField { name, reason })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(SettingsInventorySection {
+        name: section.to_string(),
+        returned_field_count: fields.len(),
+        omitted_field_count,
+        total_control_count,
+        capped,
+        fields,
+        omitted_fields,
+    })
+}
+
+fn is_settings_inventory_secret_field(lower_name: &str) -> bool {
+    lower_name.contains("password")
+        || lower_name.contains("token")
+        || lower_name.contains("license")
+        || lower_name.contains("secret")
+        || lower_name.contains("cookie")
+        || lower_name.contains("apikey")
+        || lower_name.contains("api_key")
+        || lower_name.ends_with("_key")
+        || lower_name == "key"
+}
+
+fn summarize_hidden_control_value(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    format!(
+        "[hidden len={} sha256={}]",
+        value.len(),
+        &hex::encode(digest)[..12],
+    )
+}
+
 pub fn extract_user_ids(html: &str) -> Vec<u64> {
     extract_ids_from_links(html, "Page=Users", "UserID")
 }
@@ -2584,6 +2821,127 @@ mod tests {
     }
 
     #[test]
+    fn settings_inventory_omits_sensitive_hidden_blank_and_unchecked_controls() {
+        let html = r#"
+            <form>
+              <input name="smtp_server" value="smtp.example.com">
+              <input name="smtp_password" type="password" value="hunter2">
+              <input name="mailgunApiKey" value="mg-private-key">
+              <input name="csrfToken" type="hidden" value="csrf-private">
+              <input name="form_state" type="hidden" value="hidden-state">
+              <input name="blank_field" value="">
+              <input name="force_unsublink" type="checkbox" checked value="1">
+              <input name="empty_checkbox" type="checkbox" value="1">
+              <input type="submit" value="Save">
+              <textarea name="global_html_footer">PRIVATE-NEWSLETTER-SENTINEL</textarea>
+              <select name="server_time_zone">
+                <option value="Australia/Sydney">Sydney</option>
+                <option value="Australia/Melbourne" selected>Melbourne</option>
+              </select>
+            </form>
+        "#;
+
+        let section = parse_settings_inventory_section("email", html, false, false, 50)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let rendered = format!("{section:?}");
+
+        assert_eq!(section.total_control_count, 10);
+        assert_eq!(section.returned_field_count, 4);
+        assert_eq!(section.omitted_field_count, 6);
+        assert!(rendered.contains("smtp_password"));
+        assert!(rendered.contains("mailgunapikey"));
+        assert!(rendered.contains("secret-shaped field omitted"));
+        assert!(rendered.contains("form_state"));
+        assert!(rendered.contains("hidden control omitted"));
+        assert!(rendered.contains("blank_field"));
+        assert!(rendered.contains("blank value omitted"));
+        assert!(rendered.contains("empty_checkbox"));
+        assert!(rendered.contains("unchecked control omitted"));
+        assert!(rendered.contains("[redacted-host]"));
+        assert!(rendered.contains("[content len="));
+        assert!(!rendered.contains("smtp.example.com"));
+        assert!(!rendered.contains("hunter2"));
+        assert!(!rendered.contains("mg-private-key"));
+        assert!(!rendered.contains("csrf-private"));
+        assert!(!rendered.contains("hidden-state"));
+        assert!(!rendered.contains("PRIVATE-NEWSLETTER-SENTINEL"));
+    }
+
+    #[test]
+    fn settings_inventory_warns_when_allowed_tab_has_no_controls() {
+        let server = spawn_settings_inventory_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let report = client
+            .settings_inventory(&SettingsInventoryRequest {
+                include_cron: false,
+                include_empty: false,
+                include_hidden: false,
+                max_fields_per_section: 50,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.ok);
+        assert_eq!(report.sections.len(), 3);
+        assert!(report.warnings.iter().any(|warning| {
+            warning == "settings inventory section application returned no form controls"
+        }));
+        assert!(report.warnings.iter().any(|warning| {
+            warning == "settings inventory section bounce returned no form controls"
+        }));
+        assert!(report.sections.iter().any(|section| {
+            section.name == "email"
+                && section.returned_field_count == 1
+                && section.omitted_field_count == 1
+        }));
+        assert!(server
+            .requests()
+            .iter()
+            .all(|request| !request.contains("Page=Settings&Action=Save")));
+    }
+
+    #[test]
+    fn settings_inventory_summarizes_hidden_values_when_included() {
+        let html = r#"
+            <form>
+              <input name="form_state" type="hidden" value="opaque-session-nonce">
+            </form>
+        "#;
+
+        let section = parse_settings_inventory_section("application", html, false, true, 50)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let rendered = format!("{section:?}");
+
+        assert_eq!(section.returned_field_count, 1);
+        assert_eq!(section.omitted_field_count, 0);
+        assert!(rendered.contains("form_state"));
+        assert!(rendered.contains("[hidden len="));
+        assert!(!rendered.contains("opaque-session-nonce"));
+    }
+
+    #[test]
+    fn settings_inventory_caps_omitted_fields_as_returned_entries() {
+        let html = r#"
+            <form>
+              <input name="visible_setting" value="enabled">
+              <input name="hidden_one" type="hidden" value="one">
+              <input name="hidden_two" type="hidden" value="two">
+              <input name="hidden_three" type="hidden" value="three">
+              <input name="hidden_four" type="hidden" value="four">
+            </form>
+        "#;
+
+        let section = parse_settings_inventory_section("application", html, false, false, 3)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(section.capped);
+        assert_eq!(section.total_control_count, 5);
+        assert_eq!(section.returned_field_count, 1);
+        assert_eq!(section.omitted_field_count, 4);
+        assert_eq!(section.fields.len() + section.omitted_fields.len(), 3);
+    }
+
+    #[test]
     fn user_smtp_summary_redacts_user_identity_and_smtp_username() {
         let html = r#"
             <form>
@@ -2949,6 +3307,64 @@ mod tests {
         }
     }
 
+    fn spawn_settings_inventory_fixture_server() -> TestAdminServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 8192];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("test request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while push: {err}")
+                            })
+                            .push(request.clone());
+                        write_settings_inventory_fixture_response(&mut stream, &request);
+                        if thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while count: {err}")
+                            })
+                            .len()
+                            >= 5
+                        {
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("test server accept failed: {err}"),
+                }
+            }
+        });
+
+        TestAdminServer {
+            base_url: format!("http://{address}/admin/"),
+            requests,
+            handle: Some(handle),
+        }
+    }
+
     fn spawn_campaign_step2_fixture_server() -> TestAdminServer {
         let listener =
             TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
@@ -3232,6 +3648,37 @@ mod tests {
                 <input name="smtp_server" value="smtp.example.test">
                 <input name="smtp_u" value="smtp-user">
               </form>"#
+        } else {
+            "<html><body>unexpected request</body></html>"
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .unwrap_or_else(|err| panic!("test response write failed: {err}"));
+    }
+
+    fn write_settings_inventory_fixture_response(stream: &mut std::net::TcpStream, request: &str) {
+        let body = if request.starts_with("GET /admin/index.php?Page=Login&Action=Login ") {
+            r#"<form method="post" action="index.php?Page=Login&Action=Login">
+                <input type="hidden" name="csrf_token" value="fixture-csrf">
+                <input name="ss_username">
+                <input name="ss_password">
+              </form>"#
+        } else if request.starts_with("POST /admin/index.php?Page=Login&Action=Login ") {
+            "<html><body>logged in</body></html>"
+        } else if request.starts_with("GET /admin/index.php?Page=Settings&Tab=2 ") {
+            r#"<form>
+                <input name="smtp_server" value="smtp.example.test">
+                <input name="smtp_password" type="password" value="private">
+              </form>"#
+        } else if request.starts_with("GET /admin/index.php?Page=Settings&Tab=1 ")
+            || request.starts_with("GET /admin/index.php?Page=Settings&Tab=7 ")
+        {
+            "<html><body>Settings page without a form</body></html>"
         } else {
             "<html><body>unexpected request</body></html>"
         };

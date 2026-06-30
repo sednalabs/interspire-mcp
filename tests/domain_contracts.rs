@@ -16,11 +16,11 @@ use interspire_mcp::{
     QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
     SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus, SendWizardReadbackReport,
     SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
-    SettingsAuditReport, SettingsAuditRequest, SettingsUpdateApplyRequest,
-    SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
-    UserSmtpReadbackRequest, UserUpdateApplyRequest, UserUpdatePreviewRequest,
-    WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, XmlAuthProbeReport,
-    XmlAuthProbeRequest, DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
+    SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
+    SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
+    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
+    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
+    XmlAuthProbeReport, XmlAuthProbeRequest, DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
 };
 use mcp_toolkit_testing::response_safety_contract::{
     assert_json_bool_field_false, assert_payload_excludes_substrings,
@@ -68,6 +68,13 @@ impl InterspireReadBackend for ContractBackend {
         _request: &SettingsAuditRequest,
     ) -> Result<SettingsAuditReport, InterspireError> {
         Ok(SettingsAuditReport::fixture())
+    }
+
+    fn settings_inventory(
+        &self,
+        _request: &SettingsInventoryRequest,
+    ) -> Result<SettingsInventoryReport, InterspireError> {
+        Ok(SettingsInventoryReport::fixture())
     }
 
     fn admin_session_probe(
@@ -425,6 +432,9 @@ fn status_contract_is_redacted_and_read_only() {
         .contains(&"interspire_sensitive_field_query".to_string()));
     assert!(report
         .capabilities
+        .contains(&"interspire_settings_inventory".to_string()));
+    assert!(report
+        .capabilities
         .contains(&"interspire_admin_session_probe".to_string()));
     assert!(report
         .capabilities
@@ -590,6 +600,28 @@ fn settings_audit_contract_redacts_secret_and_host_context() {
     assert!(report.ok);
     assert!(!body.contains("smtp.example.com"));
     assert!(!body.contains("secret"));
+    assert!(body.contains("[redacted-host]"));
+}
+
+#[test]
+fn settings_inventory_contract_reports_omissions_without_secret_values() {
+    let report = ContractBackend
+        .settings_inventory(&SettingsInventoryRequest {
+            include_cron: true,
+            include_empty: false,
+            include_hidden: false,
+            max_fields_per_section: 200,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+    let body = serde_json::to_string(&report).unwrap_or_else(|err| panic!("{err}"));
+
+    assert!(report.ok);
+    assert_eq!(report.sections[0].returned_field_count, 2);
+    assert_eq!(report.sections[0].omitted_field_count, 1);
+    assert!(body.contains("smtp_password"));
+    assert!(body.contains("secret-shaped field omitted"));
+    assert!(!body.contains("hunter2"));
+    assert!(!body.contains("smtp.example.com"));
     assert!(body.contains("[redacted-host]"));
 }
 
@@ -877,7 +909,7 @@ fn production_send_apply_contract_requires_explicit_authorization_and_redacts() 
 fn server_can_be_constructed_with_fixture_backend() {
     let server = InterspireMcpServer::with_backend(Arc::new(ContractBackend))
         .unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(server.tool_schema_snapshot().len(), 41);
+    assert_eq!(server.tool_schema_snapshot().len(), 42);
 }
 
 #[test]

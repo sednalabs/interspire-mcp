@@ -7,9 +7,9 @@ use crate::{
         blocked_operations, CampaignReadbackReport, CampaignReadbackRequest, ContactStateReport,
         ContactStateRequest, Evidence, ListOwnerReadbackReport, ListOwnerReadbackRequest,
         ListSummaryReport, ListSummaryRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
-        SettingsAuditReport, SettingsAuditRequest, StatusReport, StatusRequest,
-        UserSmtpReadbackReport, UserSmtpReadbackRequest, DEFAULT_LIST_READ_LIMIT,
-        HARD_LIST_READ_LIMIT,
+        SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport,
+        SettingsInventoryRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
+        UserSmtpReadbackRequest, DEFAULT_LIST_READ_LIMIT, HARD_LIST_READ_LIMIT,
     },
     xml_api,
 };
@@ -103,6 +103,7 @@ impl LiveInterspireBackend {
                 "interspire_contact_state".to_string(),
                 "interspire_list_owner_readback".to_string(),
                 "interspire_settings_audit".to_string(),
+                "interspire_settings_inventory".to_string(),
                 "interspire_admin_session_probe".to_string(),
                 "interspire_user_smtp_readback".to_string(),
                 "interspire_queue_stats_readback".to_string(),
@@ -451,6 +452,30 @@ impl LiveInterspireBackend {
         }
 
         html.settings_audit(request.include_cron)
+    }
+
+    pub(super) fn settings_inventory_impl(
+        &self,
+        request: &SettingsInventoryRequest,
+    ) -> Result<SettingsInventoryReport, InterspireError> {
+        let html = self.html_client()?;
+        if !html.configured() {
+            return Ok(SettingsInventoryReport {
+                ok: true,
+                configured: false,
+                sections: Vec::new(),
+                warnings: vec![
+                    "admin HTML fallback is not configured; no settings inventory read attempted"
+                        .to_string(),
+                ],
+                evidence: Evidence {
+                    source: "interspire_admin_html".to_string(),
+                    notes: vec!["no request sent".to_string()],
+                },
+            });
+        }
+
+        html.settings_inventory(request)
     }
 
     pub(super) fn user_smtp_readback_impl(

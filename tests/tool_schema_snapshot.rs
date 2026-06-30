@@ -15,11 +15,11 @@ use interspire_mcp::{
     QueueStatsReadbackReport, QueueStatsReadbackRequest, SeedReadinessGateReport,
     SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest, SendWizardReadbackReport,
     SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
-    SettingsAuditReport, SettingsAuditRequest, SettingsUpdateApplyRequest,
-    SettingsUpdatePreviewRequest, StatusReport, StatusRequest, UserSmtpReadbackReport,
-    UserSmtpReadbackRequest, UserUpdateApplyRequest, UserUpdatePreviewRequest,
-    WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest, XmlAuthProbeReport,
-    XmlAuthProbeRequest,
+    SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
+    SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
+    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
+    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
+    XmlAuthProbeReport, XmlAuthProbeRequest,
 };
 use mcp_toolkit_testing::assert_tool_schema_snapshot;
 use std::{path::PathBuf, sync::Arc};
@@ -65,6 +65,13 @@ impl InterspireReadBackend for FixtureBackend {
         _request: &SettingsAuditRequest,
     ) -> Result<SettingsAuditReport, InterspireError> {
         Ok(SettingsAuditReport::fixture())
+    }
+
+    fn settings_inventory(
+        &self,
+        _request: &SettingsInventoryRequest,
+    ) -> Result<SettingsInventoryReport, InterspireError> {
+        Ok(SettingsInventoryReport::fixture())
     }
 
     fn admin_session_probe(
