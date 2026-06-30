@@ -1293,10 +1293,15 @@ struct SubscriberExactSearchParse {
 fn subscriber_exact_search_paths(list_id: u64, email: &str) -> Vec<String> {
     let email = url::form_urlencoded::byte_serialize(email.trim().as_bytes()).collect::<String>();
     vec![
-        format!("index.php?Page=Subscribers&Action=Manage&Lists={list_id}&Search={email}"),
-        format!("index.php?Page=Subscribers&Action=Manage&Lists%5B%5D={list_id}&Search={email}"),
-        format!("index.php?Page=Subscribers&Action=Manage&List={list_id}&Search={email}"),
-        format!("index.php?Page=Subscribers&Action=Manage&listid={list_id}&Email={email}"),
+        format!(
+            "index.php?Page=Subscribers&Action=Manage&Lists%5B%5D={list_id}&emailaddress={email}&search_rule=exact"
+        ),
+        format!(
+            "index.php?Page=Subscribers&Action=Manage&List={list_id}&emailaddress={email}&search_rule=exact"
+        ),
+        format!(
+            "index.php?Page=Subscribers&Action=Manage&Lists={list_id}&emailaddress={email}&search_rule=exact"
+        ),
     ]
 }
 
@@ -2326,7 +2331,7 @@ mod tests {
         assert!(!rendered.contains("person@example.test"));
         assert!(server.requests().iter().any(|request| {
             request.starts_with(
-                "GET /admin/index.php?Page=Subscribers&Action=Manage&Lists=7&Search=person%40example.test ",
+                "GET /admin/index.php?Page=Subscribers&Action=Manage&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
             )
         }));
     }
@@ -2803,7 +2808,7 @@ mod tests {
         let body = if request.starts_with("GET /admin/index.php?Page=Lists ") {
             "<html><body><a href=\"index.php?Page=Lists&Action=Edit&id=7\">List</a></body></html>"
         } else if request.starts_with(
-            "GET /admin/index.php?Page=Subscribers&Action=Manage&Lists=7&Search=person%40example.test ",
+            "GET /admin/index.php?Page=Subscribers&Action=Manage&Lists%5B%5D=7&emailaddress=person%40example.test&search_rule=exact ",
         ) {
             r#"<table>
                 <tr><th>Email</th><th>Status</th><th>Action</th></tr>

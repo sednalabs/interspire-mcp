@@ -101,6 +101,15 @@ important operational state:
 - Send wizard proof state for selected campaign/list readiness, with the final
   editable form parsed but not submitted by proof tools.
 
+Interspire 8 compatibility note: subscriber XML methods have two layers of
+parameter semantics. The XML security layer checks a top-level `listid`, while
+some underlying subscriber APIs still accept legacy method parameters such as
+`listids` or nested `searchinfo`. Curated XML reads include both forms only
+where required so ownership checks and legacy method invocation agree. The
+admin contact-state fallback likewise uses Interspire 8's `emailaddress` plus
+`search_rule=exact` search parameters, with route safety blocking broad search
+rules.
+
 Admin HTML access is therefore route-shaped, not browser-shaped. The backend
 does not expose a general fetch tool, a click tool, arbitrary query strings, or
 raw upstream pages. Parsers extract only the reviewed state required for the

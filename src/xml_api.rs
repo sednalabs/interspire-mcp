@@ -63,8 +63,9 @@ impl XmlApiClient {
         list_id: u64,
     ) -> Result<bool, InterspireError> {
         let details = format!(
-            "<emailaddress>{}</emailaddress><listids>{}</listids>",
+            "<emailaddress>{}</emailaddress><listid>{}</listid><listids>{}</listids>",
             escape_xml(email),
+            list_id,
             list_id
         );
         let xml = self.request_xml("subscribers", "IsSubscriberOnList", &details)?;
@@ -379,7 +380,7 @@ fn build_xml_request(
 
 fn subscriber_search_details(list_id: u64, email_query: &str) -> String {
     format!(
-        "<searchinfo><List>{list_id}</List><Status>a</Status><Confirmed>1</Confirmed><Email>{}</Email></searchinfo>",
+        "<listid>{list_id}</listid><searchinfo><List>{list_id}</List><Status>a</Status><Confirmed>1</Confirmed><Email>{}</Email></searchinfo>",
         escape_xml(email_query)
     )
 }
@@ -601,7 +602,8 @@ mod tests {
 
     #[test]
     fn provided_details_are_preserved() {
-        let details = "<emailaddress>a@example.test</emailaddress><listids>7</listids>";
+        let details =
+            "<emailaddress>a@example.test</emailaddress><listid>7</listid><listids>7</listids>";
         let xml = build_xml_request(
             "admin",
             "token",
@@ -615,6 +617,7 @@ mod tests {
     #[test]
     fn subscriber_search_details_request_active_confirmed_rows() {
         let details = subscriber_search_details(72, "@example.test");
+        assert!(details.contains("<listid>72</listid>"));
         assert!(details.contains("<List>72</List>"));
         assert!(details.contains("<Status>a</Status>"));
         assert!(details.contains("<Confirmed>1</Confirmed>"));
