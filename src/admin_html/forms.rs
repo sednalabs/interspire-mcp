@@ -816,10 +816,16 @@ impl FormSnapshot {
             .controls
             .iter()
             .find(|control| control.lower_name == lower_name)?;
-        Some((
-            control.kind.as_str().to_string(),
-            summarize_field_value(lower_name, &control.value),
-        ))
+        let value = if matches!(control.kind, FormControlKind::Checkbox) {
+            if control.checked {
+                "[checked]".to_string()
+            } else {
+                "[unchecked]".to_string()
+            }
+        } else {
+            summarize_field_value(lower_name, &control.value)
+        };
+        Some((control.kind.as_str().to_string(), value))
     }
 
     fn raw_field_value(&self, lower_name: &str) -> Option<&str> {
@@ -1331,6 +1337,8 @@ pub(super) fn should_replay_hidden_control(control: &FormControl) -> bool {
             | "page"
             | "action"
             | "tab"
+            | "tab_num"
+            | "tabnum"
             | "currenttab"
             | "id"
             | "userid"
@@ -1360,6 +1368,20 @@ mod tests {
                 kind: FormControlKind::Text,
                 value: value.to_string(),
                 checked: true,
+            }],
+        }
+    }
+
+    fn checkbox_snapshot(name: &str, value: &str, checked: bool) -> FormSnapshot {
+        FormSnapshot {
+            action_url: Url::parse("https://example.test/admin/index.php")
+                .unwrap_or_else(|err| panic!("{err}")),
+            controls: vec![FormControl {
+                original_name: name.to_string(),
+                lower_name: name.to_ascii_lowercase(),
+                kind: FormControlKind::Checkbox,
+                value: value.to_string(),
+                checked,
             }],
         }
     }
@@ -1396,9 +1418,9 @@ mod tests {
         let target = GuardedFormTarget::Settings {
             section: SettingsSectionName::Cron,
         };
-        let mut snapshot = text_snapshot("cron_enabled", "0");
-        let changes = apply_requested_updates(
-            &mut snapshot,
+        let mut value_only_checkbox = checkbox_snapshot("cron_enabled", "1", false);
+        let err = apply_requested_updates(
+            &mut value_only_checkbox,
             target.allowed_fields(),
             &[FormFieldUpdate {
                 name: "cron_enabled".to_string(),
@@ -1406,10 +1428,34 @@ mod tests {
                 checked: None,
             }],
         )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("use checked instead of value"));
+
+        let mut snapshot = checkbox_snapshot("cron_enabled", "1", false);
+        let (_, current_value) = snapshot
+            .current_field_summary("cron_enabled")
+            .unwrap_or_else(|| panic!("cron_enabled should be present"));
+        assert_eq!(current_value, "[unchecked]");
+
+        let changes = apply_requested_updates(
+            &mut snapshot,
+            target.allowed_fields(),
+            &[FormFieldUpdate {
+                name: "cron_enabled".to_string(),
+                value: None,
+                checked: Some(true),
+            }],
+        )
         .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(changes.len(), 1);
-        assert_eq!(snapshot.raw_field_value("cron_enabled"), Some("1"));
+        assert_eq!(changes[0].current_value.as_deref(), Some("[unchecked]"));
+        assert_eq!(changes[0].requested_value.as_deref(), Some("1"));
+        assert!(snapshot
+            .controls
+            .iter()
+            .any(|control| control.lower_name == "cron_enabled" && control.checked));
 
         let mut wrong_section = text_snapshot("maxhourlyrate", "1000");
         let err = apply_requested_updates(
@@ -1534,6 +1580,13 @@ mod tests {
                     checked: true,
                 },
                 FormControl {
+                    original_name: "tab_num".to_string(),
+                    lower_name: "tab_num".to_string(),
+                    kind: FormControlKind::Hidden,
+                    value: "4".to_string(),
+                    checked: true,
+                },
+                FormControl {
                     original_name: "dangerous_hidden_flag".to_string(),
                     lower_name: "dangerous_hidden_flag".to_string(),
                     kind: FormControlKind::Hidden,
@@ -1571,6 +1624,9 @@ mod tests {
         assert!(pairs
             .iter()
             .any(|(name, value)| name == "total_webhooks" && value == "1"));
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| name == "tab_num" && value == "4"));
         assert!(!pairs
             .iter()
             .any(|(name, _)| name == "dangerous_hidden_flag"));
