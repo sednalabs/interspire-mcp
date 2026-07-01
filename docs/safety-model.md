@@ -256,17 +256,18 @@ guarded writes:
 - When `INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1`, both guarded send apply tools
   also require `oci_ledger_preflight` to match the expected campaign/batch row
   count in the configured private OCI send ledger before the final send form is
-  posted. The preflight `campaign_id` must equal the Interspire campaign id in
-  the send request. The ledger path is environment-configured only; tool callers
-  cannot supply arbitrary file paths.
+  posted. Matched rows must include recipient keys, trace keys, and valid UTC
+  `submitted_at`/timestamp values. The preflight `campaign_id` must equal the
+  Interspire campaign id in the send request. The ledger path is
+  environment-configured only; tool callers cannot supply arbitrary file paths.
 - `interspire_oci_send_ledger_prepare_preview` and
   `interspire_oci_send_ledger_prepare_apply` can prepare that private ledger
   from a private JSONL manifest. Preview computes sanitized rows and a plan id
   without writing. Apply requires guarded writes, send controls, the exact plan
   id, and `acknowledge_ledger_write=true`, then writes only hashed recipient and
-  trace values and reruns preflight. The prepare tools do not contact OCI and do
-  not perform an Interspire send, schedule, queue, import, contact, list, or
-  suppression mutation.
+  trace values with an apply-time UTC `submitted_at` and reruns preflight. The
+  prepare tools do not contact OCI and do not perform an Interspire send,
+  schedule, queue, import, contact, list, or suppression mutation.
 - OCI ledger preparation and preflight reject non-private Unix permissions on
   the ledger directory, manifest file, and existing ledger file because the
   manifest can contain raw recipient or provider trace identifiers before the
@@ -285,7 +286,8 @@ enabled.
 
 OCI ledger preparation and preflight are not delivery proof. They prove only
 that a private local send ledger can contain, and does contain, the expected
-Interspire campaign/batch rows before the Interspire final send boundary.
+Interspire campaign/batch rows, timestamped when the ledger apply occurred,
+before the Interspire final send boundary.
 Provider acceptance, bounces, complaints, suppression reconciliation, and
 recipient rendering still require OCI and recipient-side readback after an
 explicitly approved send.

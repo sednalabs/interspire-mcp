@@ -447,7 +447,8 @@ posting the final send form captured from the live Interspire page.
 - when `INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1`, an `oci_ledger_preflight`
   object whose `campaign_id` matches the Interspire campaign being sent and
   whose batch id, sender domain, and expected row count match rows already
-  present in the configured private OCI send ledger.
+  present in the configured private OCI send ledger, including valid UTC
+  `submitted_at`/timestamp values on matched rows.
 
 `interspire_oci_send_ledger_prepare_preview` and
 `interspire_oci_send_ledger_prepare_apply` can prepare those private ledger
@@ -455,8 +456,8 @@ rows before a guarded send request. Preview reads a private JSONL manifest from
 the configured ledger directory and returns a plan id without writing. Apply
 requires `INTERSPIRE_GUARDED_WRITES=1`, `INTERSPIRE_SEND_CONTROLS=1`, the exact
 plan id, and `acknowledge_ledger_write=true`, then writes only sanitized ledger
-rows and reruns the same preflight gate. The prepare tools do not contact OCI
-and do not perform an Interspire send.
+rows with an apply-time UTC `submitted_at` and reruns the same preflight gate.
+The prepare tools do not contact OCI and do not perform an Interspire send.
 
 `interspire_production_send_apply` is the full-send boundary. It requires:
 

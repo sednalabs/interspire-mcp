@@ -90,8 +90,9 @@ Current public behavior:
 - `INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1` makes both guarded send apply tools
   refuse before the final Interspire send form unless `oci_ledger_preflight`
   verifies the expected Interspire campaign/batch row count in the configured
-  private ledger. The preflight `campaign_id` must equal the Interspire
-  `campaign_id` in the send request.
+  private ledger, with recipient keys, trace keys, and valid UTC
+  `submitted_at`/timestamp values on each matched row. The preflight
+  `campaign_id` must equal the Interspire `campaign_id` in the send request.
 - `INTERSPIRE_OCI_SEND_LEDGER_PATH` is the only ledger file path source. Send
   requests cannot provide a per-call file path.
 - `INTERSPIRE_CONTACT_WRITE_CONTROLS` is reserved for later phases and should
@@ -118,6 +119,8 @@ The prepare tools:
   be private on Unix, with no group/other permissions;
 - hash raw recipient, message, correlation, and header values before writing
   ledger rows;
+- stamp appended rows with an apply-time UTC `submitted_at` value so monitoring
+  tools can bind the ledger evidence to an explicit send window;
 - return only hashes, counts, plan state, and preflight proof;
 - never contact OCI and never perform an Interspire send, schedule, queue,
   import, contact, list, or suppression mutation.
@@ -135,8 +138,10 @@ prepare tool can hash them before writing.
 Preview computes a deterministic `plan_id`. Apply requires the same manifest,
 `expected_plan_id`, `acknowledge_ledger_write=true`,
 `INTERSPIRE_GUARDED_WRITES=1`, and `INTERSPIRE_SEND_CONTROLS=1`. Apply appends
-sanitized rows only when the current ledger does not already verify and does not
-contain partial matching rows for the same campaign and batch.
+sanitized timestamped rows only when the current ledger does not already verify
+and does not contain partial matching rows for the same campaign and batch. Old
+matching rows without a valid UTC `submitted_at`/timestamp are treated as
+unverified and must be quarantined or regenerated before send readiness.
 
 ## Import Preflight
 
