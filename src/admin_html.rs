@@ -8,6 +8,7 @@
 mod forms;
 mod proof;
 mod scaffold;
+mod send_ops;
 
 use crate::{
     config::{AdminHtmlConfig, InterspireVersion, WriteExecutionMode},
@@ -1424,6 +1425,7 @@ fn sensitive_allowed_fields(target: &SensitiveFieldTarget) -> &'static [&'static
                 "bounce_agreedeleteall",
             ],
             SettingsSectionName::Cron => &[
+                "cron_enabled",
                 "cron_send",
                 "cron_bounce",
                 "cron_autoresponder",
@@ -1654,6 +1656,7 @@ pub fn parse_settings_fields(
             "bounce_agreedeleteall",
         ][..],
         "cron" => &[
+            "cron_enabled",
             "cron_send",
             "cron_bounce",
             "cron_autoresponder",

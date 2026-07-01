@@ -53,7 +53,7 @@ request/response profile is maintained in
 | `lib.rs` | MCP server, tool inventory, trait boundary, tool handlers. |
 | `config.rs` | Environment and secret-file configuration without exposing values. |
 | `live.rs` | Thin backend root that keeps the trait surface stable while delegating to domain modules. |
-| `live/reads.rs` | Read-only backend handlers for status, list/contact readback, settings, queue stats, and campaign readback. |
+| `live/reads.rs` | Read-only backend handlers for status, list/contact readback, settings, queue stats, send-job status, cron readiness, stop-gate readiness, and campaign readback. |
 | `live/guarded.rs` | Guarded queue-control and form-write preview/apply handlers. |
 | `live/scaffold.rs` | Guarded list/campaign scaffold handlers plus aggregate CSV import preflight. |
 | `live/send.rs` | Guarded seed and production send apply handlers. |
@@ -61,6 +61,7 @@ request/response profile is maintained in
 | `live/support.rs` | Shared list caps, source-list filtering, and local helper utilities for the live backend. |
 | `xml_api.rs` | Interspire XML API reads and XML parsing. |
 | `admin_html.rs` | Authenticated admin HTML reads, queue-control extraction, and redacted parsing helpers. |
+| `admin_html/send_ops.rs` | Structured send-job status, cron readiness, and stop-gate decision parsing over allowlisted Schedule/Stats/Settings reads. |
 | `admin_html/forms.rs` | Guarded form snapshotting, allowlisted field updates, preview/apply plan binding, list-create apply, and field-scoped POST construction. |
 | `admin_html/scaffold.rs` | Campaign-copy route discovery and before/after draft detection. |
 | `admin_html/proof.rs` | No-mutation admin proof reads plus guarded final-send form capture for admin reachability, campaign body audit, render artifacts, Send wizard readback, seed-readiness gates, seed sends, and production sends. |
@@ -77,6 +78,7 @@ request/response profile is maintained in
 | `response/seed_send.rs` | Guarded seed-send apply request and report contracts. |
 | `response/production_send.rs` | Guarded production-send apply request and report contracts. |
 | `response/send_outcome.rs` | Shared post-send reconciliation status and aggregate proof contracts. |
+| `response/send_ops.rs` | Structured send-job status, cron-readiness, stop-gate, action-plan, and queued-follow-up contracts. |
 | `response/forms.rs` | Guarded campaign/list/user/settings write request and report contracts. |
 | `response/scaffold.rs` | List-create, campaign-copy, and CSV preflight request/report contracts. |
 | `response/audience.rs` | Warm-up readiness and audience-hygiene request/report contracts. |

@@ -26,15 +26,17 @@ use crate::{
         CampaignRenderArtifactRequest, CampaignTestSendApplyReport, CampaignTestSendApplyRequest,
         CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest, CampaignUpdateApplyRequest,
         CampaignUpdatePreviewRequest, ContactImportPreflightReport, ContactImportPreflightRequest,
-        ContactStateReport, ContactStateRequest, GuardedWriteApplyReport,
-        GuardedWritePreviewReport, ListCreateApplyRequest, ListCreatePreviewRequest,
-        ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest,
-        ListUpdateApplyRequest, ListUpdatePreviewRequest, OciSendLedgerPrepareApplyRequest,
-        OciSendLedgerPreparePreviewRequest, OciSendLedgerPrepareReport, ProductionSendApplyReport,
-        ProductionSendApplyRequest, QueueControlApplyReport, QueueControlApplyRequest,
-        QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
-        QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
-        SeedSendApplyReport, SeedSendApplyRequest, SendWizardReadbackReport,
+        ContactStateReport, ContactStateRequest, CronReadinessReport, CronReadinessRequest,
+        GuardedWriteApplyReport, GuardedWritePreviewReport, ListCreateApplyRequest,
+        ListCreatePreviewRequest, ListOwnerReadbackReport, ListOwnerReadbackRequest,
+        ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
+        OciSendLedgerPrepareApplyRequest, OciSendLedgerPreparePreviewRequest,
+        OciSendLedgerPrepareReport, ProductionSendApplyReport, ProductionSendApplyRequest,
+        QueueControlApplyReport, QueueControlApplyRequest, QueueControlPreviewReport,
+        QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
+        SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport,
+        SeedSendApplyRequest, SendJobStatusReadbackReport, SendJobStatusReadbackRequest,
+        SendStopGateReadinessReport, SendStopGateReadinessRequest, SendWizardReadbackReport,
         SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
         SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport,
         SettingsInventoryRequest, SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest,
@@ -146,6 +148,27 @@ impl InterspireReadBackend for LiveInterspireBackend {
         request: &QueueControlApplyRequest,
     ) -> Result<QueueControlApplyReport, InterspireError> {
         self.queue_control_apply_impl(request)
+    }
+
+    fn send_job_status_readback(
+        &self,
+        request: &SendJobStatusReadbackRequest,
+    ) -> Result<SendJobStatusReadbackReport, InterspireError> {
+        self.send_job_status_readback_impl(request)
+    }
+
+    fn cron_readiness(
+        &self,
+        request: &CronReadinessRequest,
+    ) -> Result<CronReadinessReport, InterspireError> {
+        self.cron_readiness_impl(request)
+    }
+
+    fn send_stop_gate_readiness(
+        &self,
+        request: &SendStopGateReadinessRequest,
+    ) -> Result<SendStopGateReadinessReport, InterspireError> {
+        self.send_stop_gate_readiness_impl(request)
     }
 
     fn campaign_readback(

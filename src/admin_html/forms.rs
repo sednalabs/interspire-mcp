@@ -218,7 +218,8 @@ const SETTINGS_BOUNCE_FIELDS: [&str; 7] = [
     "bounce_agreedeleteall",
 ];
 
-const SETTINGS_CRON_FIELDS: [&str; 5] = [
+const SETTINGS_CRON_FIELDS: [&str; 6] = [
+    "cron_enabled",
     "cron_send",
     "cron_bounce",
     "cron_autoresponder",
@@ -1388,6 +1389,42 @@ mod tests {
         assert!(err
             .to_string()
             .contains("did not change any persisted form values"));
+    }
+
+    #[test]
+    fn cron_settings_updates_use_guarded_cron_allowlist() {
+        let target = GuardedFormTarget::Settings {
+            section: SettingsSectionName::Cron,
+        };
+        let mut snapshot = text_snapshot("cron_enabled", "0");
+        let changes = apply_requested_updates(
+            &mut snapshot,
+            target.allowed_fields(),
+            &[FormFieldUpdate {
+                name: "cron_enabled".to_string(),
+                value: Some("1".to_string()),
+                checked: None,
+            }],
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(snapshot.raw_field_value("cron_enabled"), Some("1"));
+
+        let mut wrong_section = text_snapshot("maxhourlyrate", "1000");
+        let err = apply_requested_updates(
+            &mut wrong_section,
+            target.allowed_fields(),
+            &[FormFieldUpdate {
+                name: "maxhourlyrate".to_string(),
+                value: Some("1100".to_string()),
+                checked: None,
+            }],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("outside the guarded allowlist"));
     }
 
     #[test]

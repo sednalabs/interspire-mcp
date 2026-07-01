@@ -5,11 +5,13 @@ use crate::{
     redact,
     response::{
         blocked_operations, default_status_capabilities, CampaignReadbackReport,
-        CampaignReadbackRequest, ContactStateReport, ContactStateRequest, Evidence,
-        ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest,
-        QueueStatsReadbackReport, QueueStatsReadbackRequest, SettingsAuditReport,
-        SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest, StatusReport,
-        StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest, DEFAULT_LIST_READ_LIMIT,
+        CampaignReadbackRequest, ContactStateReport, ContactStateRequest, CronReadinessReport,
+        CronReadinessRequest, Evidence, ListOwnerReadbackReport, ListOwnerReadbackRequest,
+        ListSummaryReport, ListSummaryRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
+        SendJobStatusReadbackReport, SendJobStatusReadbackRequest, SendStopGateReadinessReport,
+        SendStopGateReadinessRequest, SettingsAuditReport, SettingsAuditRequest,
+        SettingsInventoryReport, SettingsInventoryRequest, StatusReport, StatusRequest,
+        UserSmtpReadbackReport, UserSmtpReadbackRequest, DEFAULT_LIST_READ_LIMIT,
         HARD_LIST_READ_LIMIT,
     },
     xml_api,
@@ -542,6 +544,33 @@ impl LiveInterspireBackend {
         }
 
         html.queue_stats_readback(cap_usize(request.max_rows.unwrap_or(25), 100))
+    }
+
+    pub(super) fn send_job_status_readback_impl(
+        &self,
+        request: &SendJobStatusReadbackRequest,
+    ) -> Result<SendJobStatusReadbackReport, InterspireError> {
+        let html = self.html_client()?;
+        html.send_job_status_readback(request)
+    }
+
+    pub(super) fn cron_readiness_impl(
+        &self,
+        request: &CronReadinessRequest,
+    ) -> Result<CronReadinessReport, InterspireError> {
+        let html = self.html_client()?;
+        html.cron_readiness(
+            request.include_settings_inventory,
+            cap_usize(request.max_fields_per_section.unwrap_or(200), 500),
+        )
+    }
+
+    pub(super) fn send_stop_gate_readiness_impl(
+        &self,
+        request: &SendStopGateReadinessRequest,
+    ) -> Result<SendStopGateReadinessReport, InterspireError> {
+        let html = self.html_client()?;
+        html.send_stop_gate_readiness(request, &self.config.oci_send_ledger)
     }
 
     pub(super) fn campaign_readback_impl(

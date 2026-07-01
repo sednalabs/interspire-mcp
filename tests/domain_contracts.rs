@@ -7,19 +7,20 @@ use interspire_mcp::{
     CampaignRenderArtifactReport, CampaignRenderArtifactRequest, CampaignTestSendApplyReport,
     CampaignTestSendApplyRequest, CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest,
     CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactImportPreflightReport,
-    ContactImportPreflightRequest, ContactStateReport, ContactStateRequest, Evidence,
-    GuardedWriteApplyReport, GuardedWritePreviewReport, InterspireError, InterspireMcpServer,
-    InterspireReadBackend, ListCreateApplyRequest, ListCreatePreviewRequest,
-    ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary, ListSummaryReport,
-    ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
+    ContactImportPreflightRequest, ContactStateReport, ContactStateRequest, CronReadinessReport,
+    CronReadinessRequest, Evidence, GuardedWriteApplyReport, GuardedWritePreviewReport,
+    InterspireError, InterspireMcpServer, InterspireReadBackend, ListCreateApplyRequest,
+    ListCreatePreviewRequest, ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary,
+    ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
     OciSendLedgerPrepareApplyRequest, OciSendLedgerPreparePreviewRequest,
     OciSendLedgerPrepareReport, ProductionSendApplyReport, ProductionSendApplyRequest,
     QueueControlApplyReport, QueueControlApplyRequest, QueueControlPreviewReport,
     QueueControlPreviewRequest, QueueStatsReadbackReport, QueueStatsReadbackRequest,
     SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest,
-    SendApplyStatus, SendWizardReadbackReport, SendWizardReadbackRequest,
-    SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SettingsAuditReport,
-    SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
+    SendApplyStatus, SendJobStatusReadbackReport, SendJobStatusReadbackRequest,
+    SendStopGateReadinessReport, SendStopGateReadinessRequest, SendWizardReadbackReport,
+    SendWizardReadbackRequest, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
+    SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
     SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
     UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
     UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
@@ -113,6 +114,27 @@ impl InterspireReadBackend for ContractBackend {
         _request: &QueueControlApplyRequest,
     ) -> Result<QueueControlApplyReport, InterspireError> {
         Ok(QueueControlApplyReport::fixture())
+    }
+
+    fn send_job_status_readback(
+        &self,
+        _request: &SendJobStatusReadbackRequest,
+    ) -> Result<SendJobStatusReadbackReport, InterspireError> {
+        Ok(SendJobStatusReadbackReport::fixture())
+    }
+
+    fn cron_readiness(
+        &self,
+        _request: &CronReadinessRequest,
+    ) -> Result<CronReadinessReport, InterspireError> {
+        Ok(CronReadinessReport::fixture())
+    }
+
+    fn send_stop_gate_readiness(
+        &self,
+        _request: &SendStopGateReadinessRequest,
+    ) -> Result<SendStopGateReadinessReport, InterspireError> {
+        Ok(SendStopGateReadinessReport::fixture())
     }
 
     fn campaign_readback(
@@ -771,6 +793,67 @@ fn queue_control_apply_contract_does_not_mutate_lists_or_authorize_send() {
 }
 
 #[test]
+fn send_job_status_readback_contract_is_structured_and_redacted() {
+    let report = ContractBackend
+        .send_job_status_readback(&SendJobStatusReadbackRequest {
+            expected_job_id: 13,
+            expected_campaign_id: Some(2),
+            expected_list_ids: vec![12],
+            expected_queue_total: Some(100),
+            expected_body_sha256: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
+            max_rows: Some(25),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    assert!(report.ok);
+    assert!(report.identity_verified);
+    assert_eq!(report.queue_counters.total, Some(100));
+    assert_eq!(report.queue_counters.processed, Some(63));
+    assert!(report.follow_up_contract.is_some());
+    assert_payload_excludes_substrings(&report, &["alice@example.invalid", "grant@"]);
+}
+
+#[test]
+fn cron_readiness_contract_blocks_when_runner_not_proven() {
+    let report = ContractBackend
+        .cron_readiness(&CronReadinessRequest {
+            include_settings_inventory: true,
+            max_fields_per_section: Some(100),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    assert!(report.ok);
+    assert!(report.application_cron_configured);
+    assert!(!report.server_runner_proven);
+    assert!(!report.production_send_ready);
+}
+
+#[test]
+fn stop_gate_readiness_contract_recommends_separate_pause_plan() {
+    let report = ContractBackend
+        .send_stop_gate_readiness(&SendStopGateReadinessRequest {
+            expected_job_id: 13,
+            expected_campaign_id: Some(2),
+            expected_list_ids: vec![12],
+            expected_queue_total: Some(100),
+            oci_ledger_preflight: None,
+            hard_bounce_pause_threshold: 0.02,
+            max_rows: Some(25),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    assert!(report.ok);
+    assert_eq!(
+        report.recommended_action,
+        interspire_mcp::StopGateAction::PauseAvailable
+    );
+    assert!(report.pause_plan_id.is_some());
+    assert_payload_excludes_substrings(&report, &["alice@example.invalid", "grant@"]);
+}
+
+#[test]
 fn admin_session_probe_contract_is_read_only() {
     let report = ContractBackend
         .admin_session_probe(&AdminSessionProbeRequest {
@@ -1077,7 +1160,7 @@ fn production_send_apply_contract_requires_explicit_authorization_and_redacts() 
 fn server_can_be_constructed_with_fixture_backend() {
     let server = InterspireMcpServer::with_backend(Arc::new(ContractBackend))
         .unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(server.tool_schema_snapshot().len(), 46);
+    assert_eq!(server.tool_schema_snapshot().len(), 49);
 }
 
 #[test]

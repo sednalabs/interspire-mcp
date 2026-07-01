@@ -11,8 +11,9 @@ use crate::{
         CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest, OciLedgerPreflightReport,
         ProductionSendApplyReport, ProductionSendApplyRequest, RenderArtifact, SeedReadinessGate,
         SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport,
-        SeedSendApplyRequest, SendApplyStatus, SendReconciliationReport, SendWizardReadbackReport,
-        SendWizardReadbackRequest, MAX_SEED_SEND_RECIPIENTS, PRODUCTION_SEND_CONFIRMATION_PHRASE,
+        SeedSendApplyRequest, SendApplyStatus, SendJobFollowUpContract, SendReconciliationReport,
+        SendWizardReadbackReport, SendWizardReadbackRequest, MAX_SEED_SEND_RECIPIENTS,
+        PRODUCTION_SEND_CONFIRMATION_PHRASE,
     },
     safety::{self, AdminReadPage},
 };
@@ -30,6 +31,18 @@ struct GuardedSendEvidence {
     status_code: u16,
     redirected: bool,
     reconciliation: SendReconciliationReport,
+}
+
+struct GuardedSendReconcileInput<'a> {
+    send_form: (Url, Vec<(String, String)>),
+    campaign_id: u64,
+    list_ids: &'a [u64],
+    expected_body_sha256: Option<String>,
+    queue_before: &'a [String],
+    stats_before: &'a [String],
+    expected_recipient_count: u64,
+    seed_send: bool,
+    max_rows: usize,
 }
 
 impl AdminHtmlClient {
@@ -1064,19 +1077,22 @@ impl AdminHtmlClient {
             ));
         }
 
-        let send_evidence = self.post_guarded_send_and_reconcile(
-            guarded_send_final_form_post_for_request(
+        let send_evidence = self.post_guarded_send_and_reconcile(GuardedSendReconcileInput {
+            send_form: guarded_send_final_form_post_for_request(
                 self.config.base_url.as_deref().unwrap_or_default(),
                 &final_html,
                 request.campaign_id,
                 &request.list_ids,
             )?,
-            &queue_before,
-            &stats_before,
-            request.expected_recipient_count,
-            true,
+            campaign_id: request.campaign_id,
+            list_ids: &request.list_ids,
+            expected_body_sha256: None,
+            queue_before: &queue_before,
+            stats_before: &stats_before,
+            expected_recipient_count: request.expected_recipient_count,
+            seed_send: true,
             max_rows,
-        )?;
+        })?;
         let sent = matches!(
             send_evidence.reconciliation.status,
             SendApplyStatus::SeedProven
@@ -1273,19 +1289,22 @@ impl AdminHtmlClient {
             ));
         }
 
-        let send_evidence = self.post_guarded_send_and_reconcile(
-            guarded_send_final_form_post_for_request(
+        let send_evidence = self.post_guarded_send_and_reconcile(GuardedSendReconcileInput {
+            send_form: guarded_send_final_form_post_for_request(
                 self.config.base_url.as_deref().unwrap_or_default(),
                 &final_html,
                 request.campaign_id,
                 &request.list_ids,
             )?,
-            &queue_before,
-            &stats_before,
-            request.expected_recipient_count,
-            false,
+            campaign_id: request.campaign_id,
+            list_ids: &request.list_ids,
+            expected_body_sha256: Some(request.expected_html_sha256.clone()),
+            queue_before: &queue_before,
+            stats_before: &stats_before,
+            expected_recipient_count: request.expected_recipient_count,
+            seed_send: false,
             max_rows,
-        )?;
+        })?;
         let sent = send_evidence.reconciliation.status.terminal_success()
             && send_evidence.reconciliation.job_id.is_some();
         let warnings = production_send_apply_warnings(&send_evidence.reconciliation);
@@ -1312,14 +1331,9 @@ impl AdminHtmlClient {
 
     fn post_guarded_send_and_reconcile(
         &self,
-        send_form: (Url, Vec<(String, String)>),
-        queue_before: &[String],
-        stats_before: &[String],
-        expected_recipient_count: u64,
-        seed_send: bool,
-        max_rows: usize,
+        input: GuardedSendReconcileInput<'_>,
     ) -> Result<GuardedSendEvidence, InterspireError> {
-        let (send_url, send_pairs) = send_form;
+        let (send_url, send_pairs) = input.send_form;
         let response = self
             .proof_post_with_page_context(send_url, &send_pairs, &AdminReadPage::SendStart.path())?
             .send()
@@ -1416,27 +1430,29 @@ impl AdminHtmlClient {
 
         let queue_after = parse_table_rows(
             &self.get_allowed(&AdminReadPage::Schedule.path())?,
-            max_rows,
+            input.max_rows,
         )?;
-        let stats_after =
-            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
-        let stats_increased = stats_after.len() > stats_before.len();
-        let queued = queue_after.len() > queue_before.len();
+        let stats_after = parse_table_rows(
+            &self.get_allowed(&AdminReadPage::Stats.path())?,
+            input.max_rows,
+        )?;
+        let stats_increased = stats_after.len() > input.stats_before.len();
+        let queued = queue_after.len() > input.queue_before.len();
         let sent_count = if stats_increased || popup_steps > 0 {
-            Some(expected_recipient_count)
+            Some(input.expected_recipient_count)
         } else {
             None
         };
-        let failed_count = smtp_reason.as_ref().map(|_| expected_recipient_count);
+        let failed_count = smtp_reason.as_ref().map(|_| input.expected_recipient_count);
         let unsent_count = if smtp_reason.is_some() {
-            Some(expected_recipient_count)
+            Some(input.expected_recipient_count)
         } else {
             Some(0).filter(|_| stats_increased || popup_steps > 0)
         };
         let mut proof_gaps = Vec::new();
         let status = if smtp_reason.is_some() {
             SendApplyStatus::TransportFailed
-        } else if stats_increased && seed_send {
+        } else if stats_increased && input.seed_send {
             proof_gaps.push("provider inbox delivery still requires external readback".to_string());
             SendApplyStatus::SeedProven
         } else if stats_increased {
@@ -1465,6 +1481,19 @@ impl AdminHtmlClient {
         if queued {
             popup_notes.push("Schedule row count increased after guarded send loop".to_string());
         }
+        let follow_up_contract = if matches!(status, SendApplyStatus::Queued) {
+            job_id.map(|job_id| {
+                SendJobFollowUpContract::new(
+                    job_id,
+                    input.campaign_id,
+                    input.list_ids.to_vec(),
+                    input.expected_recipient_count,
+                    input.expected_body_sha256,
+                )
+            })
+        } else {
+            None
+        };
 
         Ok(GuardedSendEvidence {
             status_code,
@@ -1479,13 +1508,14 @@ impl AdminHtmlClient {
                 unsent_count,
                 smtp_reason,
                 popup_steps,
-                queue_before.len(),
+                input.queue_before.len(),
                 queue_after.len(),
-                stats_before.len(),
+                input.stats_before.len(),
                 stats_after.len(),
                 proof_gaps,
                 popup_notes,
-            ),
+            )
+            .with_follow_up_contract(follow_up_contract),
         })
     }
 

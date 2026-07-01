@@ -308,6 +308,22 @@ job identifier, including `Started=1` continuation routes, then rereads
 Schedule and Stats. `sent=true` is reserved for terminal reconciliation states,
 not for HTTP 200 or 302 alone.
 
+Queued-not-proven sends may include a `follow_up_contract` with the Interspire
+job id, campaign id, list ids, expected queue total, and the
+`interspire_send_job_status_readback` tool name. That status tool reads only
+allowlisted Schedule and Stats pages, returns redacted row summaries and
+progress counters when Interspire exposes them, and explicitly marks direct
+queue-table, jobs-list, stats-table, and unsent-reason aggregates as unavailable
+unless a future reviewed source is added. It must not fabricate processed
+counts or unsent reasons from provider silence.
+
+`interspire_cron_readiness` is also read-only. It compares cron settings with
+Schedule-page cron detection text but does not request `cron.php`.
+`interspire_send_stop_gate_readiness` composes send-job status and optional OCI
+ledger preflight into a recommendation only. Even when it returns a pause plan,
+the pause remains a separate `interspire_queue_control_apply` call gated by
+queue write controls and exact plan id.
+
 ## EDM Template Editing And Render Artifacts
 
 The semantic template tools are wrappers over the guarded campaign form-write

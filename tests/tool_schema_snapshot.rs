@@ -7,22 +7,23 @@ use interspire_mcp::{
     CampaignRenderArtifactReport, CampaignRenderArtifactRequest, CampaignTestSendApplyReport,
     CampaignTestSendApplyRequest, CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest,
     CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactImportPreflightReport,
-    ContactImportPreflightRequest, ContactStateReport, ContactStateRequest,
-    GuardedWriteApplyReport, GuardedWritePreviewReport, InterspireError, InterspireMcpServer,
-    InterspireReadBackend, ListCreateApplyRequest, ListCreatePreviewRequest,
+    ContactImportPreflightRequest, ContactStateReport, ContactStateRequest, CronReadinessReport,
+    CronReadinessRequest, GuardedWriteApplyReport, GuardedWritePreviewReport, InterspireError,
+    InterspireMcpServer, InterspireReadBackend, ListCreateApplyRequest, ListCreatePreviewRequest,
     ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummaryReport, ListSummaryRequest,
     ListUpdateApplyRequest, ListUpdatePreviewRequest, OciSendLedgerPrepareApplyRequest,
     OciSendLedgerPreparePreviewRequest, OciSendLedgerPrepareReport, ProductionSendApplyReport,
     ProductionSendApplyRequest, QueueControlApplyReport, QueueControlApplyRequest,
     QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
     QueueStatsReadbackRequest, SeedReadinessGateReport, SeedReadinessGateRequest,
-    SeedSendApplyReport, SeedSendApplyRequest, SendWizardReadbackReport, SendWizardReadbackRequest,
-    SensitiveFieldQueryReport, SensitiveFieldQueryRequest, SettingsAuditReport,
-    SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest,
-    SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
-    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
-    UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
-    XmlAuthProbeReport, XmlAuthProbeRequest,
+    SeedSendApplyReport, SeedSendApplyRequest, SendJobStatusReadbackReport,
+    SendJobStatusReadbackRequest, SendStopGateReadinessReport, SendStopGateReadinessRequest,
+    SendWizardReadbackReport, SendWizardReadbackRequest, SensitiveFieldQueryReport,
+    SensitiveFieldQueryRequest, SettingsAuditReport, SettingsAuditRequest, SettingsInventoryReport,
+    SettingsInventoryRequest, SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest,
+    StatusReport, StatusRequest, UserSmtpReadbackReport, UserSmtpReadbackRequest,
+    UserUpdateApplyRequest, UserUpdatePreviewRequest, WarmupAudienceReadinessReport,
+    WarmupAudienceReadinessRequest, XmlAuthProbeReport, XmlAuthProbeRequest,
 };
 use mcp_toolkit_testing::assert_tool_schema_snapshot;
 use std::{path::PathBuf, sync::Arc};
@@ -110,6 +111,27 @@ impl InterspireReadBackend for FixtureBackend {
         _request: &QueueControlApplyRequest,
     ) -> Result<QueueControlApplyReport, InterspireError> {
         Ok(QueueControlApplyReport::fixture())
+    }
+
+    fn send_job_status_readback(
+        &self,
+        _request: &SendJobStatusReadbackRequest,
+    ) -> Result<SendJobStatusReadbackReport, InterspireError> {
+        Ok(SendJobStatusReadbackReport::fixture())
+    }
+
+    fn cron_readiness(
+        &self,
+        _request: &CronReadinessRequest,
+    ) -> Result<CronReadinessReport, InterspireError> {
+        Ok(CronReadinessReport::fixture())
+    }
+
+    fn send_stop_gate_readiness(
+        &self,
+        _request: &SendStopGateReadinessRequest,
+    ) -> Result<SendStopGateReadinessReport, InterspireError> {
+        Ok(SendStopGateReadinessReport::fixture())
     }
 
     fn campaign_readback(

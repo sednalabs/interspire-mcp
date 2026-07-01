@@ -109,6 +109,9 @@ than proprietary Interspire source snippets.
 | `interspire_queue_stats_readback` | Read | Read scheduled queue and stats rows without triggering cron. |
 | `interspire_queue_control_preview` | Read preview | Build plan IDs for cancel/delete/pause/resume actions found on the schedule page. |
 | `interspire_queue_control_apply` | Guarded apply | Apply one previously previewed queue cancel/delete/pause/resume plan when write gates are enabled. |
+| `interspire_send_job_status_readback` | Read | Read structured Schedule/Stats status for one expected send job, including redacted row summaries, progress counters when present, queue-control action plans, and explicit unproven table-counter gaps. |
+| `interspire_cron_readiness` | Read | Compare Interspire cron settings with Schedule-page cron detection without triggering `cron.php`. |
+| `interspire_send_stop_gate_readiness` | No-mutation proof | Combine send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation; any pause still requires separate queue-control apply. |
 | `interspire_campaign_readback` | Read | Read campaign manage rows with structured campaign ids/action flags, or one campaign edit-page summary. |
 | `interspire_campaign_body_audit` | Read | Audit redacted campaign body safety signals without returning raw HTML. |
 | `interspire_campaign_copy_preview` | Read preview | Preview a guarded copy plan for creating a draft from a known campaign. |
@@ -344,9 +347,13 @@ no-send and no-contact by design:
 Within that boundary, the public phase does allow non-secret Interspire
 delivery and cron configuration edits such as SMTP host/username/port, bounce
 host/username/IMAP mode, hourly throttle, cron toggles, and the Interspire
-test-mode send toggle. It still does not expose provider APIs, DNS,
-password/secret fields, contact mutations, suppression mutations, or generic
-send execution controls.
+test-mode send toggle. Cron settings are changed through
+`interspire_settings_update_preview` / `interspire_settings_update_apply` with
+`section="cron"` and the current guarded allowlist:
+`cron_enabled`, `cron_send`, `cron_bounce`, `cron_autoresponder`,
+`cron_triggeremails_s`, and `cron_maintenance`. It still does not expose provider APIs, DNS,
+password/secret fields, contact mutations, suppression mutations, cron
+execution, or generic send execution controls.
 
 ### Scaffold And Import Preflight
 
@@ -493,6 +500,10 @@ Schedule and Stats, and classify the result as `posted`, `queued`, `processed`,
 `sent` boolean is true only when reconciliation reaches a terminal success
 state and an Interspire job id was proven. A final form HTTP 200 without a job
 id plus queue/stats movement remains non-successful `posted-unproven` evidence.
+When Interspire creates a job but completion is not yet proven, the
+reconciliation object can include a `follow_up_contract` containing the job id,
+campaign id, list ids, expected queue total, and status tool name for
+`interspire_send_job_status_readback`.
 Production sending should still be paired with provider-side monitoring and an
 Ops work item reference.
 
