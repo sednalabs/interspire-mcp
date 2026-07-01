@@ -185,6 +185,10 @@ suppression state.
 
 Form apply does not authorize sending and does not mutate contacts,
 suppression state, contact-import state, export state, provider APIs, or DNS.
+For settings forms, checkbox controls are proved from checked state rather than
+their static HTML value attribute, and Interspire tab selectors such as
+`tab_num` are replayed as safe hidden state so tab-scoped saves target the same
+settings panel the operator previewed.
 
 List creation is the only create-style form write in this public build. It
 requires the same runtime gates and preview plan id as other guarded form
