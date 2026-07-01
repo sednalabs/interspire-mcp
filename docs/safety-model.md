@@ -317,6 +317,14 @@ the editor controls exposed on the Step2 body form, such as
 `myDevEditControl_html`, instead of assuming those fields exist on the initial
 campaign metadata page.
 
+Some Interspire 8 editor shapes omit the plain-text editor control when the
+campaign is currently HTML-only. For a semantic `text_body` update, the adapter
+must render the body Step2 page through the allowlisted Step1 proof route with
+the Text+HTML format selected, then post the resulting Step2 `TextContent`
+control through the normal guarded Complete/Save boundary. Apply proof must
+re-read the campaign body and show non-zero text bytes before the campaign can
+be treated as multipart-ready.
+
 `interspire_campaign_render_artifact` is read-only against Interspire and writes
 private local artifacts outside the repository. Its output is artifact
 metadata, not visual proof. Operators or agents must open the generated preview

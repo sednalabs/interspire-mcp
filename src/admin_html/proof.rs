@@ -562,10 +562,21 @@ impl AdminHtmlClient {
         &self,
         campaign_id: u64,
     ) -> Result<ResolvedCampaignBodyHtml, InterspireError> {
+        self.resolve_campaign_body_html_with_format(campaign_id, None)
+    }
+
+    pub(super) fn resolve_campaign_body_html_with_format(
+        &self,
+        campaign_id: u64,
+        step1_format_override: Option<&str>,
+    ) -> Result<ResolvedCampaignBodyHtml, InterspireError> {
         let step1_path = AdminReadPage::NewsletterEdit { id: campaign_id }.path();
         let step1_html = self.get_allowed(&step1_path)?;
         let step1_parts = campaign_body_parts_from_html(&step1_html)?;
-        if !step1_parts.html_body.trim().is_empty() || !step1_parts.text_body.trim().is_empty() {
+        if step1_format_override.is_none()
+            && (!step1_parts.html_body.trim().is_empty()
+                || !step1_parts.text_body.trim().is_empty())
+        {
             return Ok(ResolvedCampaignBodyHtml {
                 html: step1_html,
                 used_step2: false,
@@ -588,6 +599,9 @@ impl AdminHtmlClient {
             campaign_id,
         )?;
         let mut post_pairs = campaign_body_step1_pairs(campaign_id, &step1_html)?;
+        if let Some(format) = step1_format_override {
+            upsert_post_pair(&mut post_pairs, "Format", format);
+        }
         append_csrf_pair_if_missing(&mut post_pairs, &step1_html);
         let response = self
             .proof_post_with_page_context(step2_url, &post_pairs, &step1_path)?

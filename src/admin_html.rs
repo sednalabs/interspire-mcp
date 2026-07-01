@@ -3185,6 +3185,104 @@ mod tests {
     }
 
     #[test]
+    fn campaign_template_text_update_selects_text_and_html_before_step2() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [FormFieldUpdate {
+            name: "text_body".to_string(),
+            value: Some("Plain text body %%UNSUBSCRIBELINK%%".to_string()),
+            checked: None,
+        }];
+        let preview = client
+            .campaign_update_preview(7, &updates)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(preview.ok);
+        assert_eq!(preview.changes.len(), 1);
+        assert_eq!(preview.changes[0].name, "text_body->textcontent");
+        assert!(preview
+            .evidence
+            .notes
+            .iter()
+            .any(|note| note.contains("selected Text+HTML format")));
+
+        let apply = client
+            .campaign_update_apply(
+                7,
+                &preview.plan_id,
+                &updates,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(apply.ok);
+        assert!(apply.applied);
+        assert_eq!(apply.changes[0].name, "text_body->textcontent");
+        assert!(apply
+            .evidence
+            .notes
+            .iter()
+            .any(|note| note.contains("fresh admin session")));
+
+        let audit = client
+            .campaign_body_audit(7)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(audit.text_bytes > 0);
+        assert!(audit.text_sha256.is_some());
+
+        let requests = server.requests();
+        let step2_posts = requests
+            .iter()
+            .filter(|request| {
+                request.starts_with(
+                    "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7 ",
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(step2_posts
+            .iter()
+            .any(|request| request.contains("Format=b")));
+        let complete_post = requests
+            .iter()
+            .find(|request| {
+                request.starts_with(
+                    "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7 ",
+                )
+            })
+            .unwrap_or_else(|| panic!("Complete/save request should be posted"));
+        assert!(complete_post.contains("Format=b"));
+        assert!(complete_post.contains("TextContent=Plain+text+body"));
+    }
+
+    #[test]
+    fn campaign_template_text_update_rejects_conflicting_format_override() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [
+            FormFieldUpdate {
+                name: "text_body".to_string(),
+                value: Some("Plain text body %%UNSUBSCRIBELINK%%".to_string()),
+                checked: None,
+            },
+            FormFieldUpdate {
+                name: "format".to_string(),
+                value: Some("html".to_string()),
+                checked: None,
+            },
+        ];
+        let err = client
+            .campaign_update_preview(7, &updates)
+            .expect_err("conflicting text_body + html-only format must be rejected");
+        assert!(matches!(
+            err,
+            InterspireError::Safety(message)
+                if message.contains("text body updates require Text+HTML campaign format")
+        ));
+    }
+
+    #[test]
     fn login_form_html_is_rejected_as_unauthenticated() {
         let html = r#"
             <form>
@@ -3380,7 +3478,11 @@ mod tests {
             r#"<p>Original body <a href="https://example.invalid">Read</a><img src="x.png" alt="Logo">%%UNSUBSCRIBELINK%%</p>"#
                 .to_string(),
         ));
+        let body_text = Arc::new(Mutex::new("".to_string()));
+        let campaign_format = Arc::new(Mutex::new("h".to_string()));
         let thread_body_html = Arc::clone(&body_html);
+        let thread_body_text = Arc::clone(&body_text);
+        let thread_campaign_format = Arc::clone(&campaign_format);
 
         let handle = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -3405,6 +3507,8 @@ mod tests {
                             &mut stream,
                             &request,
                             &thread_body_html,
+                            &thread_body_text,
+                            &thread_campaign_format,
                         );
                         if thread_requests
                             .lock()
@@ -3412,7 +3516,7 @@ mod tests {
                                 panic!("test requests lock poisoned while count: {err}")
                             })
                             .len()
-                            >= 12
+                            >= 24
                         {
                             break;
                         }
@@ -3565,6 +3669,8 @@ mod tests {
         stream: &mut std::net::TcpStream,
         request: &str,
         body_html: &Arc<Mutex<String>>,
+        body_text: &Arc<Mutex<String>>,
+        campaign_format: &Arc<Mutex<String>>,
     ) {
         let body = if request.starts_with("GET /admin/index.php?Page=Login&Action=Login ") {
             r#"<form method="post" action="index.php?Page=Login&Action=Login">
@@ -3576,28 +3682,63 @@ mod tests {
         } else if request.starts_with("POST /admin/index.php?Page=Login&Action=Login ") {
             "<html><body>logged in</body></html>".to_string()
         } else if request.starts_with("GET /admin/index.php?Page=Newsletters&Action=Edit&id=7 ") {
+            let format = campaign_format
+                .lock()
+                .unwrap_or_else(|err| panic!("campaign format lock poisoned: {err}"))
+                .clone();
+            let text_checked = if format == "t" { " checked" } else { "" };
+            let html_checked = if format == "h" { " checked" } else { "" };
+            let both_checked = if format == "b" { " checked" } else { "" };
             r#"<form action="index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7">
                 <input type="hidden" name="csrf_token" value="fixture-csrf">
                 <input name="Name" value="Fixture campaign">
-                <input type="radio" name="Format" value="t">
-                <input type="radio" name="Format" value="h" checked>
+                <input type="radio" name="Format" value="t"{text_checked}>
+                <input type="radio" name="Format" value="h"{html_checked}>
+                <input type="radio" name="Format" value="b"{both_checked}>
                 <input type="hidden" name="usewysiwyg" value="3">
                 <input type="submit" name="NextButton" value="Next &gt;&gt;">
               </form>"#
-                .to_string()
+                .replace("{text_checked}", text_checked)
+                .replace("{html_checked}", html_checked)
+                .replace("{both_checked}", both_checked)
         } else if request
             .starts_with("POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7 ")
         {
+            let request_body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body)
+                .unwrap_or_default();
+            let render_format = url::form_urlencoded::parse(request_body.as_bytes())
+                .find(|(name, _)| name == "Format")
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_else(|| {
+                    campaign_format
+                        .lock()
+                        .unwrap_or_else(|err| {
+                            panic!("campaign format lock poisoned while render fallback: {err}")
+                        })
+                        .clone()
+                });
             let html = body_html
                 .lock()
                 .unwrap_or_else(|err| panic!("body html lock poisoned: {err}"))
                 .clone();
+            let text = body_text
+                .lock()
+                .unwrap_or_else(|err| panic!("body text lock poisoned: {err}"))
+                .clone();
+            let text_control = if render_format == "b" || render_format == "t" {
+                format!(r#"<textarea name="TextContent">{text}</textarea>"#)
+            } else {
+                String::new()
+            };
             format!(
                 r#"<form action="index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7">
                 <input type="hidden" name="csrf_token" value="fixture-csrf">
+                <input type="hidden" name="Format" value="{render_format}">
                 <input name="Subject" value="Original subject">
                 <textarea name="myDevEditControl_html">{html}</textarea>
-                <textarea name="myDevEditControl_text">Original text</textarea>
+                {text_control}
                 <input type="checkbox" name="trackopens" value="1" checked>
                 <input type="checkbox" name="tracklinks" value="1" checked>
                 <input type="submit" name="SaveButton" value="Save">
@@ -3617,6 +3758,21 @@ mod tests {
                     .lock()
                     .unwrap_or_else(|err| panic!("body html lock poisoned while update: {err}")) =
                     value.into_owned();
+            }
+            if let Some((_, value)) = url::form_urlencoded::parse(request_body.as_bytes())
+                .find(|(name, _)| name == "TextContent")
+            {
+                *body_text
+                    .lock()
+                    .unwrap_or_else(|err| panic!("body text lock poisoned while update: {err}")) =
+                    value.into_owned();
+            }
+            if let Some((_, value)) = url::form_urlencoded::parse(request_body.as_bytes())
+                .find(|(name, _)| name == "Format")
+            {
+                *campaign_format.lock().unwrap_or_else(|err| {
+                    panic!("campaign format lock poisoned while complete: {err}")
+                }) = value.into_owned();
             }
             "<html><body>saved</body></html>".to_string()
         } else {

@@ -254,7 +254,8 @@ pub(super) fn guarded_write_preview(
     }
     client.login()?;
 
-    let (read_path, html, mut evidence_notes) = guarded_form_html(client, target)?;
+    let (read_path, html, mut evidence_notes) =
+        guarded_form_html_for_updates(client, target, updates)?;
     let snapshot = capture_form_snapshot(
         client.config.base_url.as_deref().unwrap_or_default(),
         &read_path,
@@ -306,7 +307,8 @@ pub(super) fn guarded_write_apply(
     }
     client.login()?;
 
-    let (read_path, html, mut evidence_notes) = guarded_form_html(client, target)?;
+    let (read_path, html, mut evidence_notes) =
+        guarded_form_html_for_updates(client, target, updates)?;
     let snapshot = capture_form_snapshot(
         client.config.base_url.as_deref().unwrap_or_default(),
         &read_path,
@@ -336,10 +338,26 @@ pub(super) fn guarded_write_apply(
         )));
     }
 
-    let (_, after_html, mut after_evidence_notes) = guarded_form_html(client, target)?;
+    // Campaign body edits pass through an Interspire wizard. Re-read with a
+    // fresh cookie jar so transient Step1/Step2 state cannot satisfy proof.
+    let (after_read_path, after_html, mut after_evidence_notes) = if matches!(
+        target,
+        GuardedFormTarget::Campaign { .. }
+    ) {
+        let fresh_client = AdminHtmlClient::new(client.config.clone())?;
+        fresh_client.login()?;
+        let (after_read_path, after_html, mut notes) = guarded_form_html(&fresh_client, target)?;
+        notes.push(
+            "campaign form readback used a fresh admin session so Step1 wizard state could not satisfy post-apply proof"
+                .to_string(),
+        );
+        (after_read_path, after_html, notes)
+    } else {
+        guarded_form_html(client, target)?
+    };
     let after_snapshot = capture_form_snapshot(
         client.config.base_url.as_deref().unwrap_or_default(),
-        &read_path,
+        &after_read_path,
         &after_html,
         &target,
     )?;
@@ -641,10 +659,21 @@ fn guarded_form_html(
     client: &AdminHtmlClient,
     target: GuardedFormTarget,
 ) -> Result<(String, String, Vec<String>), InterspireError> {
+    guarded_form_html_for_updates(client, target, &[])
+}
+
+fn guarded_form_html_for_updates(
+    client: &AdminHtmlClient,
+    target: GuardedFormTarget,
+    updates: &[FormFieldUpdate],
+) -> Result<(String, String, Vec<String>), InterspireError> {
     let read_path = target.read_page().path();
     match target {
         GuardedFormTarget::Campaign { campaign_id } => {
-            let resolved = client.resolve_campaign_body_html(campaign_id)?;
+            let step1_format_override = campaign_step1_format_override(updates)?;
+            let text_body_requested = campaign_text_body_requested(updates);
+            let resolved = client
+                .resolve_campaign_body_html_with_format(campaign_id, step1_format_override)?;
             let mut notes = vec![format!(
                 "allowlisted campaign edit GET read for campaign {campaign_id}"
             )];
@@ -654,6 +683,19 @@ fn guarded_form_html(
                         .to_string(),
                 );
             }
+            if step1_format_override.is_some() {
+                if text_body_requested && step1_format_override == Some("b") {
+                    notes.push(
+                        "text body update requested; allowlisted campaign Step1 proof selected Text+HTML format before rendering Step2"
+                            .to_string(),
+                    );
+                } else {
+                    notes.push(
+                        "allowlisted campaign Step1 proof selected requested format before rendering Step2"
+                            .to_string(),
+                    );
+                }
+            }
             Ok((read_path, resolved.html, notes))
         }
         _ => Ok((
@@ -661,6 +703,63 @@ fn guarded_form_html(
             client.get_allowed(&read_path)?,
             Vec::new(),
         )),
+    }
+}
+
+fn campaign_step1_format_override(
+    updates: &[FormFieldUpdate],
+) -> Result<Option<&'static str>, InterspireError> {
+    let mut explicit_format = None;
+    for update in updates {
+        let lower_name = update.name.trim().to_ascii_lowercase();
+        if lower_name == "format" {
+            explicit_format = update.value.as_deref();
+        }
+    }
+
+    let text_body_requested = campaign_text_body_requested(updates);
+    if let Some(value) = explicit_format {
+        let Some(format) = canonical_campaign_format(value) else {
+            return Err(InterspireError::Safety(
+                "campaign format update must be one of text, html, or text+html".to_string(),
+            ));
+        };
+        if text_body_requested && format != "b" {
+            return Err(InterspireError::Safety(
+                "text body updates require Text+HTML campaign format; remove the format override or set it to text+html"
+                    .to_string(),
+            ));
+        }
+        return Ok(Some(format));
+    }
+
+    Ok(text_body_requested.then_some("b"))
+}
+
+fn campaign_text_body_requested(updates: &[FormFieldUpdate]) -> bool {
+    updates.iter().any(|update| {
+        let lower_name = update.name.trim().to_ascii_lowercase();
+        matches!(
+            lower_name.as_str(),
+            "text_body"
+                | "textbody"
+                | "textcontents"
+                | "mydeveditcontrol_text"
+                | "mydeveditcontroltext"
+                | "text_content"
+                | "textcontent"
+        )
+    })
+}
+
+fn canonical_campaign_format(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "b" | "both" | "textandhtml" | "text_and_html" | "htmlandtext" | "html_and_text" => {
+            Some("b")
+        }
+        "h" | "html" => Some("h"),
+        "t" | "text" => Some("t"),
+        _ => None,
     }
 }
 
@@ -1239,6 +1338,9 @@ pub(super) fn should_replay_hidden_control(control: &FormControl) -> bool {
             | "campaignid"
             | "templateid"
             | "segmentid"
+            // Interspire campaign Step2 can carry the selected Step1 body
+            // format as hidden wizard state into the final Complete save.
+            | "format"
             | "ss_takemeto"
     ) || control.lower_name.ends_with("token")
 }
