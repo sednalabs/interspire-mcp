@@ -78,8 +78,19 @@ Current public behavior:
 
 - `INTERSPIRE_QUEUE_WRITE_CONTROLS=1` enables guarded queue
   cancel/delete/pause/resume apply.
+- `interspire_send_job_status_readback` and `interspire_cron_readiness` are
+  read-only admin-HTML tools. They require only the admin HTML configuration
+  above and do not need write-control flags.
+- `interspire_send_stop_gate_readiness` is also read-only. It can evaluate an
+  optional `oci_ledger_preflight` against the configured
+  `INTERSPIRE_OCI_SEND_LEDGER_PATH`, but any recommended pause still requires a
+  separate guarded queue-control apply.
 - `INTERSPIRE_FORM_WRITE_CONTROLS=1` enables guarded campaign, list, user,
   non-secret settings, list-create, and campaign-copy apply.
+  Cron setting changes use the same preview/apply contract with
+  `section="cron"` and only the guarded cron fields `cron_enabled`,
+  `cron_send`, `cron_bounce`, `cron_autoresponder`, `cron_triggeremails_s`,
+  and `cron_maintenance`.
 - `INTERSPIRE_SEND_CONTROLS=1` enables explicitly acknowledged one-recipient
   campaign preview/test sends through `interspire_campaign_test_send_apply`
   and bounded seed sends through `interspire_seed_send_apply`. It also enables

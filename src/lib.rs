@@ -76,23 +76,26 @@ pub use response::{
     CampaignTestSendApplyReport, CampaignTestSendApplyRequest, CampaignTestSendPreviewReport,
     CampaignTestSendPreviewRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
     ContactImportPreflightReport, ContactImportPreflightRequest, ContactStateReport,
-    ContactStateRequest, Evidence, FormFieldChange, FormFieldDescriptor, FormFieldUpdate,
-    GuardedWriteApplyReport, GuardedWritePreviewReport, ListCreateApplyRequest,
-    ListCreatePreviewRequest, ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary,
-    ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
-    OciLedgerPreflightReport, OciLedgerPreflightRequest, OciSendLedgerPrepareApplyRequest,
+    ContactStateRequest, CronReadinessReport, CronReadinessRequest, Evidence, FormFieldChange,
+    FormFieldDescriptor, FormFieldUpdate, GuardedWriteApplyReport, GuardedWritePreviewReport,
+    ListCreateApplyRequest, ListCreatePreviewRequest, ListOwnerReadbackReport,
+    ListOwnerReadbackRequest, ListSummary, ListSummaryReport, ListSummaryRequest,
+    ListUpdateApplyRequest, ListUpdatePreviewRequest, OciLedgerPreflightReport,
+    OciLedgerPreflightRequest, OciSendLedgerPrepareApplyRequest,
     OciSendLedgerPreparePreviewRequest, OciSendLedgerPrepareReport, ProductionSendApplyReport,
     ProductionSendApplyRequest, QueueControlAction, QueueControlApplyReport,
     QueueControlApplyRequest, QueueControlApplyStatus, QueueControlCandidate,
     QueueControlPreviewReport, QueueControlPreviewRequest, QueueStatsReadbackReport,
     QueueStatsReadbackRequest, RenderArtifact, SeedReadinessGate, SeedReadinessGateReport,
     SeedReadinessGateRequest, SeedSendApplyReport, SeedSendApplyRequest, SendApplyStatus,
-    SendReconciliationReport, SendWizardReadbackReport, SendWizardReadbackRequest,
+    SendJobActionPlan, SendJobFollowUpContract, SendJobStatusReadbackReport,
+    SendJobStatusReadbackRequest, SendReconciliationReport, SendStopGateReadinessReport,
+    SendStopGateReadinessRequest, SendWizardReadbackReport, SendWizardReadbackRequest,
     SensitiveFieldDenial, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
     SensitiveFieldTarget, SensitiveFieldValue, SensitiveToolMetadata, SettingsAuditReport,
     SettingsAuditRequest, SettingsInventoryReport, SettingsInventoryRequest, SettingsSectionName,
     SettingsUpdateApplyRequest, SettingsUpdatePreviewRequest, StatusReport, StatusRequest,
-    UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
+    StopGateAction, UserSmtpReadbackReport, UserSmtpReadbackRequest, UserUpdateApplyRequest,
     UserUpdatePreviewRequest, WarmupAudienceReadinessReport, WarmupAudienceReadinessRequest,
     XmlAuthProbeReport, XmlAuthProbeRequest, DEFAULT_HYGIENE_QUERY_BUDGET, DEFAULT_LIST_READ_LIMIT,
     HARD_HYGIENE_QUERY_BUDGET, HARD_LIST_READ_LIMIT,
@@ -185,6 +188,18 @@ pub trait InterspireReadBackend: Send + Sync {
         &self,
         request: &QueueControlApplyRequest,
     ) -> Result<QueueControlApplyReport, InterspireError>;
+    fn send_job_status_readback(
+        &self,
+        request: &SendJobStatusReadbackRequest,
+    ) -> Result<SendJobStatusReadbackReport, InterspireError>;
+    fn cron_readiness(
+        &self,
+        request: &CronReadinessRequest,
+    ) -> Result<CronReadinessReport, InterspireError>;
+    fn send_stop_gate_readiness(
+        &self,
+        request: &SendStopGateReadinessRequest,
+    ) -> Result<SendStopGateReadinessReport, InterspireError>;
     fn campaign_readback(
         &self,
         request: &CampaignReadbackRequest,
@@ -409,6 +424,27 @@ impl InterspireMcpServer {
                     .with_discovery(ToolDiscoveryMetadata::new(
                         "Apply a previously previewed Interspire scheduled queue cancel/delete/pause/resume plan.",
                         ["interspire", "queue", "apply", "guarded-write"],
+                    )),
+                ToolCapability::new("interspire_send_job_status_readback")
+                    .with_group("read")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Read structured Schedule/Stats status for one expected Interspire send job without exporting recipients.",
+                        ["interspire", "send", "job", "status", "readback"],
+                    )),
+                ToolCapability::new("interspire_cron_readiness")
+                    .with_group("read")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Compare Interspire cron settings with Schedule-page cron detection before production sends.",
+                        ["interspire", "cron", "readiness", "send"],
+                    )),
+                ToolCapability::new("interspire_send_stop_gate_readiness")
+                    .with_group("read")
+                    .with_risk_posture(GuardedActionPosture::no_mutation_proof())
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Compose send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation without sending.",
+                        ["interspire", "send", "stop", "gate", "readiness"],
                     )),
                 ToolCapability::new("interspire_campaign_readback")
                     .with_group("read")
@@ -1033,6 +1069,36 @@ impl InterspireMcpServer {
         response::tool_json(self.backend.queue_control_apply(&request))
     }
 
+    #[tool(
+        description = "Read structured Schedule/Stats status for one expected Interspire send job without sending, triggering cron, exporting recipients, or mutating queue state."
+    )]
+    fn interspire_send_job_status_readback(
+        &self,
+        Parameters(request): Parameters<SendJobStatusReadbackRequest>,
+    ) -> String {
+        response::tool_json(self.backend.send_job_status_readback(&request))
+    }
+
+    #[tool(
+        description = "Compare Interspire cron settings with Schedule-page cron detection before production sends. Read-only; does not trigger cron.php."
+    )]
+    fn interspire_cron_readiness(
+        &self,
+        Parameters(request): Parameters<CronReadinessRequest>,
+    ) -> String {
+        response::tool_json(self.backend.cron_readiness(&request))
+    }
+
+    #[tool(
+        description = "Compose send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation. Read-only; queue pause requires a separate queue-control apply."
+    )]
+    fn interspire_send_stop_gate_readiness(
+        &self,
+        Parameters(request): Parameters<SendStopGateReadinessRequest>,
+    ) -> String {
+        response::tool_json(self.backend.send_stop_gate_readiness(&request))
+    }
+
     #[tool(description = "Read campaign manage rows or one campaign edit page summary.")]
     fn interspire_campaign_readback(
         &self,
@@ -1426,6 +1492,34 @@ fn with_interspire_tool_metadata(tool: Tool) -> Tool {
             )
             .with_meta(meta)
         }
+        "interspire_send_job_status_readback" => tool.with_annotations(
+            ToolAnnotations::with_title("Send job status readback")
+                .read_only(true)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
+        ),
+        "interspire_cron_readiness" => tool.with_annotations(
+            ToolAnnotations::with_title("Cron readiness")
+                .read_only(true)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
+        ),
+        "interspire_send_stop_gate_readiness" => {
+            let meta = with_mcp_apps_no_mutation_proof_metadata(
+                Some(Meta::new()),
+                "compose send-job and ledger evidence into a recommendation without applying pause, resume, send, or cron actions",
+            );
+            tool.with_annotations(
+                ToolAnnotations::with_title("Send stop-gate readiness")
+                    .read_only(true)
+                    .destructive(false)
+                    .idempotent(true)
+                    .open_world(false),
+            )
+            .with_meta(meta)
+        }
         "interspire_campaign_render_artifact" => {
             let meta = with_mcp_apps_no_mutation_proof_metadata(
                 Some(Meta::new()),
@@ -1621,6 +1715,27 @@ mod tests {
             _request: &QueueControlApplyRequest,
         ) -> Result<QueueControlApplyReport, InterspireError> {
             Ok(QueueControlApplyReport::fixture())
+        }
+
+        fn send_job_status_readback(
+            &self,
+            _request: &SendJobStatusReadbackRequest,
+        ) -> Result<SendJobStatusReadbackReport, InterspireError> {
+            Ok(SendJobStatusReadbackReport::fixture())
+        }
+
+        fn cron_readiness(
+            &self,
+            _request: &CronReadinessRequest,
+        ) -> Result<CronReadinessReport, InterspireError> {
+            Ok(CronReadinessReport::fixture())
+        }
+
+        fn send_stop_gate_readiness(
+            &self,
+            _request: &SendStopGateReadinessRequest,
+        ) -> Result<SendStopGateReadinessReport, InterspireError> {
+            Ok(SendStopGateReadinessReport::fixture())
         }
 
         fn campaign_readback(
@@ -1914,6 +2029,7 @@ mod tests {
                 "interspire_campaign_update_preview",
                 "interspire_contact_import_preflight",
                 "interspire_contact_state",
+                "interspire_cron_readiness",
                 "interspire_list_create_apply",
                 "interspire_list_create_preview",
                 "interspire_list_owner_readback",
@@ -1928,6 +2044,8 @@ mod tests {
                 "interspire_queue_stats_readback",
                 "interspire_seed_readiness_gate",
                 "interspire_seed_send_apply",
+                "interspire_send_job_status_readback",
+                "interspire_send_stop_gate_readiness",
                 "interspire_send_wizard_readback",
                 "interspire_sensitive_field_query",
                 "interspire_settings_audit",

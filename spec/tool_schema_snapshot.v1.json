@@ -991,6 +991,37 @@
       "name": "interspire_contact_state"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Cron readiness"
+      },
+      "description": "Compare Interspire cron settings with Schedule-page cron detection before production sends. Read-only; does not trigger cron.php.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "include_settings_inventory": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_fields_per_section": {
+            "default": null,
+            "format": "uint",
+            "maximum": 500,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "interspire_cron_readiness"
+    },
+    {
       "description": "Apply a previously previewed Interspire contact-list creation plan.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1825,6 +1856,217 @@
         "type": "object"
       },
       "name": "interspire_seed_send_apply"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Send job status readback"
+      },
+      "description": "Read structured Schedule/Stats status for one expected Interspire send job without sending, triggering cron, exporting recipients, or mutating queue state.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "expected_body_sha256": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_campaign_id": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expected_job_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_list_ids": {
+            "default": [],
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "expected_queue_total": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_rows": {
+            "default": null,
+            "format": "uint",
+            "maximum": 100,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "expected_job_id"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_send_job_status_readback"
+    },
+    {
+      "_meta": {
+        "approval_required": false,
+        "mutation_prohibited": true,
+        "openai/widgetAccessible": false,
+        "operation_class": "no_mutation_proof",
+        "production_action_authorized": false,
+        "proof_boundary": "compose send-job and ledger evidence into a recommendation without applying pause, resume, send, or cron actions",
+        "securitySchemes": [
+          {
+            "type": "noauth"
+          }
+        ],
+        "ui": {
+          "visibility": [
+            "model"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Send stop-gate readiness"
+      },
+      "description": "Compose send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation. Read-only; queue pause requires a separate queue-control apply.",
+      "inputSchema": {
+        "$defs": {
+          "OciLedgerPreflightRequest": {
+            "properties": {
+              "batch_id": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "campaign_id": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "expected_manifest_sha256": {
+                "default": null,
+                "maxLength": 64,
+                "minLength": 64,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "expected_rows": {
+                "format": "uint64",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "sender_domain": {
+                "default": null,
+                "maxLength": 253,
+                "minLength": 1,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "campaign_id",
+              "batch_id",
+              "expected_rows"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "expected_campaign_id": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expected_job_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_list_ids": {
+            "default": [],
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "expected_queue_total": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "hard_bounce_pause_threshold": {
+            "default": 0.02,
+            "format": "double",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "max_rows": {
+            "default": null,
+            "format": "uint",
+            "maximum": 100,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "oci_ledger_preflight": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OciLedgerPreflightRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "expected_job_id"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_send_stop_gate_readiness"
     },
     {
       "_meta": {

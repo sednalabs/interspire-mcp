@@ -1,3 +1,4 @@
+use super::SendJobFollowUpContract;
 use crate::redact;
 use serde::Serialize;
 
@@ -26,6 +27,7 @@ impl SendApplyStatus {
 pub struct SendReconciliationReport {
     pub status: SendApplyStatus,
     pub job_id: Option<u64>,
+    pub follow_up_contract: Option<SendJobFollowUpContract>,
     pub queue_id: Option<u64>,
     pub stat_id: Option<u64>,
     pub sent_count: Option<u64>,
@@ -63,6 +65,7 @@ impl SendReconciliationReport {
         Self {
             status,
             job_id,
+            follow_up_contract: None,
             queue_id,
             stat_id,
             sent_count,
@@ -83,6 +86,11 @@ impl SendReconciliationReport {
                 .map(|note| redact::redact_sensitive_text(&note))
                 .collect(),
         }
+    }
+
+    pub fn with_follow_up_contract(mut self, contract: Option<SendJobFollowUpContract>) -> Self {
+        self.follow_up_contract = contract;
+        self
     }
 
     pub fn refused(
