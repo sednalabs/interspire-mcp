@@ -623,6 +623,9 @@ fn contains_cron_negative_phrase(lower_schedule_text: &str) -> bool {
         "cron not detected",
         "cron is not",
         "cron was not",
+        "not yet detected",
+        "has not yet detected",
+        "has not detected",
         "cron never run",
         "cron has never run",
         "cron has never been run",
@@ -673,6 +676,18 @@ mod tests {
     #[test]
     fn cron_readiness_warns_on_specific_negative_status_text() {
         let schedule_text = "Cron has not been detected by Interspire.";
+
+        assert_eq!(
+            cron_schedule_warnings(schedule_text),
+            vec!["Interspire Schedule page indicates cron has not been detected".to_string()]
+        );
+        assert!(!contains_cron_detected_positive(schedule_text));
+    }
+
+    #[test]
+    fn cron_readiness_warns_on_not_yet_detected_status_text() {
+        let schedule_text =
+            "You have enabled cron support, but the system has not yet detected a cron job running.";
 
         assert_eq!(
             cron_schedule_warnings(schedule_text),
