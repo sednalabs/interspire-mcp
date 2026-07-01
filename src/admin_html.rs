@@ -2044,7 +2044,6 @@ fn parse_queue_control_links(
                 &route.identifier_key,
                 &route.identifier_value.to_string(),
                 &route_key,
-                &row_summary,
             ]);
             let route_action = route.action;
             links.push(QueueControlLink {
@@ -4105,6 +4104,67 @@ mod tests {
             assert!(!candidate_json.contains("csrfToken"));
             assert!(!candidate_json.contains("person@example.com"));
         }
+    }
+
+    #[test]
+    fn queue_control_plan_id_ignores_active_progress_text() {
+        let first_html = r#"
+            <table>
+              <tr>
+                <th>Campaign</th><th>Actions</th>
+              </tr>
+              <tr>
+                <td><input type="checkbox" name="jobs[]" value="17"></td>
+                <td>Newsletter Job In Progress (Sent to 84 / 500)</td>
+                <td>
+                  <a href="index.php?Page=Schedule&Action=Pause&job=17&csrfToken=abc">Pause</a>
+                  <a href="index.php?Page=Schedule&Action=Delete&job=17&csrfToken=abc">Delete</a>
+                </td>
+              </tr>
+            </table>
+        "#;
+        let second_html = r#"
+            <table>
+              <tr>
+                <th>Campaign</th><th>Actions</th>
+              </tr>
+              <tr>
+                <td><input type="checkbox" name="jobs[]" value="17"></td>
+                <td>Newsletter Job In Progress (Sent to 125 / 500)</td>
+                <td>
+                  <a href="index.php?Page=Schedule&Action=Pause&job=17&csrfToken=abc">Pause</a>
+                  <a href="index.php?Page=Schedule&Action=Delete&job=17&csrfToken=abc">Delete</a>
+                </td>
+              </tr>
+            </table>
+        "#;
+
+        let first = parse_queue_control_links("https://example.test/admin/", first_html, 25)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let second = parse_queue_control_links("https://example.test/admin/", second_html, 25)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let first_pause = first
+            .iter()
+            .find(|link| link.candidate.action == QueueControlAction::Pause)
+            .unwrap_or_else(|| panic!("first pause candidate should be present"));
+        let second_pause = second
+            .iter()
+            .find(|link| link.candidate.action == QueueControlAction::Pause)
+            .unwrap_or_else(|| panic!("second pause candidate should be present"));
+
+        assert_ne!(
+            first_pause.candidate.row_summary,
+            second_pause.candidate.row_summary
+        );
+        assert_eq!(
+            first_pause.candidate.plan_id,
+            second_pause.candidate.plan_id
+        );
+        assert_eq!(
+            first_pause.candidate.route_fingerprint,
+            second_pause.candidate.route_fingerprint
+        );
     }
 
     #[test]

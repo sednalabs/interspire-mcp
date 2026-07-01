@@ -111,6 +111,9 @@ Preview:
   numeric identifier;
 - returns a deterministic plan id, redacted row summary, action, and route
   fingerprint.
+- binds the plan id to stable route/action/job identity rather than volatile
+  row text, so an active send whose `Sent to N / total` progress changes can
+  still be paused or resumed safely from a fresh apply read.
 
 Apply:
 
