@@ -94,8 +94,8 @@ impl AdminHtmlClient {
         let schedule_warnings = cron_schedule_warnings(&schedule_text);
         let cron_master_enabled = cron_master_enabled_from_fields(&cron_fields);
         let application_cron_configured = cron_master_enabled == Some(true);
-        let server_runner_proven =
-            schedule_warnings.is_empty() && contains_cron_detected_positive(&schedule_text);
+        let server_runner_proven = schedule_warnings.is_empty()
+            && schedule_page_proves_cron_runner(&schedule_text, application_cron_configured);
         if application_cron_configured && !server_runner_proven {
             warnings.push(
                 "Interspire cron settings appear enabled, but a server cron runner was not proven"
@@ -616,6 +616,23 @@ fn contains_cron_detected_positive(schedule_text: &str) -> bool {
     lower.contains("cron") && lower.contains("detected") && !contains_cron_negative_phrase(&lower)
 }
 
+fn schedule_page_proves_cron_runner(
+    schedule_text: &str,
+    application_cron_configured: bool,
+) -> bool {
+    if contains_cron_detected_positive(schedule_text) {
+        return true;
+    }
+    if !application_cron_configured {
+        return false;
+    }
+
+    let lower = schedule_text.to_ascii_lowercase();
+    lower.contains("view scheduled email queue")
+        && lower.contains("updatecrontimer")
+        && !contains_cron_negative_phrase(&lower)
+}
+
 fn contains_cron_negative_phrase(lower_schedule_text: &str) -> bool {
     [
         "cron has not",
@@ -671,6 +688,7 @@ mod tests {
 
         assert!(cron_schedule_warnings(schedule_text).is_empty());
         assert!(contains_cron_detected_positive(schedule_text));
+        assert!(schedule_page_proves_cron_runner(schedule_text, true));
     }
 
     #[test]
@@ -682,6 +700,7 @@ mod tests {
             vec!["Interspire Schedule page indicates cron has not been detected".to_string()]
         );
         assert!(!contains_cron_detected_positive(schedule_text));
+        assert!(!schedule_page_proves_cron_runner(schedule_text, true));
     }
 
     #[test]
@@ -694,6 +713,17 @@ mod tests {
             vec!["Interspire Schedule page indicates cron has not been detected".to_string()]
         );
         assert!(!contains_cron_detected_positive(schedule_text));
+        assert!(!schedule_page_proves_cron_runner(schedule_text, true));
+    }
+
+    #[test]
+    fn cron_readiness_accepts_live_schedule_page_after_warning_disappears() {
+        let schedule_text = "View Scheduled Email Queue Any emails you have scheduled to be sent out are shown below. UpdateCronTimer('Unknown', 0, false); Results per page: 10";
+
+        assert!(cron_schedule_warnings(schedule_text).is_empty());
+        assert!(!contains_cron_detected_positive(schedule_text));
+        assert!(schedule_page_proves_cron_runner(schedule_text, true));
+        assert!(!schedule_page_proves_cron_runner(schedule_text, false));
     }
 
     #[test]
