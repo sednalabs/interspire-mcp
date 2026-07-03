@@ -279,9 +279,14 @@ guarded writes:
   from a private JSONL manifest. Preview computes sanitized rows and a plan id
   without writing. Apply requires guarded writes, send controls, the exact plan
   id, and `acknowledge_ledger_write=true`, then writes only hashed recipient and
-  trace values with an apply-time UTC `submitted_at` and reruns preflight. The
-  prepare tools do not contact OCI and do not perform an Interspire send,
-  schedule, queue, import, contact, list, or suppression mutation.
+  trace values with an apply-time UTC `submitted_at` and reruns preflight.
+  Reports separate message-id, header-value, and local correlation-only trace
+  inputs so operators can tell whether the prepared ledger contains
+  provider-visible trace candidates. That classification is evidence for the
+  local ledger contract only; exact traceability still requires provider-log
+  proof that the same message id or approved header value is visible after a
+  send. The prepare tools do not contact OCI and do not perform an Interspire
+  send, schedule, queue, import, contact, list, or suppression mutation.
 - OCI ledger preparation and preflight reject non-private Unix permissions on
   the ledger directory, manifest file, and existing ledger file because the
   manifest can contain raw recipient or provider trace identifiers before the
