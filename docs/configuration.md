@@ -136,7 +136,8 @@ The prepare tools:
   ledger rows;
 - stamp appended rows with an apply-time UTC `submitted_at` value so monitoring
   tools can bind the ledger evidence to an explicit send window;
-- return only hashes, counts, plan state, and preflight proof;
+- return only hashes, counts, trace-key classification, plan state, and
+  preflight proof;
 - never contact OCI and never perform an Interspire send, schedule, queue,
   import, contact, list, or suppression mutation.
 
@@ -149,6 +150,15 @@ Accepted trace fields include `message_id`, `provider_message_id`,
 and `header_value_hash`. Fields named `*_hash` must contain a 20- or
 64-character hexadecimal digest; put raw values in the non-hash fields so the
 prepare tool can hash them before writing.
+
+Prepare reports classify trace inputs as `message_id_trace_rows`,
+`correlation_id_trace_rows`, and `header_value_trace_rows`. The
+`provider_visible_trace_candidate_rows` count includes message-id and
+header-value rows because those are the trace shapes operators can attempt to
+join against provider-visible evidence. `local_correlation_only_rows` are valid
+private ledger trace keys, but they do not by themselves prove that provider
+logs will expose the same join key; live provider-log proof is still required
+before claiming exact message traceability.
 
 Preview computes a deterministic `plan_id`. Apply requires the same manifest,
 `expected_plan_id`, `acknowledge_ledger_write=true`,

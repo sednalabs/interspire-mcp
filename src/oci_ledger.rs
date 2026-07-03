@@ -133,6 +133,7 @@ pub fn verify_preflight(
     let mut matched_rows = 0u64;
     let mut rows_with_recipient_key = 0u64;
     let mut rows_with_trace_key = 0u64;
+    let mut rows_with_provider_visible_trace_key = 0u64;
     let mut rows_with_submitted_at = 0u64;
     let mut stale_rows_ignored = 0u64;
     let mut invalid_rows = 0u64;
@@ -192,11 +193,16 @@ pub fn verify_preflight(
                 "correlationId",
                 "correlation_id_hash",
                 "correlationIdHash",
+                "header_value",
+                "headerValue",
                 "header_value_hash",
                 "headerValueHash",
             ],
         ) {
             rows_with_trace_key += 1;
+        }
+        if has_provider_visible_trace_key(&value) {
+            rows_with_provider_visible_trace_key += 1;
         }
         if has_valid_submitted_at(&value) {
             rows_with_submitted_at += 1;
@@ -218,7 +224,7 @@ pub fn verify_preflight(
     }
     if rows_with_trace_key != matched_rows {
         warnings.push(
-            "one or more matched OCI send ledger rows lack a message or correlation key"
+            "one or more matched OCI send ledger rows lack a message, correlation, or header key"
                 .to_string(),
         );
     }
@@ -252,6 +258,7 @@ pub fn verify_preflight(
         matched_rows,
         rows_with_recipient_key,
         rows_with_trace_key,
+        rows_with_provider_visible_trace_key,
         rows_with_submitted_at,
         stale_rows_ignored,
         invalid_rows,
@@ -494,6 +501,11 @@ struct LedgerPrepareContext {
     expected_rows: u64,
     duplicate_recipient_key_count: u64,
     duplicate_trace_key_count: u64,
+    message_id_trace_rows: u64,
+    correlation_id_trace_rows: u64,
+    header_value_trace_rows: u64,
+    provider_visible_trace_candidate_rows: u64,
+    local_correlation_only_rows: u64,
     warnings: Vec<String>,
 }
 
@@ -564,6 +576,11 @@ impl LedgerPrepareContext {
             expected_rows: request.expected_rows,
             duplicate_recipient_key_count: prepared.duplicate_recipient_key_count,
             duplicate_trace_key_count: prepared.duplicate_trace_key_count,
+            message_id_trace_rows: prepared.message_id_trace_rows,
+            correlation_id_trace_rows: prepared.correlation_id_trace_rows,
+            header_value_trace_rows: prepared.header_value_trace_rows,
+            provider_visible_trace_candidate_rows: prepared.provider_visible_trace_candidate_rows,
+            local_correlation_only_rows: prepared.local_correlation_only_rows,
             warnings,
         })
     }
@@ -584,6 +601,11 @@ impl LedgerPrepareContext {
             expected_rows: self.expected_rows,
             duplicate_recipient_key_count: self.duplicate_recipient_key_count,
             duplicate_trace_key_count: self.duplicate_trace_key_count,
+            message_id_trace_rows: self.message_id_trace_rows,
+            correlation_id_trace_rows: self.correlation_id_trace_rows,
+            header_value_trace_rows: self.header_value_trace_rows,
+            provider_visible_trace_candidate_rows: self.provider_visible_trace_candidate_rows,
+            local_correlation_only_rows: self.local_correlation_only_rows,
             campaign_hash: self.campaign_hash.clone(),
             batch_hash: self.batch_hash.clone(),
             sender_domain: Some(self.sender_domain.clone()),
@@ -633,6 +655,11 @@ struct PreparedManifestRows {
     validated_rows: u64,
     duplicate_recipient_key_count: u64,
     duplicate_trace_key_count: u64,
+    message_id_trace_rows: u64,
+    correlation_id_trace_rows: u64,
+    header_value_trace_rows: u64,
+    provider_visible_trace_candidate_rows: u64,
+    local_correlation_only_rows: u64,
     warnings: Vec<String>,
 }
 
@@ -1068,6 +1095,9 @@ fn prepare_manifest_rows(
     let mut trace_keys = BTreeSet::new();
     let mut duplicate_recipient_key_count = 0u64;
     let mut duplicate_trace_key_count = 0u64;
+    let mut message_id_trace_rows = 0u64;
+    let mut correlation_id_trace_rows = 0u64;
+    let mut header_value_trace_rows = 0u64;
     let mut warnings = Vec::new();
 
     for (index, line) in manifest.text.lines().enumerate() {
@@ -1109,6 +1139,12 @@ fn prepare_manifest_rows(
         }
         if !trace_keys.insert(trace_hash.clone()) {
             duplicate_trace_key_count += 1;
+        }
+        match trace_field {
+            "message_id_hash" => message_id_trace_rows += 1,
+            "correlation_id_hash" => correlation_id_trace_rows += 1,
+            "header_value_hash" => header_value_trace_rows += 1,
+            _ => {}
         }
 
         let mut row = Map::new();
@@ -1166,6 +1202,11 @@ fn prepare_manifest_rows(
         rows,
         duplicate_recipient_key_count,
         duplicate_trace_key_count,
+        message_id_trace_rows,
+        correlation_id_trace_rows,
+        header_value_trace_rows,
+        provider_visible_trace_candidate_rows: message_id_trace_rows + header_value_trace_rows,
+        local_correlation_only_rows: correlation_id_trace_rows,
         warnings,
     })
 }
@@ -1536,6 +1577,24 @@ fn has_any_string(value: &Value, keys: &[&str]) -> bool {
     string_any(value, keys).is_some_and(|item| !item.trim().is_empty())
 }
 
+fn has_provider_visible_trace_key(value: &Value) -> bool {
+    has_any_string(
+        value,
+        &[
+            "message_id",
+            "messageId",
+            "provider_message_id",
+            "providerMessageId",
+            "message_id_hash",
+            "messageIdHash",
+            "header_value",
+            "headerValue",
+            "header_value_hash",
+            "headerValueHash",
+        ],
+    )
+}
+
 fn domain_from_address_or_domain(value: &str) -> Option<String> {
     if value.contains('@') {
         return email_domain(value);
@@ -1621,11 +1680,60 @@ mod tests {
         assert_eq!(report.matched_rows, 1);
         assert_eq!(report.rows_with_recipient_key, 1);
         assert_eq!(report.rows_with_trace_key, 1);
+        assert_eq!(report.rows_with_provider_visible_trace_key, 1);
         assert_eq!(report.rows_with_submitted_at, 1);
         assert_eq!(report.stale_rows_ignored, 0);
         assert!(!report.raw_payload_returned);
         assert!(!body.contains("person@example.invalid"));
         assert!(!body.contains("campaign-private"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn preflight_classifies_provider_visible_trace_keys_without_raw_output() {
+        let path = fixture_path("provider-visible-trace");
+        let submitted_at = fresh_submitted_at();
+        write_private_fixture(
+            &path,
+            format!(
+                "{{\"submitted_at\":\"{}\",\"campaign_hash\":\"{}\",\"batch_hash\":\"{}\",\"sender_domain\":\"example.invalid\",\"recipient_hash\":\"{}\",\"correlation_id_hash\":\"{}\"}}\n\
+                 {{\"submitted_at\":\"{}\",\"campaign_hash\":\"{}\",\"batch_hash\":\"{}\",\"sender_domain\":\"example.invalid\",\"recipient_hash\":\"{}\",\"header_value_hash\":\"{}\"}}\n",
+                submitted_at,
+                ledger_hash("campaign-private"),
+                ledger_hash("batch-private"),
+                ledger_hash("person-one@example.invalid"),
+                ledger_hash("trace-one"),
+                submitted_at,
+                ledger_hash("campaign-private"),
+                ledger_hash("batch-private"),
+                ledger_hash("person-two@example.invalid"),
+                ledger_hash("trace-two")
+            ),
+        );
+        let report = verify_preflight(
+            &OciSendLedgerConfig {
+                path: Some(path.to_string_lossy().to_string()),
+                required_for_sends: true,
+            },
+            Some(&OciLedgerPreflightRequest {
+                campaign_id: "campaign-private".to_string(),
+                batch_id: "batch-private".to_string(),
+                expected_rows: 2,
+                sender_domain: Some("example.invalid".to_string()),
+                expected_manifest_sha256: None,
+            }),
+            2,
+            None,
+        );
+        let body = serde_json::to_string(&report).expect("serialize report");
+
+        assert!(report.verified);
+        assert_eq!(report.rows_with_trace_key, 2);
+        assert_eq!(report.rows_with_provider_visible_trace_key, 1);
+        assert!(!body.contains("person-one@example.invalid"));
+        assert!(!body.contains("person-two@example.invalid"));
+        assert!(!body.contains("trace-one"));
+        assert!(!body.contains("trace-two"));
         let _ = fs::remove_file(path);
     }
 
@@ -1762,6 +1870,11 @@ mod tests {
         assert!(!report.apply);
         assert!(!report.ledger_written);
         assert_eq!(report.validated_manifest_rows, 2);
+        assert_eq!(report.message_id_trace_rows, 0);
+        assert_eq!(report.correlation_id_trace_rows, 1);
+        assert_eq!(report.header_value_trace_rows, 1);
+        assert_eq!(report.provider_visible_trace_candidate_rows, 1);
+        assert_eq!(report.local_correlation_only_rows, 1);
         assert!(!report.oci_ledger_preflight.verified);
         assert!(!Path::new(LEDGER).exists());
         assert!(!body.contains("person-one@example.invalid"));
@@ -1874,7 +1987,18 @@ mod tests {
         assert_eq!(report.appended_rows, 2);
         assert!(report.oci_ledger_preflight.verified);
         assert_eq!(report.oci_ledger_preflight.matched_rows, 2);
+        assert_eq!(
+            report
+                .oci_ledger_preflight
+                .rows_with_provider_visible_trace_key,
+            1
+        );
         assert_eq!(report.oci_ledger_preflight.rows_with_submitted_at, 2);
+        assert_eq!(report.message_id_trace_rows, 1);
+        assert_eq!(report.correlation_id_trace_rows, 1);
+        assert_eq!(report.header_value_trace_rows, 0);
+        assert_eq!(report.provider_visible_trace_candidate_rows, 1);
+        assert_eq!(report.local_correlation_only_rows, 1);
         assert_eq!(report.batch_hash, ledger_hash("batch-private"));
         assert!(!report.send_authorized);
         assert!(!report.production_send_authorized);
