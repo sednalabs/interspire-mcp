@@ -20,6 +20,7 @@ pub(super) type CampaignCopyApplyResult = CampaignCopyApplyReport;
 struct CampaignCopyCandidate {
     url: Url,
     route_key: String,
+    constructed_from_visible_route: bool,
 }
 
 pub(super) fn campaign_copy_preview(
@@ -52,6 +53,12 @@ pub(super) fn campaign_copy_preview(
     let candidate = find_campaign_copy_candidate(client, source_campaign_id, &manage_html)?;
     let plan_id = campaign_copy_plan_id(source_campaign_id, &candidate);
 
+    let copy_route_note = if candidate.constructed_from_visible_route {
+        "source campaign Copy route was constructed from another allowlisted Copy route because the source row was not visible on the current manager page"
+    } else {
+        "exact source campaign Copy route found and plan id generated"
+    };
+
     Ok(CampaignCopyPreviewReport {
         ok: true,
         configured: true,
@@ -67,7 +74,7 @@ pub(super) fn campaign_copy_preview(
         ],
         evidence: admin_evidence(vec![
             "allowlisted Newsletter manage GET read for campaign copy preview".to_string(),
-            "exact source campaign Copy route found and plan id generated".to_string(),
+            copy_route_note.to_string(),
         ]),
     })
 }
@@ -95,6 +102,12 @@ pub(super) fn campaign_copy_apply(
                 .to_string(),
         ));
     }
+
+    let copy_route_note = if candidate.constructed_from_visible_route {
+        "source campaign Copy route was constructed from another allowlisted Copy route because the source row was not visible on the current manager page"
+    } else {
+        "exact source campaign Copy route found before apply"
+    };
 
     let response = campaign_copy_get_request(client, candidate.url.clone())?
         .send()
@@ -165,6 +178,7 @@ pub(super) fn campaign_copy_apply(
         ],
         evidence: admin_evidence(vec![
             "allowlisted Newsletter manage GET read before campaign copy".to_string(),
+            copy_route_note.to_string(),
             format!(
                 "allowlisted campaign Copy route returned HTTP {}",
                 status.as_u16()
@@ -185,6 +199,7 @@ fn find_campaign_copy_candidate(
     let document = Html::parse_document(manage_html);
     let selector =
         Selector::parse("a").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let mut fallback = None;
     for link in document.select(&selector) {
         let Some(href) = link.value().attr("href") else {
             continue;
@@ -194,16 +209,51 @@ fn find_campaign_copy_candidate(
             href,
             source_campaign_id,
         ) else {
+            if fallback.is_none() {
+                fallback = fallback_campaign_copy_candidate(client, href, source_campaign_id)?;
+            }
             continue;
         };
         return Ok(CampaignCopyCandidate {
             route_key: route_key(&url),
             url,
+            constructed_from_visible_route: false,
         });
+    }
+    if let Some(candidate) = fallback {
+        return Ok(candidate);
     }
     Err(InterspireError::Safety(format!(
         "no allowlisted Copy route found for source campaign {source_campaign_id}"
     )))
+}
+
+fn fallback_campaign_copy_candidate(
+    client: &AdminHtmlClient,
+    href: &str,
+    source_campaign_id: u64,
+) -> Result<Option<CampaignCopyCandidate>, InterspireError> {
+    let Some(visible_campaign_id) = href_campaign_id(href) else {
+        return Ok(None);
+    };
+    let Ok(visible_url) = safety::ensure_allowed_campaign_copy_get(
+        client.config.base_url.as_deref().unwrap_or_default(),
+        href,
+        visible_campaign_id,
+    ) else {
+        return Ok(None);
+    };
+    let rewritten = rewrite_campaign_copy_url(&visible_url, source_campaign_id);
+    let url = safety::ensure_allowed_campaign_copy_get(
+        client.config.base_url.as_deref().unwrap_or_default(),
+        rewritten.as_str(),
+        source_campaign_id,
+    )?;
+    Ok(Some(CampaignCopyCandidate {
+        route_key: route_key(&url),
+        url,
+        constructed_from_visible_route: true,
+    }))
 }
 
 fn campaign_copy_get_request(
@@ -268,6 +318,52 @@ fn href_targets_campaign(href: &str, campaign_id: u64) -> bool {
     has_newsletters_page && has_exact_campaign_id
 }
 
+fn href_campaign_id(href: &str) -> Option<u64> {
+    let (_, query) = href.split_once('?')?;
+    let mut has_newsletters_page = false;
+    let mut has_copy_action = false;
+    let mut id = None;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "Page" if value.eq_ignore_ascii_case("Newsletters") => {
+                has_newsletters_page = true;
+            }
+            "Action" if value.eq_ignore_ascii_case("Copy") => {
+                has_copy_action = true;
+            }
+            "id" => {
+                id = value.parse::<u64>().ok();
+            }
+            _ => {}
+        }
+    }
+    (has_newsletters_page && has_copy_action)
+        .then_some(id)
+        .flatten()
+}
+
+fn rewrite_campaign_copy_url(url: &Url, source_campaign_id: u64) -> Url {
+    let mut rewritten = url.clone();
+    let pairs = url
+        .query_pairs()
+        .map(|(key, value)| {
+            if key == "id" {
+                (key.to_string(), source_campaign_id.to_string())
+            } else {
+                (key.to_string(), value.to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+    rewritten.set_query(None);
+    {
+        let mut query = rewritten.query_pairs_mut();
+        for (key, value) in pairs {
+            query.append_pair(&key, &value);
+        }
+    }
+    rewritten
+}
+
 fn campaign_copy_plan_id(source_campaign_id: u64, candidate: &CampaignCopyCandidate) -> String {
     let parts = [
         "campaign_copy".to_string(),
@@ -315,5 +411,28 @@ mod tests {
         assert_eq!(route_key(&one), route_key(&two));
         assert!(route_key(&one).contains("Action=Copy"));
         assert!(!route_key(&one).contains("csrf"));
+    }
+
+    #[test]
+    fn can_rewrite_visible_copy_route_for_off_page_campaign() {
+        let visible = Url::parse(
+            "https://example.test/admin/index.php?Page=Newsletters&Action=Copy&id=13&csrfToken=secret",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let rewritten = rewrite_campaign_copy_url(&visible, 2);
+
+        assert!(rewritten
+            .query_pairs()
+            .any(|(key, value)| key == "id" && value == "2"));
+        assert!(rewritten
+            .query_pairs()
+            .any(|(key, value)| key == "csrfToken" && value == "secret"));
+        safety::ensure_allowed_campaign_copy_get(
+            "https://example.test/admin/",
+            rewritten.as_str(),
+            2,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
     }
 }

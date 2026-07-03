@@ -114,7 +114,7 @@ than proprietary Interspire source snippets.
 | `interspire_send_stop_gate_readiness` | No-mutation proof | Combine send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation; any pause still requires separate queue-control apply. |
 | `interspire_campaign_readback` | Read | Read campaign manage rows with structured campaign ids/action flags, or one campaign edit-page summary. |
 | `interspire_campaign_body_audit` | Read | Audit redacted campaign body safety signals without returning raw HTML. |
-| `interspire_campaign_copy_preview` | Read preview | Preview a guarded copy plan for creating a draft from a known campaign. |
+| `interspire_campaign_copy_preview` | Read preview | Preview a guarded copy plan for creating a draft from a known campaign, including off-page source campaigns. |
 | `interspire_campaign_copy_apply` | Guarded apply | Apply one previously previewed campaign-copy plan and return the detected new draft id. |
 | `interspire_campaign_render_artifact` | Private artifact | Write private persisted-campaign render artifacts for native-browser screenshot inspection without returning raw HTML. |
 | `interspire_campaign_test_send_preview` | No-mutation proof | Preview a one-recipient Interspire campaign preview/test send without posting the SendPreview route. |
@@ -129,7 +129,7 @@ than proprietary Interspire source snippets.
 | `interspire_campaign_template_update_apply` | Guarded apply | Apply one previously previewed semantic EDM template edit. |
 | `interspire_campaign_template_artifact_update_preview` | Read preview | Preview applying a fixed private render artifact to a draft campaign without returning raw HTML. |
 | `interspire_campaign_template_artifact_update_apply` | Guarded apply | Apply one previously previewed fixed private render artifact and prove the persisted body hash. |
-| `interspire_campaign_update_preview` | Read preview | Preview guarded campaign content or sender-metadata edits. |
+| `interspire_campaign_update_preview` | Read preview | Preview guarded campaign content or sender-metadata edits, including the documented Archive checkbox. |
 | `interspire_campaign_update_apply` | Guarded apply | Apply one previously previewed campaign edit when guarded form-write gates are enabled. |
 | `interspire_list_update_preview` | Read preview | Preview guarded list metadata edits. |
 | `interspire_list_update_apply` | Guarded apply | Apply one previously previewed list metadata edit when guarded form-write gates are enabled. |
@@ -369,12 +369,15 @@ edit route so non-secret sender/reply/bounce metadata can persist without
 turning on local bounce polling.
 
 `interspire_campaign_copy_preview` and `interspire_campaign_copy_apply` copy a
-known campaign by following only the exact allowlisted Copy route discovered on
-the campaign manage page. The apply step reports the detected new draft id,
-confirms the source and copied campaign edit pages can be read back, and states
-that full body/settings equivalence still needs campaign readback/body audit
-before any send decision. It does not send, schedule, trigger cron, import
-contacts, or alter provider state.
+known campaign by following only an allowlisted Copy route. If the requested
+source campaign is not visible on the current campaign-manager page, the tool
+may construct the same allowlisted Copy route from another visible Copy link,
+then re-run the exact campaign-copy safety classifier against the requested
+source id. The apply step reports the detected new draft id, confirms the
+source and copied campaign edit pages can be read back, and states that full
+body/settings equivalence still needs campaign readback/body audit before any
+send decision. It does not send, schedule, trigger cron, import contacts, or
+alter provider state.
 
 `interspire_campaign_readback` returns compact redacted campaign-row summaries
 for human review and a structured `campaign_manage_rows` array with campaign
