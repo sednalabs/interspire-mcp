@@ -133,9 +133,10 @@ impl GuardedFormTarget {
     }
 }
 
-const CAMPAIGN_WRITE_FIELDS: [&str; 25] = [
+const CAMPAIGN_WRITE_FIELDS: [&str; 26] = [
     "name",
     "subject",
+    "archive",
     "sendfromname",
     "sendfromemail",
     "replytoemail",
@@ -1484,6 +1485,31 @@ mod tests {
         .to_string();
 
         assert!(err.contains("outside the guarded allowlist"));
+    }
+
+    #[test]
+    fn campaign_archive_checkbox_is_guarded_metadata() {
+        let target = GuardedFormTarget::Campaign { campaign_id: 2 };
+        let mut snapshot = checkbox_snapshot("archive", "1", false);
+
+        let changes = apply_requested_updates(
+            &mut snapshot,
+            target.allowed_fields(),
+            &[FormFieldUpdate {
+                name: "archive".to_string(),
+                value: None,
+                checked: Some(true),
+            }],
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].current_value.as_deref(), Some("[unchecked]"));
+        assert_eq!(changes[0].requested_value.as_deref(), Some("1"));
+        assert!(snapshot
+            .controls
+            .iter()
+            .any(|control| control.lower_name == "archive" && control.checked));
     }
 
     #[test]
