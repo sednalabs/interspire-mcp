@@ -1114,6 +1114,8 @@ fn seed_send_apply_contract_is_seed_only_and_redacted() {
     assert!(report.sent);
     assert_eq!(report.reconciliation.status, SendApplyStatus::SeedProven);
     assert_eq!(report.recipient_count, Some(1));
+    assert!(report.send_wizard.is_some());
+    assert!(report.campaign_body.is_some());
     assert_json_bool_field_false(&report, "production_send_authorized");
     assert_payload_excludes_substrings(
         &report,
@@ -1123,6 +1125,41 @@ fn seed_send_apply_contract_is_seed_only_and_redacted() {
             "bounces@example.invalid",
         ],
     );
+}
+
+#[test]
+fn seed_send_apply_denial_omits_unread_proof_blocks() {
+    let report = SeedSendApplyReport::denied(
+        &SeedSendApplyRequest {
+            campaign_id: 88,
+            list_ids: vec![12],
+            expected_recipient_count: 3,
+            expected_from_email: Some("sender@example.invalid".to_string()),
+            expected_reply_to_email: Some("editor@example.invalid".to_string()),
+            expected_subject: Some("Refused subject".to_string()),
+            expected_html_sha256: Some(
+                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+            max_queue_rows: Some(25),
+            oci_ledger_preflight: None,
+            acknowledge_seed_send: false,
+        },
+        true,
+        true,
+        "seed send refused before readiness proof".to_string(),
+    );
+
+    assert!(!report.ok);
+    assert!(!report.sent);
+    assert_eq!(report.campaign_id, 88);
+    assert_eq!(report.requested_list_ids, vec![12]);
+    assert!(report.campaign_body.is_none());
+    assert!(report.send_wizard.is_none());
+    let body = serde_json::to_string(&report).unwrap_or_else(|err| panic!("{err}"));
+    assert!(!body.contains("\"send_wizard\""));
+    assert!(!body.contains("\"campaign_body\""));
+    assert!(!body.contains("Fixture Update"));
+    assert!(!body.contains("w0000"));
 }
 
 #[test]
@@ -1149,6 +1186,8 @@ fn production_send_apply_contract_requires_explicit_authorization_and_redacts() 
     assert!(report.sent);
     assert_eq!(report.reconciliation.status, SendApplyStatus::Processed);
     assert!(report.production_send_authorized);
+    assert!(report.send_wizard.is_some());
+    assert!(report.campaign_body.is_some());
     assert_payload_excludes_substrings(
         &report,
         &[
@@ -1157,6 +1196,44 @@ fn production_send_apply_contract_requires_explicit_authorization_and_redacts() 
             "bounces@example.invalid",
         ],
     );
+}
+
+#[test]
+fn production_send_apply_denial_omits_unread_proof_blocks() {
+    let report = ProductionSendApplyReport::denied(
+        &ProductionSendApplyRequest {
+            campaign_id: 99,
+            list_ids: vec![13],
+            expected_recipient_count: 4,
+            expected_from_email: "sender@example.invalid".to_string(),
+            expected_reply_to_email: "editor@example.invalid".to_string(),
+            expected_subject: "Refused production subject".to_string(),
+            expected_html_sha256:
+                "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
+            ops_work_item_ref: Some("w1234".to_string()),
+            max_queue_rows: Some(25),
+            oci_ledger_preflight: None,
+            acknowledge_production_send: false,
+            confirmation_phrase: "WRONG".to_string(),
+        },
+        true,
+        true,
+        true,
+        "production send refused before readiness proof".to_string(),
+    );
+
+    assert!(!report.ok);
+    assert!(!report.sent);
+    assert!(!report.production_send_authorized);
+    assert_eq!(report.campaign_id, 99);
+    assert_eq!(report.requested_list_ids, vec![13]);
+    assert!(report.campaign_body.is_none());
+    assert!(report.send_wizard.is_none());
+    let body = serde_json::to_string(&report).unwrap_or_else(|err| panic!("{err}"));
+    assert!(!body.contains("\"send_wizard\""));
+    assert!(!body.contains("\"campaign_body\""));
+    assert!(!body.contains("Fixture Update"));
+    assert!(!body.contains("list-3"));
 }
 
 #[test]

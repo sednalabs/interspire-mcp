@@ -1822,8 +1822,8 @@ impl AdminHtmlClient {
             subject: campaign_body.subject.clone(),
             html_sha256: campaign_body.html_sha256.clone(),
             gates,
-            send_wizard,
-            campaign_body,
+            send_wizard: Some(send_wizard),
+            campaign_body: Some(campaign_body),
             post_status_code,
             post_redirected,
             oci_ledger_preflight: OciLedgerPreflightReport::skipped(
@@ -1909,8 +1909,8 @@ impl AdminHtmlClient {
             html_sha256: campaign_body.html_sha256.clone(),
             ops_work_item_ref: request.ops_work_item_ref.clone(),
             gates,
-            send_wizard,
-            campaign_body,
+            send_wizard: Some(send_wizard),
+            campaign_body: Some(campaign_body),
             post_status_code,
             post_redirected,
             oci_ledger_preflight: OciLedgerPreflightReport::skipped(
