@@ -326,8 +326,13 @@ job id, campaign id, list ids, expected queue total, and the
 allowlisted Schedule and Stats pages, returns redacted row summaries and
 progress counters when Interspire exposes them, and explicitly marks direct
 queue-table, jobs-list, stats-table, and unsent-reason aggregates as unavailable
-unless a future reviewed source is added. It must not fabricate processed
-counts or unsent reasons from provider silence.
+unless a future reviewed source is added. Once the Schedule row disappears, a
+completed send can only be treated as application-side completion when exactly
+one Stats row in an uncapped read has the expected recipient count and the row
+does not contain an incidental expected-job-id token. Numeric campaign-id
+matches in Stats text are deliberately ignored because dates and times can
+contain the same tokens. The tool must not fabricate processed counts or unsent
+reasons from provider silence.
 
 `interspire_cron_readiness` is also read-only. It compares cron settings with
 Schedule-page cron detection text but does not request `cron.php`.

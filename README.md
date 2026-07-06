@@ -113,7 +113,7 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_queue_stats_readback` | Read | Read scheduled queue and stats rows without triggering cron. |
 | `interspire_queue_control_preview` | Read preview | Build plan IDs for cancel/delete/pause/resume actions found on the schedule page. |
 | `interspire_queue_control_apply` | Guarded apply | Apply one previously previewed queue cancel/delete/pause/resume plan when write gates are enabled. |
-| `interspire_send_job_status_readback` | Read | Read structured Schedule/Stats status for one expected send job, including redacted row summaries, progress counters when present, queue-control action plans, and explicit unproven table-counter gaps. |
+| `interspire_send_job_status_readback` | Read | Read structured Schedule/Stats status for one expected send job, including redacted row summaries, progress counters when present, queue-control action plans, unique expected-total completed Stats-row proof, and explicit unproven table-counter gaps. |
 | `interspire_cron_readiness` | Read | Compare Interspire cron settings with Schedule-page cron detection without triggering `cron.php`. |
 | `interspire_send_stop_gate_readiness` | No-mutation proof | Combine send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation; any pause still requires separate queue-control apply. |
 | `interspire_campaign_readback` | Read | Read campaign manage rows with structured campaign ids/action flags, or one campaign edit-page summary. |
