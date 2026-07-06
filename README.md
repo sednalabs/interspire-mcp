@@ -509,6 +509,12 @@ object. HTTP success from the final form post is reported only as `posted`.
 When Interspire 8.x renders the final Step4 page without echoing selected
 campaign/list controls, the send tools bind the final POST to the already
 proven request campaign id and list ids rather than trusting stale form values.
+No-send readiness warnings are preserved in the apply receipt, but warnings
+that did not fail blocker gates are not fatal by themselves. Apply refuses
+before the final send boundary only for failed readiness blockers, expected
+subject or body-hash mismatches, unsafe final-form proof, missing runtime gates,
+or ledger failure. Failed post-send reconciliation is reported as a post-boundary
+non-success state, not as proof that no send boundary was attempted.
 The tools then follow the allowlisted Interspire popup send loop, reread
 Schedule and Stats, and classify the result as `posted`, `queued`, `processed`,
 `transport_failed`, `delivered_unverified`, or `seed_proven`. The legacy

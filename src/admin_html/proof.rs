@@ -969,42 +969,17 @@ impl AdminHtmlClient {
             expected_reply_to_email: request.expected_reply_to_email.clone(),
         };
         let readiness = self.seed_readiness_gate(&readiness_request)?;
-        let mut warnings = readiness.warnings.clone();
-        if !readiness.ready_for_seed_approval || !readiness.gates.iter().all(|gate| gate.passed) {
-            warnings.push("seed send refused because readiness gates did not pass".to_string());
-            return Ok(self.seed_send_report_from_readiness(
-                request,
-                guarded_writes_enabled,
-                send_controls_enabled,
-                readiness,
-                false,
-                None,
-                false,
-                0,
-                0,
-                0,
-                0,
-                warnings,
-            ));
-        }
-
-        if let Some(expected_subject) = request.expected_subject.as_deref() {
-            if readiness.campaign_body.subject.as_deref() != Some(expected_subject) {
-                warnings.push(
-                    "seed send refused because campaign subject did not match expected_subject"
-                        .to_string(),
-                );
-            }
-        }
-        if let Some(expected_hash) = request.expected_html_sha256.as_deref() {
-            if readiness.campaign_body.html_sha256.as_deref() != Some(expected_hash) {
-                warnings.push(
-                    "seed send refused because campaign HTML SHA-256 did not match expected_html_sha256"
-                        .to_string(),
-                );
-            }
-        }
-        if !warnings.is_empty() {
+        let refusal_warnings = send_apply_preflight_refusal_warnings(
+            "seed",
+            readiness.ready_for_seed_approval,
+            readiness.campaign_body.subject.as_deref(),
+            request.expected_subject.as_deref(),
+            readiness.campaign_body.html_sha256.as_deref(),
+            request.expected_html_sha256.as_deref(),
+        );
+        if !refusal_warnings.is_empty() {
+            let mut warnings = readiness.warnings.clone();
+            warnings.extend(refusal_warnings);
             return Ok(self.seed_send_report_from_readiness(
                 request,
                 guarded_writes_enabled,
@@ -1039,7 +1014,8 @@ impl AdminHtmlClient {
             max_rows,
         )?;
         if !send_wizard.ok {
-            let mut warnings = send_wizard.warnings.clone();
+            let mut warnings = readiness.warnings.clone();
+            warnings.extend(send_wizard.warnings.clone());
             warnings
                 .push("seed send refused because the final send wizard proof failed".to_string());
             return Ok(self.seed_send_report_from_parts(
@@ -1061,9 +1037,10 @@ impl AdminHtmlClient {
             ));
         }
         if matches!(send_wizard.send_immediately_checked, Some(false)) {
-            let warnings = vec![
+            let mut warnings = readiness.warnings.clone();
+            warnings.push(
                 "seed send refused because final form did not select immediate send".to_string(),
-            ];
+            );
             return Ok(self.seed_send_report_from_parts(
                 request,
                 guarded_writes_enabled,
@@ -1103,7 +1080,8 @@ impl AdminHtmlClient {
             send_evidence.reconciliation.status,
             SendApplyStatus::SeedProven
         ) && send_evidence.reconciliation.job_id.is_some();
-        let warnings = seed_send_apply_warnings(&send_evidence.reconciliation);
+        let mut warnings = readiness.warnings.clone();
+        warnings.extend(seed_send_apply_warnings(&send_evidence.reconciliation));
 
         Ok(self.seed_send_report_from_parts(
             request,
@@ -1189,26 +1167,17 @@ impl AdminHtmlClient {
             expected_reply_to_email: Some(request.expected_reply_to_email.clone()),
         };
         let readiness = self.seed_readiness_gate(&readiness_request)?;
-        let mut warnings = readiness.warnings.clone();
-        if !readiness.ready_for_seed_approval || !readiness.gates.iter().all(|gate| gate.passed) {
-            warnings
-                .push("production send refused because readiness gates did not pass".to_string());
-        }
-        if readiness.campaign_body.subject.as_deref() != Some(request.expected_subject.as_str()) {
-            warnings.push(
-                "production send refused because campaign subject did not match expected_subject"
-                    .to_string(),
-            );
-        }
-        if readiness.campaign_body.html_sha256.as_deref()
-            != Some(request.expected_html_sha256.as_str())
-        {
-            warnings.push(
-                "production send refused because campaign HTML SHA-256 did not match expected_html_sha256"
-                    .to_string(),
-            );
-        }
-        if !warnings.is_empty() {
+        let refusal_warnings = send_apply_preflight_refusal_warnings(
+            "production",
+            readiness.ready_for_seed_approval,
+            readiness.campaign_body.subject.as_deref(),
+            Some(request.expected_subject.as_str()),
+            readiness.campaign_body.html_sha256.as_deref(),
+            Some(request.expected_html_sha256.as_str()),
+        );
+        if !refusal_warnings.is_empty() {
+            let mut warnings = readiness.warnings.clone();
+            warnings.extend(refusal_warnings);
             return Ok(self.production_send_report_from_parts(
                 request,
                 guarded_writes_enabled,
@@ -1247,7 +1216,8 @@ impl AdminHtmlClient {
             max_rows,
         )?;
         if !send_wizard.ok {
-            let mut warnings = send_wizard.warnings.clone();
+            let mut warnings = readiness.warnings.clone();
+            warnings.extend(send_wizard.warnings.clone());
             warnings.push(
                 "production send refused because the final send wizard proof failed".to_string(),
             );
@@ -1271,10 +1241,11 @@ impl AdminHtmlClient {
             ));
         }
         if matches!(send_wizard.send_immediately_checked, Some(false)) {
-            let warnings = vec![
+            let mut warnings = readiness.warnings.clone();
+            warnings.push(
                 "production send refused because final form did not select immediate send"
                     .to_string(),
-            ];
+            );
             return Ok(self.production_send_report_from_parts(
                 request,
                 guarded_writes_enabled,
@@ -1313,7 +1284,10 @@ impl AdminHtmlClient {
         })?;
         let sent = send_evidence.reconciliation.status.terminal_success()
             && send_evidence.reconciliation.job_id.is_some();
-        let warnings = production_send_apply_warnings(&send_evidence.reconciliation);
+        let mut warnings = readiness.warnings.clone();
+        warnings.extend(production_send_apply_warnings(
+            &send_evidence.reconciliation,
+        ));
 
         Ok(self.production_send_report_from_parts(
             request,
@@ -2883,6 +2857,37 @@ fn production_send_apply_warnings(reconciliation: &SendReconciliationReport) -> 
     )
 }
 
+fn send_apply_preflight_refusal_warnings(
+    label: &str,
+    ready_for_seed_approval: bool,
+    actual_subject: Option<&str>,
+    expected_subject: Option<&str>,
+    actual_html_sha256: Option<&str>,
+    expected_html_sha256: Option<&str>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !ready_for_seed_approval {
+        warnings.push(format!(
+            "{label} send refused because readiness gates did not pass"
+        ));
+    }
+    if let Some(expected_subject) = expected_subject {
+        if actual_subject != Some(expected_subject) {
+            warnings.push(format!(
+                "{label} send refused because campaign subject did not match expected_subject"
+            ));
+        }
+    }
+    if let Some(expected_html_sha256) = expected_html_sha256 {
+        if actual_html_sha256 != Some(expected_html_sha256) {
+            warnings.push(format!(
+                "{label} send refused because campaign HTML SHA-256 did not match expected_html_sha256"
+            ));
+        }
+    }
+    warnings
+}
+
 fn send_apply_warnings(
     reconciliation: &SendReconciliationReport,
     label: &str,
@@ -3503,8 +3508,9 @@ mod tests {
         optional_nonempty_sha256, parse_send_wizard_final_page, preview_send_response_success,
         recipient_count_marker, rows_changed_for_send_proof, rows_unchanged_for_send_proof,
         schedule_job_id_from_html, seed_send_apply_warnings, selected_or_hidden_list_ids,
-        send_step2_action_path, sha256_hex, stats_rows_stable_for_no_send_proof,
-        step4_response_summary, transport_failure_reason, validate_single_preview_email,
+        send_apply_preflight_refusal_warnings, send_step2_action_path, sha256_hex,
+        stats_rows_stable_for_no_send_proof, step4_response_summary, transport_failure_reason,
+        validate_single_preview_email,
     };
     use crate::{
         redact,
@@ -4136,6 +4142,69 @@ mod tests {
             &before,
             &after_actual_time_changed
         ));
+    }
+
+    #[test]
+    fn production_preflight_refusal_ignores_non_blocking_readiness_warnings() {
+        let warnings = send_apply_preflight_refusal_warnings(
+            "production",
+            true,
+            Some("Expected Subject"),
+            Some("Expected Subject"),
+            Some("expected-html-sha"),
+            Some("expected-html-sha"),
+        );
+
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn production_preflight_refusal_keeps_blocking_subject_and_hash_mismatches() {
+        let warnings = send_apply_preflight_refusal_warnings(
+            "production",
+            true,
+            Some("Wrong Subject"),
+            Some("Expected Subject"),
+            Some("wrong-html-sha"),
+            Some("expected-html-sha"),
+        );
+
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("campaign subject did not match")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("campaign HTML SHA-256 did not match")));
+    }
+
+    #[test]
+    fn seed_preflight_refusal_allows_absent_optional_subject_and_hash_expectations() {
+        let warnings = send_apply_preflight_refusal_warnings(
+            "seed",
+            true,
+            Some("Current Subject"),
+            None,
+            Some("current-html-sha"),
+            None,
+        );
+
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn send_preflight_refusal_keeps_readiness_gate_blocker() {
+        let warnings = send_apply_preflight_refusal_warnings(
+            "seed",
+            false,
+            Some("Current Subject"),
+            None,
+            Some("current-html-sha"),
+            None,
+        );
+
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("readiness gates did not pass")));
     }
 
     #[test]
