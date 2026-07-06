@@ -33,6 +33,18 @@ This repository contains a public Rust MCP server for Interspire Email Marketer
   raw recipient exports, saved admin HTML from a live system, provider payloads,
   private headers, or local operator files.
 - Public docs and examples must use placeholder hosts and paths.
+- Start Interspire, EDM, or CommsWire operational work from the current work
+  item, ticket, issue, or operations ledger before discovery. Capture known
+  facts, blockers, exact next lookup, and private-evidence pointers there. Do
+  not rely on chat memory or broad workspace searches to rediscover facts that
+  have already been recorded.
+- Keep discovery narrow: read named docs, paths, PRs, workflow runs, and MCP
+  aliases first. If a wider search is genuinely required, record the reason,
+  cap the explicit roots, exclude generated/cache/dependency/transcript/private
+  evidence directories, and stop once the needed evidence is found.
+- For secret-safe operating rules and the reusable discovery checkpoint shape,
+  follow `docs/operator-workflow.md` before touching live Interspire,
+  newsletter, or send-adjacent state.
 - Keep dependencies shallow and consistent with `mcp-toolkit-rs`.
 - Do not let `admin_html.rs`, `live.rs`, or `response.rs` become catch-all
   files. New capability slices should land in named modules with clear

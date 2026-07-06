@@ -92,6 +92,10 @@ For source-derived compatibility work, use
 and the private source checker. Public tests must use synthetic fixtures rather
 than proprietary Interspire source snippets.
 
+For agent/operator discipline around ledger-first discovery, secret-safe
+automation, narrow source harvesting, and no-send proof, use
+[`docs/operator-workflow.md`](docs/operator-workflow.md).
+
 ## Tool Surface
 
 | Tool | Class | Purpose |
@@ -169,21 +173,23 @@ install -m 0755 interspire-mcp /opt/interspire-mcp/interspire-mcp
 Local `cargo build` is fine for development and tests, but do not use a local
 release build as the operator handoff binary.
 
-Run as a stdio MCP server:
+Run as a stdio MCP server through a private launcher outside this repository.
+Do not paste real credentials into shell commands, transcripts, PRs, or public
+docs. The launcher should load secrets from the operator's private mechanism and
+then exec the verified binary:
 
 ```bash
-INTERSPIRE_XML_ENDPOINT='https://example.invalid/xml.php' \
-INTERSPIRE_XML_USERNAME='xml-user' \
-INTERSPIRE_XML_TOKEN='redacted-token' \
-INTERSPIRE_ADMIN_BASE_URL='https://example.invalid/admin/' \
-INTERSPIRE_ADMIN_USERNAME='admin-user' \
-INTERSPIRE_ADMIN_PASSWORD='redacted-password' \
-/opt/interspire-mcp/interspire-mcp
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Export INTERSPIRE_* variables from your private secret store here.
+exec /opt/interspire-mcp/interspire-mcp
 ```
 
 Register it with an MCP client by pointing the client at the verified hosted
 artifact binary and passing credentials through the client's secret/environment
-mechanism:
+mechanism. The JSON below is shape-only; keep real values in the client's
+private secret store where supported:
 
 ```json
 {
