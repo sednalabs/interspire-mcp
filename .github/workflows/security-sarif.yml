@@ -1,0 +1,111 @@
+name: Security SARIF
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  merge_group:
+  schedule:
+    - cron: "47 9 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-sarif::${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  devskim:
+    name: DevSkim SARIF
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        # actions/checkout v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run DevSkim
+        # microsoft/DevSkim-Action v1.0.16
+        uses: microsoft/DevSkim-Action@4b5047945a44163b94642a1cecc0d93a3f428cc6
+        with:
+          directory-to-scan: "."
+          should-scan-archives: false
+          output-filename: devskim-results.sarif
+          ignore-globs: "**/.git/**,**/.gradle/**,**/.kotlin/**,**/build/**,**/target/**,**/node_modules/**"
+
+      - name: Upload DevSkim SARIF
+        # github/codeql-action v4.36.0
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa
+        with:
+          sarif_file: devskim-results.sarif
+          category: devskim/static-analysis
+
+  osv-pr:
+    name: OSV new vulnerability SARIF
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+
+  osv-main:
+    name: OSV full vulnerability SARIF
+    if: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+
+  scorecard:
+    name: OpenSSF Scorecard SARIF
+    if: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    steps:
+      - name: Checkout repository
+        # actions/checkout v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run Scorecard
+        # ossf/scorecard-action v2.4.3
+        uses: ossf/scorecard-action@99c09fe975337306107572b4fdf4db224cf8e2f2
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload Scorecard artifact
+        # actions/upload-artifact v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: scorecard-sarif
+          path: scorecard-results.sarif
+          retention-days: 5
+
+      - name: Upload Scorecard SARIF
+        # github/codeql-action v4.36.0
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa
+        with:
+          sarif_file: scorecard-results.sarif
+          category: scorecard/supply-chain
