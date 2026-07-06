@@ -13,6 +13,7 @@ use crate::{
     },
     safety::{self, AdminReadPage, AdminWriteIntent},
 };
+use reqwest::header::LOCATION;
 use scraper::{ElementRef, Html, Selector};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -454,6 +455,10 @@ pub(super) fn guarded_list_create_apply(
             response.status().as_u16()
         )));
     }
+    let redirect_list_id = list_edit_id_from_response(
+        &response,
+        client.config.base_url.as_deref().unwrap_or_default(),
+    )?;
 
     let after_ids = list_id_inventory(client)?;
     let new_ids = after_ids
@@ -461,14 +466,23 @@ pub(super) fn guarded_list_create_apply(
         .copied()
         .filter(|list_id| !before_ids.contains(list_id))
         .collect::<Vec<_>>();
-    if new_ids.len() != 1 {
-        return Err(InterspireError::Safety(format!(
-            "guarded list create returned but new list id detection found {} new ids; treat apply as unconfirmed",
-            new_ids.len()
-        )));
+    let mut post_create_notes = Vec::new();
+    let mut warnings = vec![
+        "guarded list create applied; this did not import contacts or authorize any send"
+            .to_string(),
+    ];
+    let new_list_id = resolve_created_list_id(
+        &before_ids,
+        &new_ids,
+        redirect_list_id,
+        &mut post_create_notes,
+    )?;
+    if new_ids.is_empty() && redirect_list_id.is_some() {
+        warnings.push(
+            "default Lists inventory did not expose the new id; post-create redirect id was used and then proven from the list edit form"
+                .to_string(),
+        );
     }
-
-    let new_list_id = new_ids[0];
     let after_path = AdminReadPage::ListEdit { id: new_list_id }.path();
     let mut after_html = client.get_allowed(&after_path)?;
     let mut after_snapshot = capture_form_snapshot(
@@ -522,20 +536,117 @@ pub(super) fn guarded_list_create_apply(
         plan_id: expected_plan_id,
         changes,
         post_apply_fields,
-        warnings: vec![
-            "guarded list create applied; this did not import contacts or authorize any send"
-                .to_string(),
-        ],
+        warnings,
         evidence: admin_evidence({
             let mut notes = vec![
                 "allowlisted list create form POST apply succeeded".to_string(),
-                "allowlisted Lists/List edit readback detected exactly one new list".to_string(),
+                "post-create proof selected exactly one new list id".to_string(),
                 "new list metadata was proven from the list edit form after create".to_string(),
             ];
+            notes.append(&mut post_create_notes);
             notes.append(&mut evidence_notes);
             notes
         }),
     })
+}
+
+fn list_edit_id_from_response(
+    response: &reqwest::blocking::Response,
+    base_url: &str,
+) -> Result<Option<u64>, InterspireError> {
+    let Some(location) = response.headers().get(LOCATION) else {
+        return Ok(None);
+    };
+    let location = location.to_str().map_err(|_| {
+        InterspireError::Safety("list create redirect Location header was not valid UTF-8".into())
+    })?;
+    list_edit_id_from_location(base_url, location)
+}
+
+fn list_edit_id_from_location(
+    base_url: &str,
+    location: &str,
+) -> Result<Option<u64>, InterspireError> {
+    let base = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let url = base
+        .join(location)
+        .map_err(|err| InterspireError::Safety(format!("invalid list create redirect: {err}")))?;
+    if url.scheme() != base.scheme()
+        || url.host_str() != base.host_str()
+        || url.port_or_known_default() != base.port_or_known_default()
+    {
+        return Err(InterspireError::Safety(
+            "list create redirect left the configured admin origin".to_string(),
+        ));
+    }
+    if !url.path().starts_with(base.path().trim_end_matches('/')) {
+        return Err(InterspireError::Safety(
+            "list create redirect left the configured admin path".to_string(),
+        ));
+    }
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    let page = pairs
+        .iter()
+        .find(|(key, _)| key == "Page")
+        .map(|(_, value)| value.as_ref());
+    let action = pairs
+        .iter()
+        .find(|(key, _)| key == "Action")
+        .map(|(_, value)| value.as_ref());
+    let id = pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("id"))
+        .and_then(|(_, value)| value.parse::<u64>().ok());
+    if page == Some("Lists") && action == Some("Edit") {
+        if let Some(id) = id {
+            safety::ensure_allowed_admin_get(base_url, &AdminReadPage::ListEdit { id }.path())?;
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+fn resolve_created_list_id(
+    before_ids: &BTreeSet<u64>,
+    inventory_new_ids: &[u64],
+    redirect_list_id: Option<u64>,
+    notes: &mut Vec<String>,
+) -> Result<u64, InterspireError> {
+    match (inventory_new_ids, redirect_list_id) {
+        ([new_id], Some(redirect_id)) if *new_id == redirect_id => {
+            notes.push(
+                "post-create redirect and refreshed Lists inventory agreed on the new list id"
+                    .to_string(),
+            );
+            Ok(*new_id)
+        }
+        ([new_id], Some(redirect_id)) => Err(InterspireError::Safety(format!(
+            "guarded list create returned conflicting new-list proof: inventory id {new_id}, redirect id {redirect_id}; treat apply as unconfirmed"
+        ))),
+        ([new_id], None) => {
+            notes.push("refreshed Lists inventory detected exactly one new list id".to_string());
+            Ok(*new_id)
+        }
+        ([], Some(redirect_id)) if !before_ids.contains(&redirect_id) => {
+            notes.push(
+                "post-create redirect exposed the new list id when refreshed Lists inventory did not"
+                    .to_string(),
+            );
+            Ok(redirect_id)
+        }
+        ([], Some(redirect_id)) => Err(InterspireError::Safety(format!(
+            "guarded list create redirected to existing list id {redirect_id}; treat apply as unconfirmed"
+        ))),
+        ([], None) => Err(InterspireError::Safety(
+            "guarded list create returned but neither refreshed Lists inventory nor post-create redirect proved a new list id; treat apply as unconfirmed"
+                .to_string(),
+        )),
+        (ids, _) => Err(InterspireError::Safety(format!(
+            "guarded list create returned but new list id detection found {} new ids; treat apply as unconfirmed",
+            ids.len()
+        ))),
+    }
 }
 
 fn apply_guarded_form_updates(
@@ -1837,6 +1948,72 @@ mod tests {
         assert!(pairs
             .iter()
             .any(|(name, value)| name == "total_webhooks" && value == "0"));
+    }
+
+    #[test]
+    fn list_create_redirect_location_can_prove_new_list_id() {
+        let id = list_edit_id_from_location(
+            "https://example.test/admin/",
+            "index.php?Page=Lists&Action=Edit&id=42&csrfToken=private",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(id, Some(42));
+    }
+
+    #[test]
+    fn list_create_redirect_location_ignores_non_edit_routes() {
+        let id = list_edit_id_from_location(
+            "https://example.test/admin/",
+            "index.php?Page=Lists&Action=Delete&id=42&csrfToken=private",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn list_create_redirect_location_rejects_external_origin() {
+        let err = list_edit_id_from_location(
+            "https://example.test/admin/",
+            "https://evil.example.invalid/admin/index.php?Page=Lists&Action=Edit&id=42",
+        )
+        .expect_err("external redirect must fail closed");
+
+        assert!(err.to_string().contains("configured admin origin"));
+    }
+
+    #[test]
+    fn list_create_resolver_uses_redirect_when_inventory_is_empty() {
+        let before_ids = BTreeSet::from([40, 41]);
+        let mut notes = Vec::new();
+        let id = resolve_created_list_id(&before_ids, &[], Some(42), &mut notes)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(id, 42);
+        assert!(notes
+            .iter()
+            .any(|note| note.contains("redirect exposed the new list id")));
+    }
+
+    #[test]
+    fn list_create_resolver_rejects_redirect_to_existing_id() {
+        let before_ids = BTreeSet::from([40, 41]);
+        let mut notes = Vec::new();
+        let err = resolve_created_list_id(&before_ids, &[], Some(41), &mut notes)
+            .expect_err("existing redirect id must not prove a new list");
+
+        assert!(err.to_string().contains("existing list id 41"));
+    }
+
+    #[test]
+    fn list_create_resolver_rejects_inventory_redirect_mismatch() {
+        let before_ids = BTreeSet::from([40, 41]);
+        let mut notes = Vec::new();
+        let err = resolve_created_list_id(&before_ids, &[42], Some(43), &mut notes)
+            .expect_err("conflicting proof must fail closed");
+
+        assert!(err.to_string().contains("conflicting new-list proof"));
     }
 
     #[test]
