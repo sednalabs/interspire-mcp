@@ -1,0 +1,12 @@
+name: Forbidden trigger fixture
+
+on:
+  pull_request_target:
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - run: echo "review"

@@ -1,0 +1,2 @@
+| .github/workflows/overbroad-permissions.yml:1:1:13:29 | name: O ... fixture | The Actions token grants 'contents' as a workflow-level write permission. Prefer job-scoped least-privilege permissions. |
+| .github/workflows/overbroad-permissions.yml:11:5:13:29 | Job: validate | The Actions token grants 'contents' as a write permission without a matching write sink. Prefer job-scoped least-privilege permissions. |
