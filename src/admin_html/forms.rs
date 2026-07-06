@@ -1,7 +1,7 @@
 use super::{
-    admin_evidence, admin_origin, csrf_pair, ensure_authenticated_html, extract_ids_from_links,
-    extract_login_csrf_token, looks_like_save_submit, parse_form_values, parse_settings_fields,
-    summarize_field_value, AdminHtmlClient,
+    admin_evidence, admin_origin, compact_text, csrf_pair, ensure_authenticated_html,
+    extract_ids_from_links, extract_login_csrf_token, looks_like_save_submit, parse_form_values,
+    parse_settings_fields, summarize_field_value, AdminHtmlClient,
 };
 use crate::{
     config::WriteExecutionMode,
@@ -762,12 +762,26 @@ fn guarded_campaign_step1_apply(
         &after_html,
         campaign_id,
     )?;
+    let mut warnings = Vec::new();
     let mismatched_fields = changes
         .iter()
         .filter_map(|change| {
             let field_name = applied_control_name(&change.name);
-            (staged.field_fingerprint(&field_name) != after_snapshot.field_fingerprint(&field_name))
-                .then_some(change.name.clone())
+            if campaign_step1_field_persisted(&field_name, &staged, &after_snapshot) {
+                if campaign_step1_field_normalized_by_interspire(
+                    &field_name,
+                    &staged,
+                    &after_snapshot,
+                ) {
+                    warnings.push(format!(
+                        "Interspire normalized campaign Step1 field {} during save; normalized readback matched",
+                        change.name
+                    ));
+                }
+                None
+            } else {
+                Some(change.name.clone())
+            }
         })
         .collect::<Vec<_>>();
     if !mismatched_fields.is_empty() {
@@ -791,10 +805,13 @@ fn guarded_campaign_step1_apply(
         plan_id: expected_plan_id,
         changes,
         post_apply_fields,
-        warnings: vec![
-            "guarded campaign Step1 metadata write applied through Interspire's edit wizard; verify downstream queue or delivery state separately before any send decision"
-                .to_string(),
-        ],
+        warnings: {
+            warnings.push(
+                "guarded campaign Step1 metadata write applied through Interspire's edit wizard; verify downstream queue or delivery state separately before any send decision"
+                    .to_string(),
+            );
+            warnings
+        },
         evidence: admin_evidence(vec![
             format!("allowlisted campaign Step1 form read for campaign {campaign_id}"),
             "allowlisted campaign Step1 handoff POST rendered Step2 form".to_string(),
@@ -803,6 +820,49 @@ fn guarded_campaign_step1_apply(
             "fresh admin session proved campaign Step1 metadata readback".to_string(),
         ]),
     })
+}
+
+fn campaign_step1_field_persisted(
+    lower_name: &str,
+    staged: &FormSnapshot,
+    after_snapshot: &FormSnapshot,
+) -> bool {
+    if lower_name == "name" {
+        let Some(requested) = staged.raw_field_value(lower_name) else {
+            return false;
+        };
+        let Some(actual) = after_snapshot.raw_field_value(lower_name) else {
+            return false;
+        };
+        return normalize_campaign_step1_name_for_readback(requested)
+            == normalize_campaign_step1_name_for_readback(actual);
+    }
+
+    staged.field_fingerprint(lower_name) == after_snapshot.field_fingerprint(lower_name)
+}
+
+fn campaign_step1_field_normalized_by_interspire(
+    lower_name: &str,
+    staged: &FormSnapshot,
+    after_snapshot: &FormSnapshot,
+) -> bool {
+    lower_name == "name"
+        && staged.raw_field_value(lower_name) != after_snapshot.raw_field_value(lower_name)
+        && campaign_step1_field_persisted(lower_name, staged, after_snapshot)
+}
+
+fn normalize_campaign_step1_name_for_readback(value: &str) -> String {
+    let punctuation_as_space = value
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    compact_text(&punctuation_as_space)
 }
 
 fn list_id_inventory(client: &AdminHtmlClient) -> Result<BTreeSet<u64>, InterspireError> {

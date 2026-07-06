@@ -125,7 +125,7 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_campaign_test_send_apply` | Guarded test send | Apply one explicitly acknowledged campaign preview/test send to one recipient after exact preview digest, public preview subject, HTML hash, and send-control runtime gates. The digest also binds raw subject, text/preheader hashes, and the caller-supplied preview sender. |
 | `interspire_oci_send_ledger_prepare_preview` | No-mutation proof | Preview sanitized private OCI send-ledger rows from a private JSONL manifest without writing the ledger or sending. |
 | `interspire_oci_send_ledger_prepare_apply` | Guarded local apply | Write sanitized private OCI send-ledger rows from an acknowledged preview plan, then rerun OCI ledger preflight. This does not contact OCI or perform an Interspire send. |
-| `interspire_send_wizard_readback` | No-mutation proof | Render the Send wizard through the no-send proof boundary and verify queue/stat invariants, including Interspire 8 wizard shapes that echo recipient count rather than selected list ids. |
+| `interspire_send_wizard_readback` | No-mutation proof | Render the Send wizard through the no-send proof boundary and verify queue/no-new-stats invariants, including Interspire 8 wizard shapes that echo recipient count rather than selected list ids. |
 | `interspire_seed_readiness_gate` | No-mutation proof | Combine campaign body audit and Send wizard readback into seed-readiness gates. |
 | `interspire_seed_send_apply` | Guarded send | Apply one explicitly acknowledged bounded seed send after immediate readiness proof and send-control runtime gates. |
 | `interspire_production_send_apply` | Guarded send | Apply an explicitly acknowledged production send after strict readiness proof, exact expected count/sender/subject/hash, and production-send runtime gates. |
@@ -546,7 +546,11 @@ HTML body controls such as `myDevEditControl_html`, then stops before the
 Complete/save form.
 
 `interspire_send_wizard_readback` records Schedule and Stats rows before and
-after the proof render and reports whether those invariants changed.
+after the proof render. Schedule-row changes, new or removed stable Stats rows,
+and shifted Stats row identities remain blockers. Existing Stats-row
+campaign-name text churn is reported as a warning only when the row identity
+after the list/date/count tuple is stable, rather than proof that the no-send
+render queued mail.
 `interspire_seed_readiness_gate` combines that proof with campaign-body safety
 signals so an operator can decide what still needs review before a guarded
 seed or production send. Both tools report `send_performed: false`,

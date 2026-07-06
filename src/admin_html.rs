@@ -3403,6 +3403,47 @@ mod tests {
     }
 
     #[test]
+    fn campaign_metadata_apply_accepts_interspire_normalized_name_readback() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [FormFieldUpdate {
+            name: "name".to_string(),
+            value: Some("Renamed fixture, campaign".to_string()),
+            checked: None,
+        }];
+        let preview = client
+            .campaign_update_preview(7, &updates)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let apply = client
+            .campaign_update_apply(
+                7,
+                &preview.plan_id,
+                &updates,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(apply.ok);
+        assert!(apply.applied);
+        assert!(apply
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("normalized campaign Step1 field name")));
+
+        let readback = client
+            .campaign_readback(Some(7), 5)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let name = readback
+            .campaign_fields
+            .iter()
+            .find(|field| field.name == "name")
+            .and_then(|field| field.value.as_deref());
+        assert_eq!(name, Some("Renamed fixture campaign"));
+    }
+
+    #[test]
     fn campaign_template_apply_posts_step2_body_and_preserves_tracking_flags() {
         let server = spawn_campaign_step2_fixture_server();
         let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
@@ -4456,7 +4497,7 @@ mod tests {
             {
                 *campaign_name.lock().unwrap_or_else(|err| {
                     panic!("campaign name lock poisoned while complete: {err}")
-                }) = value;
+                }) = normalize_fixture_campaign_name(&value);
             }
             "<html><body>saved</body></html>".to_string()
         } else {
@@ -4470,6 +4511,10 @@ mod tests {
         stream
             .write_all(response.as_bytes())
             .unwrap_or_else(|err| panic!("test response write failed: {err}"));
+    }
+
+    fn normalize_fixture_campaign_name(value: &str) -> String {
+        value.replace(',', "")
     }
 
     fn write_fixture_response(stream: &mut std::net::TcpStream, request: &str) {

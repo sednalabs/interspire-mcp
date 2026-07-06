@@ -713,7 +713,8 @@ impl AdminHtmlClient {
         report.stats_rows_before = stats_before.len();
         report.stats_rows_after = stats_after.len();
         report.queue_unchanged = rows_unchanged_for_send_proof(&queue_before, &queue_after);
-        report.stats_unchanged = rows_unchanged_for_send_proof(&stats_before, &stats_after);
+        let stats_content_unchanged = rows_unchanged_for_send_proof(&stats_before, &stats_after);
+        report.stats_unchanged = stats_rows_stable_for_no_send_proof(&stats_before, &stats_after);
 
         if !report.queue_unchanged {
             report
@@ -724,6 +725,11 @@ impl AdminHtmlClient {
             report
                 .warnings
                 .push("Stats rows changed during no-send wizard proof".to_string());
+        } else if !stats_content_unchanged {
+            report.warnings.push(
+                "Stats row content changed during no-send wizard proof, but stable row identity shows no new or removed Stats rows"
+                    .to_string(),
+            );
         }
         if report.selected_campaign_id != Some(request.campaign_id)
             && !report.requested_campaign_available
@@ -1654,7 +1660,8 @@ impl AdminHtmlClient {
         report.stats_rows_before = stats_before.len();
         report.stats_rows_after = stats_after.len();
         report.queue_unchanged = rows_unchanged_for_send_proof(&queue_before, &queue_after);
-        report.stats_unchanged = rows_unchanged_for_send_proof(&stats_before, &stats_after);
+        let stats_content_unchanged = rows_unchanged_for_send_proof(&stats_before, &stats_after);
+        report.stats_unchanged = stats_rows_stable_for_no_send_proof(&stats_before, &stats_after);
 
         if !report.queue_unchanged {
             report
@@ -1665,6 +1672,11 @@ impl AdminHtmlClient {
             report
                 .warnings
                 .push("Stats rows changed during no-send wizard proof".to_string());
+        } else if !stats_content_unchanged {
+            report.warnings.push(
+                "Stats row content changed during no-send wizard proof, but stable row identity shows no new or removed Stats rows"
+                    .to_string(),
+            );
         }
         if report.selected_campaign_id != Some(request.campaign_id)
             && !report.requested_campaign_available
@@ -2566,6 +2578,24 @@ fn rows_unchanged_for_send_proof(before: &[String], after: &[String]) -> bool {
     stable_table_rows_for_send_proof(before) == stable_table_rows_for_send_proof(after)
 }
 
+fn stats_rows_stable_for_no_send_proof(before: &[String], after: &[String]) -> bool {
+    let before_stable = stable_table_rows_for_send_proof(before);
+    let after_stable = stable_table_rows_for_send_proof(after);
+    before_stable == after_stable
+        || stable_stats_row_identities_for_no_send_proof(&before_stable)
+            == stable_stats_row_identities_for_no_send_proof(&after_stable)
+}
+
+fn stable_stats_row_identities_for_no_send_proof(rows: &[String]) -> Vec<String> {
+    rows.iter()
+        .map(|row| {
+            row.find('\'')
+                .map(|idx| compact_text(&row[idx..]))
+                .unwrap_or_else(|| compact_text(row))
+        })
+        .collect()
+}
+
 fn stable_table_rows_for_send_proof(rows: &[String]) -> Vec<String> {
     rows.iter()
         .filter_map(|row| stable_table_row_for_send_proof(row))
@@ -3396,8 +3426,8 @@ mod tests {
         optional_nonempty_sha256, parse_send_wizard_final_page, preview_send_response_success,
         recipient_count_marker, rows_changed_for_send_proof, rows_unchanged_for_send_proof,
         schedule_job_id_from_html, seed_send_apply_warnings, selected_or_hidden_list_ids,
-        send_step2_action_path, sha256_hex, step4_response_summary, transport_failure_reason,
-        validate_single_preview_email,
+        send_step2_action_path, sha256_hex, stats_rows_stable_for_no_send_proof,
+        step4_response_summary, transport_failure_reason, validate_single_preview_email,
     };
     use crate::{
         redact,
@@ -3951,6 +3981,44 @@ mod tests {
 
         assert!(rows_unchanged_for_send_proof(&before, &after));
         assert!(rows_changed_for_send_proof(&before, &changed_data));
+    }
+
+    #[test]
+    fn no_send_stats_stability_allows_existing_row_text_churn_only() {
+        let before = vec![
+            "Email Campaign Statistics".to_string(),
+            "Original Campaign 'Clean List' July 1 2026, 11:41 am July 1 2026, 11:42 am 500 0 0 View Export Print Delete".to_string(),
+        ];
+        let renamed_existing_row = vec![
+            "Email Campaign Statistics".to_string(),
+            "Renamed Campaign 'Clean List' July 1 2026, 11:41 am July 1 2026, 11:42 am 500 0 0 View Export Print Delete".to_string(),
+        ];
+        let added_stats_row = vec![
+            "Email Campaign Statistics".to_string(),
+            "Renamed Campaign 'Clean List' July 1 2026, 11:41 am July 1 2026, 11:42 am 500 0 0 View Export Print Delete".to_string(),
+            "New Campaign 'Clean List' July 1 2026, 11:43 am July 1 2026, 11:44 am 1 0 0 View Export Print Delete".to_string(),
+        ];
+        let shifted_same_count = vec![
+            "Email Campaign Statistics".to_string(),
+            "New Campaign 'Another List' July 1 2026, 11:43 am July 1 2026, 11:44 am 1 0 0 View Export Print Delete".to_string(),
+        ];
+
+        assert!(!rows_unchanged_for_send_proof(
+            &before,
+            &renamed_existing_row
+        ));
+        assert!(stats_rows_stable_for_no_send_proof(
+            &before,
+            &renamed_existing_row
+        ));
+        assert!(!stats_rows_stable_for_no_send_proof(
+            &before,
+            &added_stats_row
+        ));
+        assert!(!stats_rows_stable_for_no_send_proof(
+            &before,
+            &shifted_same_count
+        ));
     }
 
     #[test]
