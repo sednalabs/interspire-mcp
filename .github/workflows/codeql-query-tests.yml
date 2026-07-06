@@ -51,3 +51,7 @@ jobs:
       - name: Compile custom action-workflow queries
         run: |
           "${{ steps.setup-codeql.outputs.codeql-path }}" query compile .github/codeql/actions-workflow-security/*.ql
+
+      - name: Run action-workflow query tests
+        run: |
+          "${{ steps.setup-codeql.outputs.codeql-path }}" test run .github/codeql/actions-workflow-security/test --search-path .github/codeql

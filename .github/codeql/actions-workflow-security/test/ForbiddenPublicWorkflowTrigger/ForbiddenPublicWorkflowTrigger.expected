@@ -1,0 +1,1 @@
+| .github/workflows/forbidden-trigger.yml:8:5:12:27 | Job: review | The workflow uses the forbidden public-repository trigger 'pull_request_target'. Use pull_request with read-only permissions, or split trusted write operations into a protected workflow. |
