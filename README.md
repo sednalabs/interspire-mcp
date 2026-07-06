@@ -133,8 +133,8 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_campaign_template_update_apply` | Guarded apply | Apply one previously previewed semantic EDM template edit. |
 | `interspire_campaign_template_artifact_update_preview` | Read preview | Preview applying a fixed private render artifact to a draft campaign without returning raw HTML. |
 | `interspire_campaign_template_artifact_update_apply` | Guarded apply | Apply one previously previewed fixed private render artifact and prove the persisted body hash. |
-| `interspire_campaign_update_preview` | Read preview | Preview guarded campaign content or sender-metadata edits, including the documented Archive checkbox. |
-| `interspire_campaign_update_apply` | Guarded apply | Apply one previously previewed campaign edit when guarded form-write gates are enabled. |
+| `interspire_campaign_update_preview` | Read preview | Preview guarded campaign content or metadata edits, including Interspire 8 Step1 campaign-name edits and the documented Archive checkbox. |
+| `interspire_campaign_update_apply` | Guarded apply | Apply one previously previewed campaign edit when guarded form-write gates are enabled, with Step1 campaign-name changes proven through the wizard Complete/save path. |
 | `interspire_list_update_preview` | Read preview | Preview guarded list metadata edits. |
 | `interspire_list_update_apply` | Guarded apply | Apply one previously previewed list metadata edit when guarded form-write gates are enabled. |
 | `interspire_list_create_preview` | Read preview | Preview guarded list creation with sender/reply/bounce metadata. |
@@ -154,6 +154,12 @@ There is intentionally no generic admin URL fetch tool, raw contact dump tool,
 generic send tool, schedule tool, contact-import apply tool, unsubscribe
 mutation tool, suppression mutation tool, SMTP password tool, provider tool, or
 DNS tool.
+
+For Interspire 8 wizard-backed campaigns, keep Step1-only metadata changes
+separate from body/template changes. The campaign update apply path posts the
+Step1 handoff, posts the preserved Complete/save form, and then proves the
+Step1 value from a fresh admin session. Mixed Step1 campaign-name plus body
+edits fail closed so operators can verify each surface independently.
 
 ## Quick Start
 

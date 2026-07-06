@@ -1,7 +1,7 @@
 use super::{
-    admin_evidence, admin_origin, csrf_pair, extract_ids_from_links, extract_login_csrf_token,
-    looks_like_save_submit, parse_form_values, parse_settings_fields, summarize_field_value,
-    AdminHtmlClient,
+    admin_evidence, admin_origin, csrf_pair, ensure_authenticated_html, extract_ids_from_links,
+    extract_login_csrf_token, looks_like_save_submit, parse_form_values, parse_settings_fields,
+    summarize_field_value, AdminHtmlClient,
 };
 use crate::{
     config::WriteExecutionMode,
@@ -257,14 +257,8 @@ pub(super) fn guarded_write_preview(
     }
     client.login()?;
 
-    let (read_path, html, mut evidence_notes) =
-        guarded_form_html_for_updates(client, target, updates)?;
-    let snapshot = capture_form_snapshot(
-        client.config.base_url.as_deref().unwrap_or_default(),
-        &read_path,
-        &html,
-        &target,
-    )?;
+    let (_read_path, _html, snapshot, mut evidence_notes) =
+        guarded_form_snapshot_for_updates(client, target, updates)?;
     let mut staged = snapshot.clone();
     let changes = apply_requested_updates(&mut staged, target.allowed_fields(), updates)?;
     let plan_id = form_plan_id(target, &snapshot, &staged);
@@ -310,14 +304,14 @@ pub(super) fn guarded_write_apply(
     }
     client.login()?;
 
-    let (read_path, html, mut evidence_notes) =
-        guarded_form_html_for_updates(client, target, updates)?;
-    let snapshot = capture_form_snapshot(
-        client.config.base_url.as_deref().unwrap_or_default(),
-        &read_path,
-        &html,
-        &target,
-    )?;
+    if matches!(target, GuardedFormTarget::Campaign { .. })
+        && campaign_step1_flow_requested(updates)
+    {
+        return guarded_campaign_step1_apply(client, target, plan_id, updates, mode);
+    }
+
+    let (read_path, html, snapshot, mut evidence_notes) =
+        guarded_form_snapshot_for_updates(client, target, updates)?;
     let mut staged = snapshot.clone();
     let changes = apply_requested_updates(&mut staged, target.allowed_fields(), updates)?;
     let expected_plan_id = form_plan_id(target, &snapshot, &staged);
@@ -679,6 +673,138 @@ fn apply_guarded_form_updates(
     Ok(())
 }
 
+fn guarded_campaign_step1_apply(
+    client: &AdminHtmlClient,
+    target: GuardedFormTarget,
+    plan_id: &str,
+    updates: &[FormFieldUpdate],
+    mode: WriteExecutionMode,
+) -> Result<GuardedWriteApplyReport, InterspireError> {
+    let GuardedFormTarget::Campaign { campaign_id } = target else {
+        return Err(InterspireError::Safety(
+            "campaign Step1 apply was called for a non-campaign target".to_string(),
+        ));
+    };
+    ensure_campaign_step1_updates_only(updates)?;
+
+    let read_path = target.read_page().path();
+    let step1_html = client.get_allowed(&read_path)?;
+    let snapshot = capture_campaign_step1_snapshot(
+        client.config.base_url.as_deref().unwrap_or_default(),
+        &read_path,
+        &step1_html,
+        campaign_id,
+    )?;
+    let mut staged = snapshot.clone();
+    let changes = apply_requested_updates(&mut staged, target.allowed_fields(), updates)?;
+    let expected_plan_id = form_plan_id(target, &snapshot, &staged);
+
+    if plan_id != expected_plan_id {
+        return Err(InterspireError::Safety(
+            "plan_id does not match the current campaign Step1 form fingerprint and requested changes"
+                .to_string(),
+        ));
+    }
+
+    let requested_fields = changes
+        .iter()
+        .map(|change| applied_control_name(&change.name))
+        .collect::<BTreeSet<_>>();
+    let step1_post_fields = staged.to_post_pairs_for_fields(&requested_fields);
+    let step2_response = guarded_form_post(
+        client,
+        &snapshot,
+        &step1_post_fields,
+        &step1_html,
+        &read_path,
+    )?;
+    if !step2_response.status().is_success() && !step2_response.status().is_redirection() {
+        return Err(InterspireError::Http(format!(
+            "guarded campaign Step1 handoff returned HTTP {}",
+            step2_response.status().as_u16()
+        )));
+    }
+    let step2_html = step2_response
+        .text()
+        .map_err(|err| InterspireError::Http(err.to_string()))?;
+    ensure_authenticated_html(&step2_html)?;
+
+    let step2_snapshot = capture_form_snapshot(
+        client.config.base_url.as_deref().unwrap_or_default(),
+        &read_path,
+        &step2_html,
+        &target,
+    )?;
+    let step2_post_fields = step2_snapshot.to_post_pairs_for_fields(&BTreeSet::new());
+    let complete_response = guarded_form_post(
+        client,
+        &step2_snapshot,
+        &step2_post_fields,
+        &step2_html,
+        &read_path,
+    )?;
+    if !complete_response.status().is_success() && !complete_response.status().is_redirection() {
+        return Err(InterspireError::Http(format!(
+            "guarded campaign Complete/save returned HTTP {}",
+            complete_response.status().as_u16()
+        )));
+    }
+
+    // Interspire carries Step1 wizard fields through server-side state into
+    // the final Complete save. Prove durability from a fresh admin session so
+    // a transient wizard page cannot satisfy the requested Step1 field change.
+    let fresh_client = AdminHtmlClient::new(client.config.clone())?;
+    fresh_client.login()?;
+    let after_html = fresh_client.get_allowed(&read_path)?;
+    let after_snapshot = capture_campaign_step1_snapshot(
+        client.config.base_url.as_deref().unwrap_or_default(),
+        &read_path,
+        &after_html,
+        campaign_id,
+    )?;
+    let mismatched_fields = changes
+        .iter()
+        .filter_map(|change| {
+            let field_name = applied_control_name(&change.name);
+            (staged.field_fingerprint(&field_name) != after_snapshot.field_fingerprint(&field_name))
+                .then_some(change.name.clone())
+        })
+        .collect::<Vec<_>>();
+    if !mismatched_fields.is_empty() {
+        return Err(InterspireError::Safety(format!(
+            "guarded campaign Step1 write readback did not persist requested fields: {}",
+            mismatched_fields.join(", ")
+        )));
+    }
+    let post_apply_fields = parse_redacted_fields_by_names(&after_html, &["name", "format"])?;
+
+    Ok(GuardedWriteApplyReport {
+        ok: true,
+        configured: true,
+        guarded_writes_enabled: true,
+        form_write_controls_enabled: true,
+        write_execution_mode: mode,
+        target: target.label().to_string(),
+        target_id: target.target_id(),
+        section: target.section_name().map(ToString::to_string),
+        applied: true,
+        plan_id: expected_plan_id,
+        changes,
+        post_apply_fields,
+        warnings: vec![
+            "guarded campaign Step1 metadata write applied through Interspire's edit wizard; verify downstream queue or delivery state separately before any send decision"
+                .to_string(),
+        ],
+        evidence: admin_evidence(vec![
+            format!("allowlisted campaign Step1 form read for campaign {campaign_id}"),
+            "allowlisted campaign Step1 handoff POST rendered Step2 form".to_string(),
+            "allowlisted campaign Complete/save POST submitted preserved Step2 form state"
+                .to_string(),
+            "fresh admin session proved campaign Step1 metadata readback".to_string(),
+        ]),
+    })
+}
+
 fn list_id_inventory(client: &AdminHtmlClient) -> Result<BTreeSet<u64>, InterspireError> {
     let html = client.get_allowed(&AdminReadPage::Lists.path())?;
     let ids = extract_ids_from_links(&html, "Page=Lists", "id");
@@ -775,6 +901,43 @@ fn guarded_form_html(
     guarded_form_html_for_updates(client, target, &[])
 }
 
+fn guarded_form_snapshot_for_updates(
+    client: &AdminHtmlClient,
+    target: GuardedFormTarget,
+    updates: &[FormFieldUpdate],
+) -> Result<(String, String, FormSnapshot, Vec<String>), InterspireError> {
+    if let GuardedFormTarget::Campaign { campaign_id } = target {
+        if campaign_step1_flow_requested(updates) {
+            ensure_campaign_step1_updates_only(updates)?;
+            let read_path = target.read_page().path();
+            let html = client.get_allowed(&read_path)?;
+            let snapshot = capture_campaign_step1_snapshot(
+                client.config.base_url.as_deref().unwrap_or_default(),
+                &read_path,
+                &html,
+                campaign_id,
+            )?;
+            return Ok((
+                read_path,
+                html,
+                snapshot,
+                vec![format!(
+                    "allowlisted campaign Step1 form read for campaign {campaign_id}; final Complete/save form was not posted during preview"
+                )],
+            ));
+        }
+    }
+
+    let (read_path, html, notes) = guarded_form_html_for_updates(client, target, updates)?;
+    let snapshot = capture_form_snapshot(
+        client.config.base_url.as_deref().unwrap_or_default(),
+        &read_path,
+        &html,
+        &target,
+    )?;
+    Ok((read_path, html, snapshot, notes))
+}
+
 fn guarded_form_html_for_updates(
     client: &AdminHtmlClient,
     target: GuardedFormTarget,
@@ -847,6 +1010,28 @@ fn campaign_step1_format_override(
     }
 
     Ok(text_body_requested.then_some("b"))
+}
+
+fn campaign_step1_flow_requested(updates: &[FormFieldUpdate]) -> bool {
+    updates
+        .iter()
+        .any(|update| update.name.trim().eq_ignore_ascii_case("name"))
+}
+
+fn ensure_campaign_step1_updates_only(updates: &[FormFieldUpdate]) -> Result<(), InterspireError> {
+    let unsupported = updates
+        .iter()
+        .map(|update| update.name.trim().to_ascii_lowercase())
+        .filter(|name| !matches!(name.as_str(), "name" | "format"))
+        .collect::<Vec<_>>();
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+
+    Err(InterspireError::Safety(format!(
+        "campaign Step1 updates that include name must be applied separately from Step2/body fields; unsupported mixed fields: {}",
+        unsupported.join(", ")
+    )))
 }
 
 fn campaign_text_body_requested(updates: &[FormFieldUpdate]) -> bool {
@@ -1073,6 +1258,49 @@ fn capture_form_snapshot(
         "no guarded-write form matched target {} on {}",
         target.label(),
         current_url
+    )))
+}
+
+fn capture_campaign_step1_snapshot(
+    base_url: &str,
+    current_path: &str,
+    html: &str,
+    campaign_id: u64,
+) -> Result<FormSnapshot, InterspireError> {
+    let base = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let current_url = base
+        .join(current_path)
+        .map_err(|err| InterspireError::Safety(format!("invalid current admin path: {err}")))?;
+    let document = Html::parse_document(html);
+    let form_selector =
+        Selector::parse("form").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+
+    for form in document.select(&form_selector) {
+        let action = form.value().attr("action").unwrap_or(current_path);
+        let Ok(action_url) =
+            safety::ensure_allowed_campaign_body_step2_post(base_url, action, campaign_id)
+        else {
+            continue;
+        };
+        let controls = parse_form_controls(&form);
+        if controls.is_empty() {
+            continue;
+        }
+        let has_step1_control = controls
+            .iter()
+            .any(|control| matches!(control.lower_name.as_str(), "name" | "format"));
+        if !has_step1_control {
+            continue;
+        }
+        return Ok(FormSnapshot {
+            action_url,
+            controls,
+        });
+    }
+
+    Err(InterspireError::HtmlParse(format!(
+        "no campaign Step1 guarded-write form matched campaign {campaign_id} on {current_url}"
     )))
 }
 

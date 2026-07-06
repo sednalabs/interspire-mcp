@@ -3301,6 +3301,108 @@ mod tests {
     }
 
     #[test]
+    fn campaign_metadata_preview_uses_interspire_8_step1_form() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = client
+            .campaign_update_preview(
+                7,
+                &[FormFieldUpdate {
+                    name: "name".to_string(),
+                    value: Some("Renamed fixture campaign".to_string()),
+                    checked: None,
+                }],
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.ok);
+        assert!(report
+            .available_fields
+            .iter()
+            .any(|field| { field.name == "name" && field.control_kind == "text" }));
+        assert_eq!(report.changes.len(), 1);
+        assert_eq!(report.changes[0].name, "name");
+        assert!(report
+            .evidence
+            .notes
+            .iter()
+            .any(|note| note.contains("Step1 form read")));
+        let requests = server.requests();
+        assert!(!requests.iter().any(|request| {
+            request.starts_with(
+                "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7 ",
+            )
+        }));
+    }
+
+    #[test]
+    fn campaign_metadata_apply_posts_step1_then_complete_and_proves_name() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [FormFieldUpdate {
+            name: "name".to_string(),
+            value: Some("Renamed fixture campaign".to_string()),
+            checked: None,
+        }];
+        let preview = client
+            .campaign_update_preview(7, &updates)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let apply = client
+            .campaign_update_apply(
+                7,
+                &preview.plan_id,
+                &updates,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(apply.ok);
+        assert!(apply.applied);
+        assert_eq!(apply.changes.len(), 1);
+        assert_eq!(apply.changes[0].name, "name");
+        assert!(apply
+            .evidence
+            .notes
+            .iter()
+            .any(|note| note.contains("fresh admin session proved campaign Step1 metadata")));
+
+        let readback = client
+            .campaign_readback(Some(7), 5)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let name = readback
+            .campaign_fields
+            .iter()
+            .find(|field| field.name == "name")
+            .and_then(|field| field.value.as_deref());
+        assert_eq!(name, Some("Renamed fixture campaign"));
+
+        let requests = server.requests();
+        let step1_post = requests
+            .iter()
+            .find(|request| {
+                request.starts_with(
+                    "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7 ",
+                )
+            })
+            .unwrap_or_else(|| panic!("Step1 handoff request should be posted"));
+        assert!(step1_post.contains("Name=Renamed+fixture+campaign"));
+        let complete_post = requests
+            .iter()
+            .find(|request| {
+                request.starts_with(
+                    "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7 ",
+                )
+            })
+            .unwrap_or_else(|| panic!("Complete/save request should be posted"));
+        assert!(complete_post.contains("Subject=Original+subject"));
+        assert!(complete_post.contains("myDevEditControl_html=%3Cp%3EOriginal+body"));
+    }
+
+    #[test]
     fn campaign_template_apply_posts_step2_body_and_preserves_tracking_flags() {
         let server = spawn_campaign_step2_fixture_server();
         let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
@@ -3444,6 +3546,34 @@ mod tests {
             err,
             InterspireError::Safety(message)
                 if message.contains("text body updates require Text+HTML campaign format")
+        ));
+    }
+
+    #[test]
+    fn campaign_metadata_update_rejects_mixed_step1_and_body_fields() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [
+            FormFieldUpdate {
+                name: "name".to_string(),
+                value: Some("Renamed fixture campaign".to_string()),
+                checked: None,
+            },
+            FormFieldUpdate {
+                name: "html_body".to_string(),
+                value: Some("<p>Updated body %%UNSUBSCRIBELINK%%</p>".to_string()),
+                checked: None,
+            },
+        ];
+
+        let err = client
+            .campaign_update_preview(7, &updates)
+            .expect_err("mixed Step1 and body update should fail closed");
+        assert!(matches!(
+            err,
+            InterspireError::Safety(message)
+                if message.contains("must be applied separately from Step2/body fields")
         ));
     }
 
@@ -4005,9 +4135,13 @@ mod tests {
         ));
         let body_text = Arc::new(Mutex::new("".to_string()));
         let campaign_format = Arc::new(Mutex::new("h".to_string()));
+        let campaign_name = Arc::new(Mutex::new("Fixture campaign".to_string()));
+        let pending_campaign_name = Arc::new(Mutex::new(None::<String>));
         let thread_body_html = Arc::clone(&body_html);
         let thread_body_text = Arc::clone(&body_text);
         let thread_campaign_format = Arc::clone(&campaign_format);
+        let thread_campaign_name = Arc::clone(&campaign_name);
+        let thread_pending_campaign_name = Arc::clone(&pending_campaign_name);
 
         let handle = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -4034,6 +4168,8 @@ mod tests {
                             &thread_body_html,
                             &thread_body_text,
                             &thread_campaign_format,
+                            &thread_campaign_name,
+                            &thread_pending_campaign_name,
                         );
                         if thread_requests
                             .lock()
@@ -4196,6 +4332,8 @@ mod tests {
         body_html: &Arc<Mutex<String>>,
         body_text: &Arc<Mutex<String>>,
         campaign_format: &Arc<Mutex<String>>,
+        campaign_name: &Arc<Mutex<String>>,
+        pending_campaign_name: &Arc<Mutex<Option<String>>>,
     ) {
         let body = if request.starts_with("GET /admin/index.php?Page=Login&Action=Login ") {
             r#"<form method="post" action="index.php?Page=Login&Action=Login">
@@ -4211,18 +4349,23 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|err| panic!("campaign format lock poisoned: {err}"))
                 .clone();
+            let name = campaign_name
+                .lock()
+                .unwrap_or_else(|err| panic!("campaign name lock poisoned: {err}"))
+                .clone();
             let text_checked = if format == "t" { " checked" } else { "" };
             let html_checked = if format == "h" { " checked" } else { "" };
             let both_checked = if format == "b" { " checked" } else { "" };
             r#"<form action="index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7">
                 <input type="hidden" name="csrf_token" value="fixture-csrf">
-                <input name="Name" value="Fixture campaign">
+                <input name="Name" value="{name}">
                 <input type="radio" name="Format" value="t"{text_checked}>
                 <input type="radio" name="Format" value="h"{html_checked}>
                 <input type="radio" name="Format" value="b"{both_checked}>
                 <input type="hidden" name="usewysiwyg" value="3">
                 <input type="submit" name="NextButton" value="Next &gt;&gt;">
               </form>"#
+                .replace("{name}", &name)
                 .replace("{text_checked}", text_checked)
                 .replace("{html_checked}", html_checked)
                 .replace("{both_checked}", both_checked)
@@ -4233,6 +4376,13 @@ mod tests {
                 .split_once("\r\n\r\n")
                 .map(|(_, body)| body)
                 .unwrap_or_default();
+            if let Some((_, value)) = url::form_urlencoded::parse(request_body.as_bytes())
+                .find(|(name, _)| name == "Name")
+            {
+                *pending_campaign_name.lock().unwrap_or_else(|err| {
+                    panic!("pending campaign name lock poisoned while step2: {err}")
+                }) = Some(value.into_owned());
+            }
             let render_format = url::form_urlencoded::parse(request_body.as_bytes())
                 .find(|(name, _)| name == "Format")
                 .map(|(_, value)| value.into_owned())
@@ -4298,6 +4448,15 @@ mod tests {
                 *campaign_format.lock().unwrap_or_else(|err| {
                     panic!("campaign format lock poisoned while complete: {err}")
                 }) = value.into_owned();
+            }
+            if let Some(value) = pending_campaign_name
+                .lock()
+                .unwrap_or_else(|err| panic!("pending campaign name lock poisoned: {err}"))
+                .take()
+            {
+                *campaign_name.lock().unwrap_or_else(|err| {
+                    panic!("campaign name lock poisoned while complete: {err}")
+                }) = value;
             }
             "<html><body>saved</body></html>".to_string()
         } else {
