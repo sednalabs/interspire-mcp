@@ -289,20 +289,53 @@ fn build_send_job_status_report(
     }
 
     let stats_matches = matching_stats_rows(request, &stats_rows);
+    let stats_counts = stats_matches
+        .iter()
+        .filter_map(|row| parse_stats_row_counts(row))
+        .collect::<Vec<_>>();
+    let unique_stats_counts = (stats_counts.len() == 1).then(|| stats_counts[0]);
+    let stats_rows_maybe_capped = stats_rows.len() >= request.max_rows.unwrap_or(25);
+    let stats_row_has_incidental_job_id = stats_matches
+        .iter()
+        .any(|row| row_mentions_id(row, request.expected_job_id));
+    let stats_identity_verified = matching_links.is_empty()
+        && row_summaries.is_empty()
+        && !stats_rows_maybe_capped
+        && !stats_row_has_incidental_job_id
+        && stats_matches.len() == 1
+        && request.expected_queue_total.is_some_and(|expected| {
+            unique_stats_counts.is_some_and(|counts| counts.recipients == expected)
+        });
     let stats_sent = stats_matches
         .iter()
-        .find_map(|row| parse_named_count(row, "sent"));
-    let stats_failed = stats_matches.iter().find_map(|row| {
-        parse_named_count(row, "failed").or_else(|| parse_named_count(row, "bounce"))
-    });
+        .find_map(|row| parse_named_count(row, "sent"))
+        .or_else(|| {
+            stats_identity_verified
+                .then(|| unique_stats_counts.map(|counts| counts.recipients))
+                .flatten()
+        });
+    let stats_failed = stats_matches
+        .iter()
+        .find_map(|row| {
+            parse_named_count(row, "failed").or_else(|| parse_named_count(row, "bounce"))
+        })
+        .or_else(|| {
+            stats_identity_verified
+                .then(|| unique_stats_counts.map(|counts| counts.bounces))
+                .flatten()
+        });
 
-    let total = schedule_total;
+    let total = schedule_total.or_else(|| {
+        stats_identity_verified
+            .then(|| unique_stats_counts.map(|counts| counts.recipients))
+            .flatten()
+    });
     let processed = schedule_sent.or(stats_sent);
     let unprocessed = match (total, processed) {
         (Some(total), Some(processed)) if total >= processed => Some(total - processed),
         _ => None,
     };
-    let identity_verified = !matching_links.is_empty();
+    let identity_verified = !matching_links.is_empty() || stats_identity_verified;
     let campaign_id = request.expected_campaign_id;
     let mut warnings = Vec::new();
     if !identity_verified {
@@ -318,8 +351,38 @@ fn build_send_job_status_report(
         );
     }
     if request.expected_queue_total.is_some() && schedule_total.is_none() {
+        if stats_identity_verified {
+            warnings.push(
+                "expected queue total was supplied by caller and proven only by a unique completed Stats row"
+                    .to_string(),
+            );
+        } else {
+            warnings.push(
+                "expected queue total was supplied by caller but not proven by the Schedule page"
+                    .to_string(),
+            );
+        }
+    }
+    if stats_rows_maybe_capped && !stats_matches.is_empty() && !identity_verified {
         warnings.push(
-            "expected queue total was supplied by caller but not proven by the Schedule page"
+            "Stats row uniqueness was not proven because the fetched Stats row slice reached the configured cap"
+                .to_string(),
+        );
+    }
+    if stats_row_has_incidental_job_id && !matching_links.is_empty() {
+        warnings.push(
+            "Stats row text contained the expected job id token, but Schedule identity remained authoritative"
+                .to_string(),
+        );
+    } else if stats_row_has_incidental_job_id {
+        warnings.push(
+            "Stats row text contained the expected job id token; this was treated as incidental text rather than completed-send identity proof"
+                .to_string(),
+        );
+    }
+    if stats_matches.len() > 1 && !identity_verified {
+        warnings.push(
+            "multiple completed Stats rows matched the expected recipient count, so completed-send identity was not proven"
                 .to_string(),
         );
     }
@@ -378,8 +441,10 @@ fn build_send_job_status_report(
             row_summaries: stats_matches,
             sent_count: stats_sent,
             failed_count: stats_failed,
-            state: if stats_sent.is_some() || stats_failed.is_some() {
+            state: if stats_identity_verified {
                 "present".to_string()
+            } else if stats_sent.is_some() || stats_failed.is_some() || !stats_counts.is_empty() {
+                "ambiguous".to_string()
             } else {
                 "pending".to_string()
             },
@@ -501,6 +566,38 @@ fn number_after(value: &str) -> Option<u64> {
         .ok()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StatsRowCounts {
+    recipients: u64,
+    _unsubscribes: u64,
+    bounces: u64,
+}
+
+fn parse_stats_row_counts(row: &str) -> Option<StatsRowCounts> {
+    let tokens = row
+        .split_whitespace()
+        .map(|token| token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != ','))
+        .collect::<Vec<_>>();
+    let action_index = tokens
+        .iter()
+        .rposition(|token| token.eq_ignore_ascii_case("view"))?;
+    if action_index < 3 {
+        return None;
+    }
+    let recipients = parse_count_token(tokens[action_index - 3])?;
+    let unsubscribes = parse_count_token(tokens[action_index - 2])?;
+    let bounces = parse_count_token(tokens[action_index - 1])?;
+    Some(StatsRowCounts {
+        recipients,
+        _unsubscribes: unsubscribes,
+        bounces,
+    })
+}
+
+fn parse_count_token(token: &str) -> Option<u64> {
+    token.replace(',', "").parse::<u64>().ok()
+}
+
 fn row_mentions_id(row: &str, id: u64) -> bool {
     let needle = id.to_string();
     row.split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -514,10 +611,9 @@ fn matching_stats_rows(
     stats_rows
         .iter()
         .filter(|row| {
-            row_mentions_id(row, request.expected_job_id)
-                || request
-                    .expected_campaign_id
-                    .is_some_and(|campaign_id| row_mentions_id(row, campaign_id))
+            request.expected_queue_total.is_some_and(|expected| {
+                parse_stats_row_counts(row).is_some_and(|counts| counts.recipients == expected)
+            })
         })
         .cloned()
         .collect()
@@ -850,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn omitted_campaign_id_does_not_match_unrelated_stats_rows() {
+    fn stats_rows_do_not_match_numeric_id_tokens_without_expected_total() {
         let request = SendJobStatusReadbackRequest {
             expected_job_id: 13,
             expected_campaign_id: None,
@@ -864,10 +960,219 @@ mod tests {
             "Job 13 Sent 3 Failed 1".to_string(),
         ];
 
-        assert_eq!(
-            matching_stats_rows(&request, &rows),
-            vec!["Job 13 Sent 3 Failed 1".to_string()]
-        );
+        assert!(matching_stats_rows(&request, &rows).is_empty());
+    }
+
+    #[test]
+    fn completed_stats_row_with_expected_total_verifies_after_schedule_row_disappears() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 42,
+            expected_campaign_id: Some(16),
+            expected_list_ids: vec![27],
+            expected_queue_total: Some(500),
+            expected_body_sha256: Some(
+                "c6777082c91bcfc19f95bccba3a196fd1a25c1b5653b95d4f607930b8ce6fd4c".to_string(),
+            ),
+            max_rows: Some(25),
+        };
+        let report = build_send_job_status_report(
+            &request,
+            Vec::new(),
+            vec![
+                "Previous Newsletter 'Prior clean cohort ... July 2 2026, 10:16 am July 2 2026, 10:16 am 3,496 18 0 View Export Print Delete".to_string(),
+                "Current Newsletter 'Expected probe cohort ... July 6 2026, 1:28 pm July 6 2026, 1:28 pm 500 0 0 View Export Print Delete".to_string(),
+            ],
+            Vec::new(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.ok);
+        assert!(report.identity_verified);
+        assert_eq!(report.stats.matched_rows, 1);
+        assert_eq!(report.stats.sent_count, Some(500));
+        assert_eq!(report.stats.failed_count, Some(0));
+        assert_eq!(report.queue_counters.total, Some(500));
+        assert_eq!(report.queue_counters.processed, Some(500));
+        assert!(report.follow_up_contract.is_some());
+        assert!(report.stats.row_summaries[0].contains("Expected probe cohort"));
+        assert!(!report.stats.row_summaries[0].contains("Prior clean cohort"));
+    }
+
+    #[test]
+    fn campaign_id_token_in_stats_time_does_not_match_stale_completed_row() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 42,
+            expected_campaign_id: Some(16),
+            expected_list_ids: vec![27],
+            expected_queue_total: Some(500),
+            expected_body_sha256: None,
+            max_rows: Some(25),
+        };
+        let stale_rows = vec![
+            "Previous Newsletter 'Prior clean cohort ... July 2 2026, 10:16 am July 2 2026, 10:16 am 3,496 18 0 View Export Print Delete".to_string(),
+        ];
+
+        assert!(matching_stats_rows(&request, &stale_rows).is_empty());
+    }
+
+    #[test]
+    fn duplicate_completed_stats_totals_do_not_verify_identity() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 42,
+            expected_campaign_id: Some(16),
+            expected_list_ids: vec![27],
+            expected_queue_total: Some(500),
+            expected_body_sha256: None,
+            max_rows: Some(25),
+        };
+        let report = build_send_job_status_report(
+            &request,
+            Vec::new(),
+            vec![
+                "Campaign A 'List A' July 6 2026, 1:20 pm July 6 2026, 1:21 pm 500 0 0 View Export Print Delete".to_string(),
+                "Campaign B 'List B' July 6 2026, 1:28 pm July 6 2026, 1:28 pm 500 0 0 View Export Print Delete".to_string(),
+            ],
+            Vec::new(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.ok);
+        assert!(!report.identity_verified);
+        assert_eq!(report.stats.matched_rows, 2);
+        assert_eq!(report.queue_counters.total, None);
+        assert!(report.follow_up_contract.is_none());
+    }
+
+    #[test]
+    fn view_token_in_stats_label_does_not_hide_duplicate_completed_total() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 42,
+            expected_campaign_id: Some(16),
+            expected_list_ids: vec![27],
+            expected_queue_total: Some(500),
+            expected_body_sha256: None,
+            max_rows: Some(25),
+        };
+        let report = build_send_job_status_report(
+            &request,
+            Vec::new(),
+            vec![
+                "Campaign Customer View 'List A' July 6 2026, 1:20 pm July 6 2026, 1:21 pm 500 0 0 View Export Print Delete".to_string(),
+                "Campaign B 'List B' July 6 2026, 1:28 pm July 6 2026, 1:28 pm 500 0 0 View Export Print Delete".to_string(),
+            ],
+            Vec::new(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.ok);
+        assert!(!report.identity_verified);
+        assert_eq!(report.stats.matched_rows, 2);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("multiple completed Stats rows")));
+    }
+
+    #[test]
+    fn capped_stats_slice_does_not_verify_completed_identity() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 42,
+            expected_campaign_id: Some(16),
+            expected_list_ids: vec![27],
+            expected_queue_total: Some(500),
+            expected_body_sha256: None,
+            max_rows: Some(1),
+        };
+        let report = build_send_job_status_report(
+            &request,
+            Vec::new(),
+            vec![
+                "Campaign A 'List A' July 6 2026, 1:28 pm July 6 2026, 1:28 pm 500 0 0 View Export Print Delete".to_string(),
+            ],
+            Vec::new(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.ok);
+        assert!(!report.identity_verified);
+        assert_eq!(report.stats.matched_rows, 1);
+        assert_eq!(report.queue_counters.total, None);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("configured cap")));
+    }
+
+    #[test]
+    fn incidental_job_id_token_in_stats_text_blocks_completed_identity() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 16,
+            expected_campaign_id: Some(2),
+            expected_list_ids: vec![27],
+            expected_queue_total: Some(500),
+            expected_body_sha256: None,
+            max_rows: Some(25),
+        };
+        let report = build_send_job_status_report(
+            &request,
+            Vec::new(),
+            vec![
+                "Campaign A 'List A' July 6 2026, 10:16 am July 6 2026, 10:16 am 500 0 0 View Export Print Delete".to_string(),
+            ],
+            Vec::new(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.ok);
+        assert!(!report.identity_verified);
+        assert_eq!(report.stats.matched_rows, 1);
+        assert_eq!(report.queue_counters.total, None);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("incidental text")));
+    }
+
+    #[test]
+    fn active_schedule_identity_does_not_inherit_unrelated_completed_stats_counts() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 42,
+            expected_campaign_id: Some(16),
+            expected_list_ids: vec![27],
+            expected_queue_total: Some(500),
+            expected_body_sha256: None,
+            max_rows: Some(25),
+        };
+        let schedule_html = r#"
+            <table>
+              <tr>
+                <td>Campaign A Sending now</td>
+                <td><a href="index.php?Page=Schedule&Action=Pause&job=42">Pause</a></td>
+              </tr>
+            </table>
+        "#;
+        let links = super::super::parse_queue_control_links(
+            "https://example.test/admin/",
+            schedule_html,
+            25,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let report = build_send_job_status_report(
+            &request,
+            vec!["Campaign A Sending now Pause".to_string()],
+            vec![
+                "Older Campaign 'Older List' July 6 2026, 1:20 pm July 6 2026, 1:21 pm 500 0 0 View Export Print Delete".to_string(),
+            ],
+            links,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.ok);
+        assert!(report.identity_verified);
+        assert_eq!(report.schedule.matched_rows, 1);
+        assert_eq!(report.queue_counters.total, None);
+        assert_eq!(report.queue_counters.processed, None);
+        assert_eq!(report.stats.state, "ambiguous");
     }
 
     #[test]
