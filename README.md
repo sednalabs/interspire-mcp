@@ -548,9 +548,10 @@ Complete/save form.
 `interspire_send_wizard_readback` records Schedule and Stats rows before and
 after the proof render. Schedule-row changes, new or removed stable Stats rows,
 and shifted Stats row identities remain blockers. Existing Stats-row
-campaign-name text churn is reported as a warning only when the row identity
-after the list/date/count tuple is stable, rather than proof that the no-send
-render queued mail.
+campaign-name, list-label encoding, unsubscribe, and bounce counter churn is
+not a blocker when the existing row's started timestamp, finished timestamp,
+and recipient count stay stable, rather than proof that the no-send render
+queued mail.
 `interspire_seed_readiness_gate` combines that proof with campaign-body safety
 signals so an operator can decide what still needs review before a guarded
 seed or production send. Both tools report `send_performed: false`,

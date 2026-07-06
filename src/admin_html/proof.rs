@@ -861,7 +861,7 @@ impl AdminHtmlClient {
             "send_wizard_stats_unchanged",
             send_wizard.stats_unchanged,
             "blocker",
-            "stats rows unchanged during no-send proof".to_string(),
+            "stats rows kept stable no-send identities, proving no new or removed Stats rows during no-send proof".to_string(),
         ));
         gates.push(gate(
             "final_form_is_send_boundary",
@@ -2588,12 +2588,89 @@ fn stats_rows_stable_for_no_send_proof(before: &[String], after: &[String]) -> b
 
 fn stable_stats_row_identities_for_no_send_proof(rows: &[String]) -> Vec<String> {
     rows.iter()
-        .map(|row| {
-            row.find('\'')
-                .map(|idx| compact_text(&row[idx..]))
-                .unwrap_or_else(|| compact_text(row))
-        })
+        .map(|row| stable_stats_row_identity_for_no_send_proof(row))
         .collect()
+}
+
+fn stable_stats_row_identity_for_no_send_proof(row: &str) -> String {
+    let compact = compact_text(row);
+    stats_row_datetime_recipient_identity(&compact).unwrap_or_else(|| {
+        compact
+            .find('\'')
+            .map(|idx| compact_text(&compact[idx..]))
+            .unwrap_or(compact)
+    })
+}
+
+fn stats_row_datetime_recipient_identity(row: &str) -> Option<String> {
+    let tokens: Vec<&str> = row.split_whitespace().collect();
+    let date_starts: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, _)| stats_date_token_span(&tokens, idx).map(|_| idx))
+        .collect();
+    if date_starts.len() < 2 {
+        return None;
+    }
+    // Campaign and list labels may contain human-readable dates. The Stats
+    // table's stable row identity is anchored at the final Started/Finished
+    // timestamp pair, followed by the recipient count.
+    let first = date_starts[date_starts.len() - 2];
+    let second = date_starts[date_starts.len() - 1];
+    let recipient_idx = second.checked_add(5)?;
+    let recipients = tokens.get(recipient_idx)?.trim_matches(',');
+    if !is_stat_count_token(recipients) {
+        return None;
+    }
+    Some(format!(
+        "stat:{}|{}|{}",
+        tokens[first..first + 5].join(" "),
+        tokens[second..second + 5].join(" "),
+        recipients
+    ))
+}
+
+fn stats_date_token_span(tokens: &[&str], start: usize) -> Option<()> {
+    let month = tokens.get(start)?;
+    let day = tokens.get(start + 1)?.trim_end_matches(',');
+    let year = tokens.get(start + 2)?.trim_end_matches(',');
+    let time = tokens.get(start + 3)?;
+    let meridiem = tokens.get(start + 4)?.to_ascii_lowercase();
+    if !is_month_name(month)
+        || !day.chars().all(|ch| ch.is_ascii_digit())
+        || day.is_empty()
+        || year.len() != 4
+        || !year.chars().all(|ch| ch.is_ascii_digit())
+        || !time.contains(':')
+        || !(meridiem == "am" || meridiem == "pm")
+    {
+        return None;
+    }
+    Some(())
+}
+
+fn is_month_name(value: &str) -> bool {
+    matches!(
+        value,
+        "January"
+            | "February"
+            | "March"
+            | "April"
+            | "May"
+            | "June"
+            | "July"
+            | "August"
+            | "September"
+            | "October"
+            | "November"
+            | "December"
+    )
+}
+
+fn is_stat_count_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|ch| ch.is_ascii_digit() || ch == ',')
+        && value.chars().any(|ch| ch.is_ascii_digit())
 }
 
 fn stable_table_rows_for_send_proof(rows: &[String]) -> Vec<String> {
@@ -4018,6 +4095,46 @@ mod tests {
         assert!(!stats_rows_stable_for_no_send_proof(
             &before,
             &shifted_same_count
+        ));
+    }
+
+    #[test]
+    fn no_send_stats_stability_allows_existing_metric_and_encoding_churn() {
+        let before = vec![
+            "Email Campaign Statistics".to_string(),
+            "Daily Update - 2026-07-06 PM 'Primary Clean Segment - 2026-07-03\u{fffd} ... July 6 2026, 8:31 am July 6 2026, 8:52 am 34,019 3 0 View Export Print Delete".to_string(),
+        ];
+        let after = vec![
+            "Email Campaign Statistics".to_string(),
+            "Daily Update - 2026-07-06 PM 'Primary Clean Segment - 2026-07-03&# ... July 6 2026, 8:31 am July 6 2026, 8:52 am 34,019 4 1 View Export Print Delete".to_string(),
+        ];
+        let new_row_same_page = vec![
+            "Email Campaign Statistics".to_string(),
+            "Daily Update - 2026-07-06 PM 'Primary Clean Segment - 2026-07-03&# ... July 6 2026, 8:31 am July 6 2026, 8:52 am 34,019 4 1 View Export Print Delete".to_string(),
+            "Daily Update - Later Probe 'Risk Probe' July 6 2026, 11:06 am July 6 2026, 11:07 am 500 0 0 View Export Print Delete".to_string(),
+        ];
+
+        assert!(stats_rows_stable_for_no_send_proof(&before, &after));
+        assert!(!stats_rows_stable_for_no_send_proof(
+            &before,
+            &new_row_same_page
+        ));
+    }
+
+    #[test]
+    fn no_send_stats_stability_uses_final_timestamp_pair_when_labels_have_dates() {
+        let before = vec![
+            "Email Campaign Statistics".to_string(),
+            "Daily Update July 1 2026, 10:00 am July 2 2026, 10:00 am 500 'Primary Segment' July 6 2026, 8:31 am July 6 2026, 8:52 am 34,019 3 0 View Export Print Delete".to_string(),
+        ];
+        let after_actual_time_changed = vec![
+            "Email Campaign Statistics".to_string(),
+            "Daily Update July 1 2026, 10:00 am July 2 2026, 10:00 am 500 'Primary Segment' July 6 2026, 8:31 am July 6 2026, 8:53 am 34,019 3 0 View Export Print Delete".to_string(),
+        ];
+
+        assert!(!stats_rows_stable_for_no_send_proof(
+            &before,
+            &after_actual_time_changed
         ));
     }
 
