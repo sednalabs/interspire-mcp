@@ -66,22 +66,22 @@ pub use response::{
     AdminSessionProbeReport, AdminSessionProbeRequest, AudienceHygieneArtifact,
     AudienceHygieneExportBeginRequest, AudienceHygieneExportReport, AudienceHygieneExportRequest,
     AudienceHygieneExportResumeRequest, AudienceHygieneExportStatusRequest,
-    AudienceHygieneListSummary, CampaignBodyAuditReport, CampaignBodyAuditRequest,
-    CampaignCopyApplyReport, CampaignCopyApplyRequest, CampaignCopyPreviewReport,
-    CampaignCopyPreviewRequest, CampaignReadbackReport, CampaignReadbackRequest,
-    CampaignRenderArtifactReport, CampaignRenderArtifactRequest,
-    CampaignTemplateArtifactUpdateApplyReport, CampaignTemplateArtifactUpdateApplyRequest,
-    CampaignTemplateArtifactUpdatePreviewReport, CampaignTemplateArtifactUpdatePreviewRequest,
-    CampaignTemplateUpdateApplyRequest, CampaignTemplateUpdatePreviewRequest,
-    CampaignTestSendApplyReport, CampaignTestSendApplyRequest, CampaignTestSendPreviewReport,
-    CampaignTestSendPreviewRequest, CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest,
-    ContactImportPreflightReport, ContactImportPreflightRequest, ContactStateReport,
-    ContactStateRequest, CronReadinessReport, CronReadinessRequest, Evidence, FormFieldChange,
-    FormFieldDescriptor, FormFieldUpdate, GuardedWriteApplyReport, GuardedWritePreviewReport,
-    ListCreateApplyRequest, ListCreatePreviewRequest, ListOwnerReadbackReport,
-    ListOwnerReadbackRequest, ListSummary, ListSummaryReport, ListSummaryRequest,
-    ListUpdateApplyRequest, ListUpdatePreviewRequest, OciLedgerPreflightReport,
-    OciLedgerPreflightRequest, OciSendLedgerPrepareApplyRequest,
+    AudienceHygieneListSummary, CampaignActiveStateApplyRequest, CampaignActiveStatePreviewRequest,
+    CampaignBodyAuditReport, CampaignBodyAuditRequest, CampaignCopyApplyReport,
+    CampaignCopyApplyRequest, CampaignCopyPreviewReport, CampaignCopyPreviewRequest,
+    CampaignReadbackReport, CampaignReadbackRequest, CampaignRenderArtifactReport,
+    CampaignRenderArtifactRequest, CampaignTemplateArtifactUpdateApplyReport,
+    CampaignTemplateArtifactUpdateApplyRequest, CampaignTemplateArtifactUpdatePreviewReport,
+    CampaignTemplateArtifactUpdatePreviewRequest, CampaignTemplateUpdateApplyRequest,
+    CampaignTemplateUpdatePreviewRequest, CampaignTestSendApplyReport,
+    CampaignTestSendApplyRequest, CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest,
+    CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, ContactImportPreflightReport,
+    ContactImportPreflightRequest, ContactStateReport, ContactStateRequest, CronReadinessReport,
+    CronReadinessRequest, Evidence, FormFieldChange, FormFieldDescriptor, FormFieldUpdate,
+    GuardedWriteApplyReport, GuardedWritePreviewReport, ListCreateApplyRequest,
+    ListCreatePreviewRequest, ListOwnerReadbackReport, ListOwnerReadbackRequest, ListSummary,
+    ListSummaryReport, ListSummaryRequest, ListUpdateApplyRequest, ListUpdatePreviewRequest,
+    OciLedgerPreflightReport, OciLedgerPreflightRequest, OciSendLedgerPrepareApplyRequest,
     OciSendLedgerPreparePreviewRequest, OciSendLedgerPrepareReport, ProductionSendApplyReport,
     ProductionSendApplyRequest, QueueControlAction, QueueControlApplyReport,
     QueueControlApplyRequest, QueueControlApplyStatus, QueueControlCandidate,
@@ -251,6 +251,14 @@ pub trait InterspireReadBackend: Send + Sync {
     fn campaign_update_apply(
         &self,
         request: &CampaignUpdateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError>;
+    fn campaign_active_state_preview(
+        &self,
+        request: &CampaignActiveStatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError>;
+    fn campaign_active_state_apply(
+        &self,
+        request: &CampaignActiveStateApplyRequest,
     ) -> Result<GuardedWriteApplyReport, InterspireError>;
     fn list_update_preview(
         &self,
@@ -591,6 +599,20 @@ impl InterspireMcpServer {
                     .with_discovery(ToolDiscoveryMetadata::new(
                         "Apply a guarded campaign content or sender metadata edit.",
                         ["interspire", "campaign", "apply", "guarded-write"],
+                    )),
+                ToolCapability::new("interspire_campaign_active_state_preview")
+                    .with_group("guarded-write")
+                    .with_read_only(true)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Preview a guarded campaign activate/deactivate state change.",
+                        ["interspire", "campaign", "active", "preview", "guarded-write"],
+                    )),
+                ToolCapability::new("interspire_campaign_active_state_apply")
+                    .with_group("guarded-write")
+                    .with_read_only(false)
+                    .with_discovery(ToolDiscoveryMetadata::new(
+                        "Apply a previewed campaign activate/deactivate state change and prove manage-page readback.",
+                        ["interspire", "campaign", "active", "apply", "guarded-write"],
                     )),
                 ToolCapability::new("interspire_list_update_preview")
                     .with_group("guarded-write")
@@ -1273,6 +1295,24 @@ impl InterspireMcpServer {
         response::tool_json(self.backend.campaign_update_apply(&request))
     }
 
+    #[tool(description = "Preview a guarded campaign activate/deactivate state change.")]
+    fn interspire_campaign_active_state_preview(
+        &self,
+        Parameters(request): Parameters<CampaignActiveStatePreviewRequest>,
+    ) -> String {
+        response::tool_json(self.backend.campaign_active_state_preview(&request))
+    }
+
+    #[tool(
+        description = "Apply a previewed campaign activate/deactivate state change and prove manage-page readback."
+    )]
+    fn interspire_campaign_active_state_apply(
+        &self,
+        Parameters(request): Parameters<CampaignActiveStateApplyRequest>,
+    ) -> String {
+        response::tool_json(self.backend.campaign_active_state_apply(&request))
+    }
+
     #[tool(description = "Preview guarded list metadata edits.")]
     fn interspire_list_update_preview(
         &self,
@@ -1845,6 +1885,28 @@ mod tests {
             ))
         }
 
+        fn campaign_active_state_preview(
+            &self,
+            request: &CampaignActiveStatePreviewRequest,
+        ) -> Result<GuardedWritePreviewReport, InterspireError> {
+            Ok(GuardedWritePreviewReport::fixture(
+                "campaign_active_state",
+                Some(request.campaign_id),
+                None,
+            ))
+        }
+
+        fn campaign_active_state_apply(
+            &self,
+            request: &CampaignActiveStateApplyRequest,
+        ) -> Result<GuardedWriteApplyReport, InterspireError> {
+            Ok(GuardedWriteApplyReport::fixture(
+                "campaign_active_state",
+                Some(request.campaign_id),
+                None,
+            ))
+        }
+
         fn list_update_preview(
             &self,
             request: &ListUpdatePreviewRequest,
@@ -2014,6 +2076,8 @@ mod tests {
                 "interspire_audience_hygiene_export_begin",
                 "interspire_audience_hygiene_export_resume",
                 "interspire_audience_hygiene_export_status",
+                "interspire_campaign_active_state_apply",
+                "interspire_campaign_active_state_preview",
                 "interspire_campaign_body_audit",
                 "interspire_campaign_copy_apply",
                 "interspire_campaign_copy_preview",

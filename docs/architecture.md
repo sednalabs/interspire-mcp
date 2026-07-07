@@ -179,6 +179,12 @@ Plan ids use stable route/form content and requested changes while excluding
 volatile CSRF/session token values; apply still refreshes and submits the
 current token from the live form.
 
+Campaign active-state changes are deliberately separate from generic campaign
+form edits. They read the campaign manager page, infer state from exactly one
+visible Activate or Deactivate action for the target campaign id, execute only
+that allowlisted state route when the plan id matches, and then prove the
+requested state from a fresh manager-page readback.
+
 List creation uses the same form-write gate but has create-specific readback:
 apply rereads list summary before and after submission and accepts the result
 only when exactly one new list id appears, then reads that new list edit page

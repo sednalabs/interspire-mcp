@@ -158,7 +158,8 @@ Apply:
 - derives the plan id from stable route/form content and requested changes,
   excluding volatile CSRF/session token values that are refreshed at apply time;
 - posts only to an allowlisted campaign, list, user, settings, or list-create
-  route, or follows the exact allowlisted campaign-copy route;
+  route, follows the exact allowlisted campaign-copy route, or follows the
+  exact allowlisted campaign Activate/Deactivate state route;
 - sends the current form page as Referer plus the admin Origin and accepted
   CSRF token header when the form exposes a token, matching Interspire 8's
   browser-side POST expectations;
@@ -167,6 +168,12 @@ Apply:
   control;
 - re-reads the edited page after apply;
 - returns redacted field readback evidence.
+
+Campaign active-state apply is route-backed rather than form-backed. It is
+still behind the same guarded-write and form-write gates, but it can only target
+one exact campaign id and one requested boolean state. It refuses ambiguous
+manager rows, extra query parameters, stale plan ids, and HTTP success without
+fresh manager-page state proof.
 
 For Interspire 8.x campaign body forms, campaign preview/readback may first
 render the campaign editor's Step2 body form through the same allowlisted

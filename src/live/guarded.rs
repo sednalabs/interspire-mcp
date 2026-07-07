@@ -4,6 +4,7 @@ use crate::{
     error::InterspireError,
     guarded_write,
     response::{
+        CampaignActiveStateApplyRequest, CampaignActiveStatePreviewRequest,
         CampaignUpdateApplyRequest, CampaignUpdatePreviewRequest, Evidence,
         GuardedWriteApplyReport, GuardedWritePreviewReport, ListUpdateApplyRequest,
         ListUpdatePreviewRequest, QueueControlApplyReport, QueueControlApplyRequest,
@@ -155,6 +156,46 @@ impl LiveInterspireBackend {
             request.campaign_id,
             &request.plan_id,
             &request.updates,
+            self.config.guarded_writes.execution_mode,
+        )?;
+        report.guarded_writes_enabled = self.config.guarded_writes.enabled;
+        report.form_write_controls_enabled = self.config.guarded_writes.form_write_controls_enabled;
+        Ok(report)
+    }
+
+    pub(super) fn campaign_active_state_preview_impl(
+        &self,
+        request: &CampaignActiveStatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        let html = self.html_client()?;
+        if !html.configured() {
+            return Ok(unconfigured_preview(
+                &self.config.guarded_writes,
+                "campaign_active_state",
+                Some(request.campaign_id),
+                None,
+                "admin HTML fallback is not configured; no campaign active-state preview attempted",
+            ));
+        }
+
+        let mut report = html.campaign_active_state_preview(request.campaign_id, request.active)?;
+        report.guarded_writes_enabled = self.config.guarded_writes.enabled;
+        report.form_write_controls_enabled = self.config.guarded_writes.form_write_controls_enabled;
+        report.write_execution_mode = self.config.guarded_writes.execution_mode;
+        report.apply_directly_allowed = false;
+        Ok(report)
+    }
+
+    pub(super) fn campaign_active_state_apply_impl(
+        &self,
+        request: &CampaignActiveStateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        guarded_write::require_form_write_controls_enabled(&self.config.guarded_writes)?;
+        let html = self.html_client()?;
+        let mut report = html.campaign_active_state_apply(
+            request.campaign_id,
+            request.active,
+            &request.plan_id,
             self.config.guarded_writes.execution_mode,
         )?;
         report.guarded_writes_enabled = self.config.guarded_writes.enabled;

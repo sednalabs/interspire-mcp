@@ -28,6 +28,19 @@ pub struct CampaignUpdateApplyRequest {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
+pub struct CampaignActiveStatePreviewRequest {
+    pub campaign_id: u64,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
+pub struct CampaignActiveStateApplyRequest {
+    pub campaign_id: u64,
+    pub active: bool,
+    pub plan_id: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ListUpdatePreviewRequest {
     pub list_id: u64,
     #[serde(default)]

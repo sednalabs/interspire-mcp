@@ -165,6 +165,54 @@
       "name": "interspire_audience_hygiene_export_status"
     },
     {
+      "description": "Apply a previewed campaign activate/deactivate state change and prove manage-page readback.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "plan_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "active",
+          "plan_id"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_active_state_apply"
+    },
+    {
+      "description": "Preview a guarded campaign activate/deactivate state change.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "campaign_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "active"
+        ],
+        "type": "object"
+      },
+      "name": "interspire_campaign_active_state_preview"
+    },
+    {
       "description": "Audit redacted campaign body safety signals without returning raw HTML.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

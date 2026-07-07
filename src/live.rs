@@ -20,6 +20,7 @@ use crate::{
         AdminSessionProbeReport, AdminSessionProbeRequest, AudienceHygieneExportBeginRequest,
         AudienceHygieneExportReport, AudienceHygieneExportRequest,
         AudienceHygieneExportResumeRequest, AudienceHygieneExportStatusRequest,
+        CampaignActiveStateApplyRequest, CampaignActiveStatePreviewRequest,
         CampaignBodyAuditReport, CampaignBodyAuditRequest, CampaignCopyApplyReport,
         CampaignCopyApplyRequest, CampaignCopyPreviewReport, CampaignCopyPreviewRequest,
         CampaignReadbackReport, CampaignReadbackRequest, CampaignRenderArtifactReport,
@@ -316,6 +317,20 @@ impl InterspireReadBackend for LiveInterspireBackend {
         request: &CampaignUpdateApplyRequest,
     ) -> Result<GuardedWriteApplyReport, InterspireError> {
         self.campaign_update_apply_impl(request)
+    }
+
+    fn campaign_active_state_preview(
+        &self,
+        request: &CampaignActiveStatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        self.campaign_active_state_preview_impl(request)
+    }
+
+    fn campaign_active_state_apply(
+        &self,
+        request: &CampaignActiveStateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        self.campaign_active_state_apply_impl(request)
     }
 
     fn list_update_preview(

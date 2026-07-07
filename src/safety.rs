@@ -265,6 +265,79 @@ pub fn ensure_allowed_campaign_copy_get(
     Ok(url)
 }
 
+pub fn ensure_allowed_campaign_active_state_get(
+    base_url: &str,
+    relative_path: &str,
+    campaign_id: u64,
+    active: bool,
+) -> Result<Url, InterspireError> {
+    let base = Url::parse(base_url)
+        .map_err(|err| InterspireError::Safety(format!("invalid admin base url: {err}")))?;
+    let base = normalize_admin_base(base);
+    let url = base.join(relative_path).map_err(|err| {
+        InterspireError::Safety(format!("invalid campaign active-state path: {err}"))
+    })?;
+
+    ensure_admin_base_scope(&base, &url)?;
+    ensure_admin_front_controller_path(&base, &url)?;
+    classify_allowed_campaign_active_state_get(&url, campaign_id, active)?;
+    Ok(url)
+}
+
+pub fn classify_allowed_campaign_active_state_get(
+    url: &Url,
+    campaign_id: u64,
+    active: bool,
+) -> Result<(), InterspireError> {
+    if url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_none_or(|segment| segment != "index.php")
+    {
+        return Err(InterspireError::Safety(
+            "campaign active-state path is not index.php".to_string(),
+        ));
+    }
+
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    ensure_no_duplicate_query_keys(&pairs)?;
+    ensure_only_query_keys(
+        &pairs,
+        &[
+            "Page",
+            "Action",
+            "id",
+            "token",
+            "csrf",
+            "csrfToken",
+            "csrf_token",
+            "_token",
+        ],
+    )?;
+
+    let page = query_value(&pairs, "Page");
+    let action = query_value(&pairs, "Action");
+    let id = query_value(&pairs, "id").and_then(|value| value.parse::<u64>().ok());
+    if !matches!(page.as_deref(), Some("Newsletters")) {
+        return Err(InterspireError::Safety(
+            "campaign active-state route must target the Newsletters page".to_string(),
+        ));
+    }
+    let expected_action = if active { "Activate" } else { "Deactivate" };
+    if !matches!(action.as_deref(), Some(value) if value.eq_ignore_ascii_case(expected_action)) {
+        return Err(InterspireError::Safety(format!(
+            "campaign active-state action is not {expected_action}: {action:?}"
+        )));
+    }
+    if id != Some(campaign_id) {
+        return Err(InterspireError::Safety(
+            "campaign active-state id does not match requested campaign".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn classify_allowed_campaign_copy_get(
     url: &Url,
     campaign_id: u64,
@@ -1671,6 +1744,49 @@ mod tests {
             "https://example.test/admin/",
             "index.php?Page=Newsletters&Action=Copy&id=42&List=99",
             42,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn allows_only_exact_campaign_active_state_routes() {
+        let deactivate = ensure_allowed_campaign_active_state_get(
+            "https://example.test/admin/",
+            "index.php?Page=Newsletters&Action=Deactivate&id=42&csrfToken=abc",
+            42,
+            false,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(deactivate.as_str().contains("Action=Deactivate"));
+
+        let activate = ensure_allowed_campaign_active_state_get(
+            "https://example.test/admin/",
+            "index.php?Page=Newsletters&Action=Activate&id=42&csrfToken=abc",
+            42,
+            true,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(activate.as_str().contains("Action=Activate"));
+
+        assert!(ensure_allowed_campaign_active_state_get(
+            "https://example.test/admin/",
+            "index.php?Page=Newsletters&Action=Send&id=42&csrfToken=abc",
+            42,
+            false,
+        )
+        .is_err());
+        assert!(ensure_allowed_campaign_active_state_get(
+            "https://example.test/admin/",
+            "index.php?Page=Newsletters&Action=Deactivate&id=43&csrfToken=abc",
+            42,
+            false,
+        )
+        .is_err());
+        assert!(ensure_allowed_campaign_active_state_get(
+            "https://example.test/admin/",
+            "index.php?Page=Newsletters&Action=Deactivate&id=42&return=send",
+            42,
+            false,
         )
         .is_err());
     }
