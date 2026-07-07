@@ -1,6 +1,7 @@
 use super::Evidence;
 use crate::redact;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct AdminSessionProbeRequest {
@@ -34,6 +35,7 @@ pub struct CampaignBodyAuditReport {
     pub campaign_id: u64,
     pub name: Option<String>,
     pub subject: Option<String>,
+    pub preheader_sha256: Option<String>,
     pub html_sha256: Option<String>,
     pub html_bytes: usize,
     pub text_sha256: Option<String>,
@@ -169,6 +171,7 @@ impl CampaignBodyAuditReport {
             campaign_id: 7,
             name: Some("Launch campaign".to_string()),
             subject: Some("Launch subject".to_string()),
+            preheader_sha256: Some(hex::encode(Sha256::digest(b"fixture preheader"))),
             html_sha256: Some(
                 "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             ),

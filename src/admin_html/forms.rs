@@ -134,9 +134,10 @@ impl GuardedFormTarget {
     }
 }
 
-const CAMPAIGN_WRITE_FIELDS: [&str; 26] = [
+const CAMPAIGN_WRITE_FIELDS: [&str; 27] = [
     "name",
     "subject",
+    "preheader",
     "archive",
     "sendfromname",
     "sendfromemail",
@@ -1909,6 +1910,55 @@ mod tests {
             .controls
             .iter()
             .any(|control| control.lower_name == "archive" && control.checked));
+    }
+
+    #[test]
+    fn campaign_preheader_is_guarded_step2_metadata() {
+        let target = GuardedFormTarget::Campaign { campaign_id: 2 };
+        let mut snapshot = text_snapshot("PreHeader", "Old inbox preview text");
+
+        let changes = apply_requested_updates(
+            &mut snapshot,
+            target.allowed_fields(),
+            &[FormFieldUpdate {
+                name: "preheader".to_string(),
+                value: Some("New inbox preview text".to_string()),
+                checked: None,
+            }],
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "preheader");
+        let current_value = changes[0]
+            .current_value
+            .as_deref()
+            .unwrap_or_else(|| panic!("current preheader summary should be present"));
+        let requested_value = changes[0]
+            .requested_value
+            .as_deref()
+            .unwrap_or_else(|| panic!("requested preheader summary should be present"));
+        assert!(current_value.starts_with("[content len=22 sha256="));
+        assert!(requested_value.starts_with("[content len=22 sha256="));
+        assert!(!current_value.contains("Old inbox preview text"));
+        assert!(!requested_value.contains("New inbox preview text"));
+        assert!(snapshot.controls.iter().any(|control| {
+            control.original_name == "PreHeader" && control.value == "New inbox preview text"
+        }));
+
+        let mut disallowed = text_snapshot("PreHeaderPreviewHack", "old");
+        let err = apply_requested_updates(
+            &mut disallowed,
+            target.allowed_fields(),
+            &[FormFieldUpdate {
+                name: "preheader_preview_hack".to_string(),
+                value: Some("new".to_string()),
+                checked: None,
+            }],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("outside the guarded allowlist"));
     }
 
     #[test]

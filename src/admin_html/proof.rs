@@ -2218,6 +2218,11 @@ fn campaign_body_audit_from_parts(
         subject: parts
             .subject
             .map(|value| redact::redact_sensitive_text(&value)),
+        preheader_sha256: parts
+            .preheader
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(sha256_hex),
         html_sha256: (!html_body.is_empty()).then(|| sha256_hex(&html_body)),
         html_bytes: html_body.len(),
         text_sha256: (!text_body.is_empty()).then(|| sha256_hex(&text_body)),
