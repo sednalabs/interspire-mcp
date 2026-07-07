@@ -117,7 +117,7 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_cron_readiness` | Read | Compare Interspire cron settings with Schedule-page cron detection without triggering `cron.php`. |
 | `interspire_send_stop_gate_readiness` | No-mutation proof | Combine send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation; any pause still requires separate queue-control apply. |
 | `interspire_campaign_readback` | Read | Read campaign manage rows with structured campaign ids/action flags, or one campaign edit-page summary. |
-| `interspire_campaign_body_audit` | Read | Audit redacted campaign body safety signals without returning raw HTML. |
+| `interspire_campaign_body_audit` | Read | Audit redacted campaign body and preheader safety signals without returning raw HTML or raw preheader text. |
 | `interspire_campaign_copy_preview` | Read preview | Preview a guarded copy plan for creating a draft from a known campaign, including off-page source campaigns. |
 | `interspire_campaign_copy_apply` | Guarded apply | Apply one previously previewed campaign-copy plan and return the detected new draft id. |
 | `interspire_campaign_render_artifact` | Private artifact | Write private persisted-campaign render artifacts for native-browser screenshot inspection without returning raw HTML. |
@@ -135,8 +135,8 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_campaign_template_artifact_update_apply` | Guarded apply | Apply one previously previewed fixed private render artifact and prove the persisted body hash. |
 | `interspire_campaign_active_state_preview` | Read preview | Preview a guarded activate/deactivate change for one campaign from the manage-page state action. |
 | `interspire_campaign_active_state_apply` | Guarded apply | Apply one previously previewed campaign active-state change through the exact Activate/Deactivate route, then prove the requested state from a fresh manage-page readback. |
-| `interspire_campaign_update_preview` | Read preview | Preview guarded campaign content or metadata edits, including Interspire 8 Step1 campaign-name edits and the documented Archive checkbox. |
-| `interspire_campaign_update_apply` | Guarded apply | Apply one previously previewed campaign edit when guarded form-write gates are enabled, with Step1 campaign-name changes proven through the wizard Complete/save path. |
+| `interspire_campaign_update_preview` | Read preview | Preview guarded campaign content or metadata edits, including Interspire 8 Step1 campaign-name edits plus documented final-form fields such as Archive and PreHeader. |
+| `interspire_campaign_update_apply` | Guarded apply | Apply one previously previewed campaign edit when guarded form-write gates are enabled, with Step1 campaign-name changes proven through the wizard Complete/save path and final-form metadata proven by readback. |
 | `interspire_list_update_preview` | Read preview | Preview guarded list metadata edits. |
 | `interspire_list_update_apply` | Guarded apply | Apply one previously previewed list metadata edit when guarded form-write gates are enabled. |
 | `interspire_list_create_preview` | Read preview | Preview guarded list creation with sender/reply/bounce metadata. |

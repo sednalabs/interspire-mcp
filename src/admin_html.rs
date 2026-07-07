@@ -1246,6 +1246,7 @@ fn is_large_content_like_field(lower: &str) -> bool {
         || lower.contains("body")
         || lower.contains("footer")
         || lower.contains("content")
+        || lower == "preheader"
 }
 
 fn looks_like_save_submit(control: &forms::FormControl) -> bool {
@@ -3327,6 +3328,72 @@ mod tests {
     }
 
     #[test]
+    fn campaign_preheader_apply_uses_step2_complete_and_proves_readback() {
+        let server = spawn_campaign_step2_fixture_server();
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [FormFieldUpdate {
+            name: "preheader".to_string(),
+            value: Some("Updated preheader".to_string()),
+            checked: None,
+        }];
+
+        let preview = client
+            .campaign_update_preview(7, &updates)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(preview.ok);
+        assert_eq!(preview.changes.len(), 1);
+        assert_eq!(preview.changes[0].name, "preheader");
+        assert!(preview.changes[0]
+            .requested_value
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("[content len=17 sha256="));
+        assert!(!preview
+            .changes
+            .iter()
+            .any(|change| change.requested_value.as_deref() == Some("Updated preheader")));
+
+        let apply = client
+            .campaign_update_apply(
+                7,
+                &preview.plan_id,
+                &updates,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(apply.ok);
+        assert!(apply.applied);
+        assert_eq!(apply.changes.len(), 1);
+        assert_eq!(apply.changes[0].name, "preheader");
+
+        let audit = client
+            .campaign_body_audit(7)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let expected_preheader_sha256 = hex::encode(Sha256::digest("Updated preheader".as_bytes()));
+        assert_eq!(
+            audit.preheader_sha256.as_deref(),
+            Some(expected_preheader_sha256.as_str())
+        );
+
+        let requests = server.requests();
+        let complete_post = requests
+            .iter()
+            .find(|request| {
+                request.starts_with(
+                    "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7 ",
+                )
+            })
+            .unwrap_or_else(|| panic!("Complete/save request should be posted"));
+        assert!(complete_post.contains("PreHeader=Updated+preheader"));
+        assert!(!requests.iter().any(|request| {
+            request.contains("Page=Send")
+                || request.contains("Page=Schedule")
+                || request.contains("/admin/cron/")
+        }));
+    }
+
+    #[test]
     fn campaign_metadata_preview_uses_interspire_8_step1_form() {
         let server = spawn_campaign_step2_fixture_server();
         let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
@@ -4370,19 +4437,18 @@ mod tests {
             .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let thread_requests = Arc::clone(&requests);
-        let body_html = Arc::new(Mutex::new(
-            r#"<p>Original body <a href="https://example.invalid">Read</a><img src="x.png" alt="Logo">%%UNSUBSCRIBELINK%%</p>"#
-                .to_string(),
-        ));
-        let body_text = Arc::new(Mutex::new("".to_string()));
-        let campaign_format = Arc::new(Mutex::new("h".to_string()));
-        let campaign_name = Arc::new(Mutex::new("Fixture campaign".to_string()));
-        let pending_campaign_name = Arc::new(Mutex::new(None::<String>));
-        let thread_body_html = Arc::clone(&body_html);
-        let thread_body_text = Arc::clone(&body_text);
-        let thread_campaign_format = Arc::clone(&campaign_format);
-        let thread_campaign_name = Arc::clone(&campaign_name);
-        let thread_pending_campaign_name = Arc::clone(&pending_campaign_name);
+        let fixture_state = CampaignStep2FixtureState {
+            body_html: Arc::new(Mutex::new(
+                r#"<p>Original body <a href="https://example.invalid">Read</a><img src="x.png" alt="Logo">%%UNSUBSCRIBELINK%%</p>"#
+                    .to_string(),
+            )),
+            body_text: Arc::new(Mutex::new("".to_string())),
+            campaign_format: Arc::new(Mutex::new("h".to_string())),
+            campaign_name: Arc::new(Mutex::new("Fixture campaign".to_string())),
+            campaign_preheader: Arc::new(Mutex::new("Original preheader".to_string())),
+            pending_campaign_name: Arc::new(Mutex::new(None::<String>)),
+        };
+        let thread_fixture_state = fixture_state.clone();
 
         let handle = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -4406,11 +4472,7 @@ mod tests {
                         write_campaign_step2_fixture_response(
                             &mut stream,
                             &request,
-                            &thread_body_html,
-                            &thread_body_text,
-                            &thread_campaign_format,
-                            &thread_campaign_name,
-                            &thread_pending_campaign_name,
+                            &thread_fixture_state,
                         );
                         if thread_requests
                             .lock()
@@ -4642,14 +4704,20 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct CampaignStep2FixtureState {
+        body_html: Arc<Mutex<String>>,
+        body_text: Arc<Mutex<String>>,
+        campaign_format: Arc<Mutex<String>>,
+        campaign_name: Arc<Mutex<String>>,
+        campaign_preheader: Arc<Mutex<String>>,
+        pending_campaign_name: Arc<Mutex<Option<String>>>,
+    }
+
     fn write_campaign_step2_fixture_response(
         stream: &mut std::net::TcpStream,
         request: &str,
-        body_html: &Arc<Mutex<String>>,
-        body_text: &Arc<Mutex<String>>,
-        campaign_format: &Arc<Mutex<String>>,
-        campaign_name: &Arc<Mutex<String>>,
-        pending_campaign_name: &Arc<Mutex<Option<String>>>,
+        state: &CampaignStep2FixtureState,
     ) {
         let body = if request.starts_with("GET /admin/index.php?Page=Login&Action=Login ") {
             r#"<form method="post" action="index.php?Page=Login&Action=Login">
@@ -4661,11 +4729,13 @@ mod tests {
         } else if request.starts_with("POST /admin/index.php?Page=Login&Action=Login ") {
             "<html><body>logged in</body></html>".to_string()
         } else if request.starts_with("GET /admin/index.php?Page=Newsletters&Action=Edit&id=7 ") {
-            let format = campaign_format
+            let format = state
+                .campaign_format
                 .lock()
                 .unwrap_or_else(|err| panic!("campaign format lock poisoned: {err}"))
                 .clone();
-            let name = campaign_name
+            let name = state
+                .campaign_name
                 .lock()
                 .unwrap_or_else(|err| panic!("campaign name lock poisoned: {err}"))
                 .clone();
@@ -4695,7 +4765,7 @@ mod tests {
             if let Some((_, value)) = url::form_urlencoded::parse(request_body.as_bytes())
                 .find(|(name, _)| name == "Name")
             {
-                *pending_campaign_name.lock().unwrap_or_else(|err| {
+                *state.pending_campaign_name.lock().unwrap_or_else(|err| {
                     panic!("pending campaign name lock poisoned while step2: {err}")
                 }) = Some(value.into_owned());
             }
@@ -4703,20 +4773,28 @@ mod tests {
                 .find(|(name, _)| name == "Format")
                 .map(|(_, value)| value.into_owned())
                 .unwrap_or_else(|| {
-                    campaign_format
+                    state
+                        .campaign_format
                         .lock()
                         .unwrap_or_else(|err| {
                             panic!("campaign format lock poisoned while render fallback: {err}")
                         })
                         .clone()
                 });
-            let html = body_html
+            let html = state
+                .body_html
                 .lock()
                 .unwrap_or_else(|err| panic!("body html lock poisoned: {err}"))
                 .clone();
-            let text = body_text
+            let text = state
+                .body_text
                 .lock()
                 .unwrap_or_else(|err| panic!("body text lock poisoned: {err}"))
+                .clone();
+            let preheader = state
+                .campaign_preheader
+                .lock()
+                .unwrap_or_else(|err| panic!("campaign preheader lock poisoned: {err}"))
                 .clone();
             let text_control = if render_format == "b" || render_format == "t" {
                 format!(r#"<textarea name="TextContent">{text}</textarea>"#)
@@ -4728,6 +4806,7 @@ mod tests {
                 <input type="hidden" name="csrf_token" value="fixture-csrf">
                 <input type="hidden" name="Format" value="{render_format}">
                 <input name="Subject" value="Original subject">
+                <input name="PreHeader" value="{preheader}">
                 <textarea name="myDevEditControl_html">{html}</textarea>
                 {text_control}
                 <input type="checkbox" name="trackopens" value="1" checked>
@@ -4745,7 +4824,8 @@ mod tests {
             if let Some((_, value)) = url::form_urlencoded::parse(request_body.as_bytes())
                 .find(|(name, _)| name == "myDevEditControl_html")
             {
-                *body_html
+                *state
+                    .body_html
                     .lock()
                     .unwrap_or_else(|err| panic!("body html lock poisoned while update: {err}")) =
                     value.into_owned();
@@ -4753,24 +4833,33 @@ mod tests {
             if let Some((_, value)) = url::form_urlencoded::parse(request_body.as_bytes())
                 .find(|(name, _)| name == "TextContent")
             {
-                *body_text
+                *state
+                    .body_text
                     .lock()
                     .unwrap_or_else(|err| panic!("body text lock poisoned while update: {err}")) =
                     value.into_owned();
             }
             if let Some((_, value)) = url::form_urlencoded::parse(request_body.as_bytes())
+                .find(|(name, _)| name == "PreHeader")
+            {
+                *state.campaign_preheader.lock().unwrap_or_else(|err| {
+                    panic!("campaign preheader lock poisoned while update: {err}")
+                }) = value.into_owned();
+            }
+            if let Some((_, value)) = url::form_urlencoded::parse(request_body.as_bytes())
                 .find(|(name, _)| name == "Format")
             {
-                *campaign_format.lock().unwrap_or_else(|err| {
+                *state.campaign_format.lock().unwrap_or_else(|err| {
                     panic!("campaign format lock poisoned while complete: {err}")
                 }) = value.into_owned();
             }
-            if let Some(value) = pending_campaign_name
+            if let Some(value) = state
+                .pending_campaign_name
                 .lock()
                 .unwrap_or_else(|err| panic!("pending campaign name lock poisoned: {err}"))
                 .take()
             {
-                *campaign_name.lock().unwrap_or_else(|err| {
+                *state.campaign_name.lock().unwrap_or_else(|err| {
                     panic!("campaign name lock poisoned while complete: {err}")
                 }) = normalize_fixture_campaign_name(&value);
             }
