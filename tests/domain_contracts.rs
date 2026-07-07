@@ -1,7 +1,8 @@
 use interspire_mcp::{
     AdminSessionProbeReport, AdminSessionProbeRequest, AudienceHygieneExportBeginRequest,
     AudienceHygieneExportReport, AudienceHygieneExportRequest, AudienceHygieneExportResumeRequest,
-    AudienceHygieneExportStatusRequest, CampaignBodyAuditReport, CampaignBodyAuditRequest,
+    AudienceHygieneExportStatusRequest, CampaignActiveStateApplyRequest,
+    CampaignActiveStatePreviewRequest, CampaignBodyAuditReport, CampaignBodyAuditRequest,
     CampaignCopyApplyReport, CampaignCopyApplyRequest, CampaignCopyPreviewReport,
     CampaignCopyPreviewRequest, CampaignReadbackReport, CampaignReadbackRequest,
     CampaignRenderArtifactReport, CampaignRenderArtifactRequest, CampaignTestSendApplyReport,
@@ -231,6 +232,28 @@ impl InterspireReadBackend for ContractBackend {
     ) -> Result<GuardedWriteApplyReport, InterspireError> {
         Ok(GuardedWriteApplyReport::fixture(
             "campaign",
+            Some(request.campaign_id),
+            None,
+        ))
+    }
+
+    fn campaign_active_state_preview(
+        &self,
+        request: &CampaignActiveStatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "campaign_active_state",
+            Some(request.campaign_id),
+            None,
+        ))
+    }
+
+    fn campaign_active_state_apply(
+        &self,
+        request: &CampaignActiveStateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "campaign_active_state",
             Some(request.campaign_id),
             None,
         ))
@@ -1240,7 +1263,7 @@ fn production_send_apply_denial_omits_unread_proof_blocks() {
 fn server_can_be_constructed_with_fixture_backend() {
     let server = InterspireMcpServer::with_backend(Arc::new(ContractBackend))
         .unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(server.tool_schema_snapshot().len(), 49);
+    assert_eq!(server.tool_schema_snapshot().len(), 51);
 }
 
 #[test]

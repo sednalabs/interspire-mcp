@@ -10,6 +10,8 @@ fn stdio_initializes_and_lists_tools() {
             "interspire_audience_hygiene_export_begin",
             "interspire_audience_hygiene_export_resume",
             "interspire_audience_hygiene_export_status",
+            "interspire_campaign_active_state_apply",
+            "interspire_campaign_active_state_preview",
             "interspire_campaign_body_audit",
             "interspire_campaign_copy_apply",
             "interspire_campaign_copy_preview",

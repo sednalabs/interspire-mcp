@@ -5,6 +5,7 @@
 //! admitted by `safety`, parses redacted operational fields, and never exposes
 //! raw saved HTML, cookies, passwords, contact exports, or send/cron actions.
 
+mod campaign_state;
 mod forms;
 mod proof;
 mod scaffold;
@@ -916,6 +917,24 @@ impl AdminHtmlClient {
             updates,
             mode,
         )
+    }
+
+    pub fn campaign_active_state_preview(
+        &self,
+        campaign_id: u64,
+        active: bool,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        campaign_state::campaign_active_state_preview(self, campaign_id, active)
+    }
+
+    pub fn campaign_active_state_apply(
+        &self,
+        campaign_id: u64,
+        active: bool,
+        plan_id: &str,
+        mode: WriteExecutionMode,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        campaign_state::campaign_active_state_apply(self, campaign_id, active, plan_id, mode)
     }
 
     pub fn list_update_preview(
@@ -2028,9 +2047,16 @@ pub fn parse_campaign_manage_rows(
             .iter()
             .map(|label| label.to_ascii_lowercase())
             .collect::<Vec<_>>();
+        let exposes_activate = action_lookup.iter().any(|label| label == "activate");
+        let exposes_deactivate = action_lookup.iter().any(|label| label == "deactivate");
         rows.push(CampaignManageRow {
             campaign_id,
             row_summary,
+            active: match (exposes_activate, exposes_deactivate) {
+                (true, false) => Some(false),
+                (false, true) => Some(true),
+                _ => None,
+            },
             can_send: action_lookup.iter().any(|label| label == "send"),
             can_edit: action_lookup.iter().any(|label| label == "edit"),
             can_copy: action_lookup.iter().any(|label| label == "copy"),
@@ -3619,6 +3645,172 @@ mod tests {
     }
 
     #[test]
+    fn campaign_active_state_apply_deactivates_and_proves_manage_readback() {
+        let server = spawn_campaign_active_state_fixture_server(true);
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let preview = client
+            .campaign_active_state_preview(101, false)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(preview.ok);
+        assert_eq!(preview.target, "campaign_active_state");
+        assert_eq!(preview.changes.len(), 1);
+        assert_eq!(preview.changes[0].current_value.as_deref(), Some("true"));
+        assert_eq!(preview.changes[0].requested_value.as_deref(), Some("false"));
+        assert!(preview.changes[0].will_change);
+
+        let apply = client
+            .campaign_active_state_apply(
+                101,
+                false,
+                &preview.plan_id,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(apply.ok);
+        assert!(apply.applied);
+        assert_eq!(apply.post_apply_fields.len(), 1);
+        assert_eq!(apply.post_apply_fields[0].name, "active");
+        assert_eq!(apply.post_apply_fields[0].value.as_deref(), Some("false"));
+        assert!(apply
+            .evidence
+            .notes
+            .iter()
+            .any(|note| note.contains("fresh admin session proved campaign active state")));
+        let preview_json = serde_json::to_string(&preview).unwrap_or_else(|err| panic!("{err}"));
+        let apply_json = serde_json::to_string(&apply).unwrap_or_else(|err| panic!("{err}"));
+        for body in [preview_json, apply_json] {
+            assert!(!body.contains("csrfToken"));
+            assert!(!body.contains("fixture-token"));
+            assert!(!body.contains("index.php"));
+            assert!(!body.contains("person@example.test"));
+        }
+
+        let readback = client
+            .campaign_readback(None, 5)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let row = readback
+            .campaign_manage_rows
+            .iter()
+            .find(|row| row.campaign_id == 101)
+            .unwrap_or_else(|| panic!("campaign row should remain visible"));
+        assert_eq!(row.active, Some(false));
+        assert!(!row.can_send);
+
+        let requests = server.requests();
+        assert!(requests.iter().any(|request| {
+            request.starts_with(
+                "GET /admin/index.php?Page=Newsletters&Action=Deactivate&id=101&csrfToken=fixture-token ",
+            )
+        }));
+    }
+
+    #[test]
+    fn campaign_active_state_apply_rejects_stale_plan_before_route_get() {
+        let server = spawn_campaign_active_state_fixture_server(true);
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let err = client
+            .campaign_active_state_apply(
+                101,
+                false,
+                "iqc_stale_plan",
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .expect_err("stale active-state plan should be rejected");
+
+        assert!(matches!(
+            err,
+            InterspireError::Safety(message)
+                if message.contains("campaign active-state fingerprint")
+        ));
+        assert!(!server.requests().iter().any(|request| request
+            .starts_with("GET /admin/index.php?Page=Newsletters&Action=Deactivate&id=101")));
+    }
+
+    #[test]
+    fn campaign_active_state_preview_rejects_off_target_state_action() {
+        let server = spawn_campaign_active_state_fixture_server_with(
+            true,
+            CampaignActiveStateFixtureMode::MismatchedStateActionId,
+        );
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let err = client
+            .campaign_active_state_preview(101, false)
+            .expect_err("state action for another campaign must not prove target state");
+
+        assert!(matches!(
+            err,
+            InterspireError::Safety(message)
+                if message.contains("did not expose exactly one Activate/Deactivate")
+        ));
+        assert!(!server.requests().iter().any(|request| request
+            .starts_with("GET /admin/index.php?Page=Newsletters&Action=Deactivate&id=999")));
+    }
+
+    #[test]
+    fn campaign_active_state_apply_rejects_success_without_state_readback() {
+        let server = spawn_campaign_active_state_fixture_server_with(
+            true,
+            CampaignActiveStateFixtureMode::StuckAfterApply,
+        );
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let preview = client
+            .campaign_active_state_preview(101, false)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let err = client
+            .campaign_active_state_apply(
+                101,
+                false,
+                &preview.plan_id,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .expect_err("HTTP success without changed readback must fail closed");
+
+        assert!(matches!(
+            err,
+            InterspireError::Safety(message)
+                if message.contains("fresh readback did not match the requested state")
+        ));
+        let expected_route = "GET /admin/index.php?Page=Newsletters&Action=Deactivate&id=101&csrfToken=fixture-token";
+        assert!(server
+            .requests()
+            .iter()
+            .any(|request| request.starts_with(expected_route)));
+    }
+
+    #[test]
+    fn campaign_active_state_ambiguous_row_error_is_bounded_and_redacted() {
+        let server = spawn_campaign_active_state_fixture_server_with(
+            true,
+            CampaignActiveStateFixtureMode::DuplicateStateActions,
+        );
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let err = client
+            .campaign_active_state_preview(101, false)
+            .expect_err("duplicate state actions must fail closed");
+        let message = err.to_string();
+
+        assert!(message.contains("did not expose exactly one Activate/Deactivate"));
+        assert!(
+            message.len() < 520,
+            "ambiguous row error was too large: {message}"
+        );
+        assert!(!message.contains("person@example.test"));
+        assert!(!message.contains("fixture-token"));
+    }
+
+    #[test]
     fn login_form_html_is_rejected_as_unauthenticated() {
         let html = r#"
             <form>
@@ -3751,6 +3943,14 @@ mod tests {
         base_url: String,
         requests: Arc<Mutex<Vec<String>>>,
         handle: Option<thread::JoinHandle<()>>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum CampaignActiveStateFixtureMode {
+        Normal,
+        MismatchedStateActionId,
+        DuplicateStateActions,
+        StuckAfterApply,
     }
 
     impl TestAdminServer {
@@ -4296,6 +4496,81 @@ mod tests {
         }
     }
 
+    fn spawn_campaign_active_state_fixture_server(initial_active: bool) -> TestAdminServer {
+        spawn_campaign_active_state_fixture_server_with(
+            initial_active,
+            CampaignActiveStateFixtureMode::Normal,
+        )
+    }
+
+    fn spawn_campaign_active_state_fixture_server_with(
+        initial_active: bool,
+        mode: CampaignActiveStateFixtureMode,
+    ) -> TestAdminServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let active = Arc::new(Mutex::new(initial_active));
+        let thread_requests = Arc::clone(&requests);
+        let thread_active = Arc::clone(&active);
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 8192];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("test request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while push: {err}")
+                            })
+                            .push(request.clone());
+                        write_campaign_active_state_fixture_response(
+                            &mut stream,
+                            &request,
+                            &thread_active,
+                            mode,
+                        );
+                        if thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("test requests lock poisoned while count: {err}")
+                            })
+                            .len()
+                            >= 18
+                        {
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("test server accept failed: {err}"),
+                }
+            }
+        });
+
+        TestAdminServer {
+            base_url: format!("http://{address}/admin/"),
+            requests,
+            handle: Some(handle),
+        }
+    }
+
     fn spawn_contact_state_fixture_server() -> TestAdminServer {
         spawn_contact_state_fixture_server_with(false)
     }
@@ -4747,6 +5022,103 @@ mod tests {
               </table>"#
         } else {
             "<html><body>unexpected request</body></html>"
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .unwrap_or_else(|err| panic!("test response write failed: {err}"));
+    }
+
+    fn write_campaign_active_state_fixture_response(
+        stream: &mut std::net::TcpStream,
+        request: &str,
+        active: &Arc<Mutex<bool>>,
+        mode: CampaignActiveStateFixtureMode,
+    ) {
+        let body = if request.starts_with("GET /admin/index.php?Page=Login&Action=Login ") {
+            r#"<form method="post" action="index.php?Page=Login&Action=Login">
+                <input type="hidden" name="csrf_token" value="fixture-csrf">
+                <input name="ss_username">
+                <input name="ss_password">
+              </form>"#
+                .to_string()
+        } else if request.starts_with("POST /admin/index.php?Page=Login&Action=Login ")
+            || request.starts_with("GET /admin/index.php?Page=Lists ")
+        {
+            "<html><body>logged in</body></html>".to_string()
+        } else if request.starts_with(
+            "GET /admin/index.php?Page=Newsletters&Action=Deactivate&id=101&csrfToken=fixture-token ",
+        ) {
+            if !matches!(mode, CampaignActiveStateFixtureMode::StuckAfterApply) {
+                *active
+                    .lock()
+                    .unwrap_or_else(|err| panic!("active fixture lock poisoned: {err}")) = false;
+            }
+            "<html><body>campaign deactivated</body></html>".to_string()
+        } else if request.starts_with(
+            "GET /admin/index.php?Page=Newsletters&Action=Activate&id=101&csrfToken=fixture-token ",
+        ) {
+            if !matches!(mode, CampaignActiveStateFixtureMode::StuckAfterApply) {
+                *active
+                    .lock()
+                    .unwrap_or_else(|err| panic!("active fixture lock poisoned: {err}")) = true;
+            }
+            "<html><body>campaign activated</body></html>".to_string()
+        } else if request.starts_with("GET /admin/index.php?Page=Newsletters&Action=Manage ") {
+            let is_active = *active
+                .lock()
+                .unwrap_or_else(|err| panic!("active fixture lock poisoned: {err}"));
+            let state_action = match mode {
+                CampaignActiveStateFixtureMode::MismatchedStateActionId => {
+                    r#"<a href="index.php?Page=Newsletters&Action=Deactivate&id=999&csrfToken=fixture-token">Deactivate</a>"#
+                }
+                CampaignActiveStateFixtureMode::DuplicateStateActions => {
+                    r#"<a href="index.php?Page=Newsletters&Action=Activate&id=101&csrfToken=fixture-token">Activate</a>
+                       <a href="index.php?Page=Newsletters&Action=Deactivate&id=101&csrfToken=fixture-token">Deactivate</a>"#
+                }
+                CampaignActiveStateFixtureMode::Normal
+                | CampaignActiveStateFixtureMode::StuckAfterApply => {
+                    if is_active {
+                        r#"<a href="index.php?Page=Newsletters&Action=Deactivate&id=101&csrfToken=fixture-token">Deactivate</a>"#
+                    } else {
+                        r#"<a href="index.php?Page=Newsletters&Action=Activate&id=101&csrfToken=fixture-token">Activate</a>"#
+                    }
+                }
+            };
+            let send_action = if is_active {
+                r#"<a href="index.php?Page=Send&Action=Step1&id=101&csrfToken=fixture-token">Send</a>"#
+            } else {
+                ""
+            };
+            let subject = if matches!(mode, CampaignActiveStateFixtureMode::DuplicateStateActions)
+            {
+                format!(
+                    "State proof for person@example.test {}",
+                    "oversized ambiguous row detail ".repeat(40)
+                )
+            } else {
+                "State proof for person@example.test".to_string()
+            };
+            format!(
+                r#"<table>
+                    <tr><th>Name</th><th>Subject</th><th>Action</th></tr>
+                    <tr>
+                      <td><a href="index.php?Page=Newsletters&Action=Edit&id=101">Campaign One</a></td>
+                      <td>{subject}</td>
+                      <td>
+                        {send_action}
+                        <a href="index.php?Page=Newsletters&Action=Edit&id=101">Edit</a>
+                        {state_action}
+                      </td>
+                    </tr>
+                  </table>"#
+            )
+        } else {
+            "<html><body>unexpected request</body></html>".to_string()
         };
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",

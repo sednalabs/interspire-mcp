@@ -1,7 +1,8 @@
 use interspire_mcp::{
     AdminSessionProbeReport, AdminSessionProbeRequest, AudienceHygieneExportBeginRequest,
     AudienceHygieneExportReport, AudienceHygieneExportRequest, AudienceHygieneExportResumeRequest,
-    AudienceHygieneExportStatusRequest, CampaignBodyAuditReport, CampaignBodyAuditRequest,
+    AudienceHygieneExportStatusRequest, CampaignActiveStateApplyRequest,
+    CampaignActiveStatePreviewRequest, CampaignBodyAuditReport, CampaignBodyAuditRequest,
     CampaignCopyApplyReport, CampaignCopyApplyRequest, CampaignCopyPreviewReport,
     CampaignCopyPreviewRequest, CampaignReadbackReport, CampaignReadbackRequest,
     CampaignRenderArtifactReport, CampaignRenderArtifactRequest, CampaignTestSendApplyReport,
@@ -228,6 +229,28 @@ impl InterspireReadBackend for FixtureBackend {
     ) -> Result<GuardedWriteApplyReport, InterspireError> {
         Ok(GuardedWriteApplyReport::fixture(
             "campaign",
+            Some(request.campaign_id),
+            None,
+        ))
+    }
+
+    fn campaign_active_state_preview(
+        &self,
+        request: &CampaignActiveStatePreviewRequest,
+    ) -> Result<GuardedWritePreviewReport, InterspireError> {
+        Ok(GuardedWritePreviewReport::fixture(
+            "campaign_active_state",
+            Some(request.campaign_id),
+            None,
+        ))
+    }
+
+    fn campaign_active_state_apply(
+        &self,
+        request: &CampaignActiveStateApplyRequest,
+    ) -> Result<GuardedWriteApplyReport, InterspireError> {
+        Ok(GuardedWriteApplyReport::fixture(
+            "campaign_active_state",
             Some(request.campaign_id),
             None,
         ))

@@ -133,6 +133,8 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_campaign_template_update_apply` | Guarded apply | Apply one previously previewed semantic EDM template edit. |
 | `interspire_campaign_template_artifact_update_preview` | Read preview | Preview applying a fixed private render artifact to a draft campaign without returning raw HTML. |
 | `interspire_campaign_template_artifact_update_apply` | Guarded apply | Apply one previously previewed fixed private render artifact and prove the persisted body hash. |
+| `interspire_campaign_active_state_preview` | Read preview | Preview a guarded activate/deactivate change for one campaign from the manage-page state action. |
+| `interspire_campaign_active_state_apply` | Guarded apply | Apply one previously previewed campaign active-state change through the exact Activate/Deactivate route, then prove the requested state from a fresh manage-page readback. |
 | `interspire_campaign_update_preview` | Read preview | Preview guarded campaign content or metadata edits, including Interspire 8 Step1 campaign-name edits and the documented Archive checkbox. |
 | `interspire_campaign_update_apply` | Guarded apply | Apply one previously previewed campaign edit when guarded form-write gates are enabled, with Step1 campaign-name changes proven through the wizard Complete/save path. |
 | `interspire_list_update_preview` | Read preview | Preview guarded list metadata edits. |
