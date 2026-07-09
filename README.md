@@ -160,8 +160,12 @@ DNS tool.
 For Interspire 8 wizard-backed campaigns, keep Step1-only metadata changes
 separate from body/template changes. The campaign update apply path posts the
 Step1 handoff, posts the preserved Complete/save form, and then proves the
-Step1 value from a fresh admin session. Mixed Step1 campaign-name plus body
-edits fail closed so operators can verify each surface independently.
+Step1 value from a fresh admin session. If the save POST succeeds but post-apply
+proof loses the admin session, the tool retries only fresh readback of the exact
+target and requested fields. It does not repost the save mutation; if proof
+still cannot be established, the result is classified as `apply_posted_unproven`
+instead of a generic HTTP failure. Mixed Step1 campaign-name plus body edits
+fail closed so operators can verify each surface independently.
 
 ## Quick Start
 
