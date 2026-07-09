@@ -1,7 +1,8 @@
 use super::{
     admin_evidence, admin_origin, compact_text, csrf_pair, ensure_authenticated_html,
     extract_ids_from_links, extract_login_csrf_token, looks_like_save_submit, parse_form_values,
-    parse_settings_fields, summarize_field_value, AdminHtmlClient,
+    parse_settings_fields, summarize_field_value, AdminHtmlClient, ADMIN_LOGIN_PAGE_ERROR,
+    ADMIN_LOGIN_REJECTED_ERROR, ADMIN_LOGIN_RETRY_DELAY,
 };
 use crate::{
     config::WriteExecutionMode,
@@ -16,8 +17,10 @@ use crate::{
 use reqwest::header::LOCATION;
 use scraper::{ElementRef, Html, Selector};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, thread};
 use url::Url;
+
+const POST_APPLY_PROOF_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FormControlKind {
@@ -342,9 +345,8 @@ pub(super) fn guarded_write_apply(
         target,
         GuardedFormTarget::Campaign { .. }
     ) {
-        let fresh_client = AdminHtmlClient::new(client.config.clone())?;
-        fresh_client.login()?;
-        let (after_read_path, after_html, mut notes) = guarded_form_html(&fresh_client, target)?;
+        let (after_read_path, after_html, mut notes) =
+            campaign_form_post_apply_readback(client, target, updates, &changes)?;
         notes.push(
             "campaign form readback used a fresh admin session so Step1 wizard state could not satisfy post-apply proof"
                 .to_string(),
@@ -754,9 +756,7 @@ fn guarded_campaign_step1_apply(
     // Interspire carries Step1 wizard fields through server-side state into
     // the final Complete save. Prove durability from a fresh admin session so
     // a transient wizard page cannot satisfy the requested Step1 field change.
-    let fresh_client = AdminHtmlClient::new(client.config.clone())?;
-    fresh_client.login()?;
-    let after_html = fresh_client.get_allowed(&read_path)?;
+    let after_html = campaign_step1_post_apply_readback(client, target, &read_path, &changes)?;
     let after_snapshot = capture_campaign_step1_snapshot(
         client.config.base_url.as_deref().unwrap_or_default(),
         &read_path,
@@ -821,6 +821,110 @@ fn guarded_campaign_step1_apply(
             "fresh admin session proved campaign Step1 metadata readback".to_string(),
         ]),
     })
+}
+
+fn campaign_form_post_apply_readback(
+    client: &AdminHtmlClient,
+    target: GuardedFormTarget,
+    updates: &[FormFieldUpdate],
+    changes: &[FormFieldChange],
+) -> Result<(String, String, Vec<String>), InterspireError> {
+    let requested_fields = requested_change_names(changes);
+    let mut last_error = None;
+    for attempt in 0..POST_APPLY_PROOF_ATTEMPTS {
+        let fresh_client = AdminHtmlClient::new(client.config.clone())
+            .map_err(|err| apply_posted_unproven_error(target, &requested_fields, err))?;
+        match guarded_form_html_for_updates(&fresh_client, target, updates) {
+            Ok(readback) => return Ok(readback),
+            Err(err)
+                if post_apply_proof_recoverable(&err)
+                    && attempt + 1 < POST_APPLY_PROOF_ATTEMPTS =>
+            {
+                last_error = Some(err);
+                thread::sleep(ADMIN_LOGIN_RETRY_DELAY);
+            }
+            Err(err) => return Err(apply_posted_unproven_error(target, &requested_fields, err)),
+        }
+    }
+
+    Err(apply_posted_unproven_error(
+        target,
+        &requested_fields,
+        last_error.unwrap_or_else(|| {
+            InterspireError::Http(
+                "post-apply campaign readback did not return proof before retry budget expired"
+                    .to_string(),
+            )
+        }),
+    ))
+}
+
+fn campaign_step1_post_apply_readback(
+    client: &AdminHtmlClient,
+    target: GuardedFormTarget,
+    read_path: &str,
+    changes: &[FormFieldChange],
+) -> Result<String, InterspireError> {
+    let requested_fields = requested_change_names(changes);
+    let mut last_error = None;
+    for attempt in 0..POST_APPLY_PROOF_ATTEMPTS {
+        let fresh_client = AdminHtmlClient::new(client.config.clone())
+            .map_err(|err| apply_posted_unproven_error(target, &requested_fields, err))?;
+        match fresh_client.get_allowed(read_path) {
+            Ok(html) => return Ok(html),
+            Err(err)
+                if post_apply_proof_recoverable(&err)
+                    && attempt + 1 < POST_APPLY_PROOF_ATTEMPTS =>
+            {
+                last_error = Some(err);
+                thread::sleep(ADMIN_LOGIN_RETRY_DELAY);
+            }
+            Err(err) => return Err(apply_posted_unproven_error(target, &requested_fields, err)),
+        }
+    }
+
+    Err(apply_posted_unproven_error(
+        target,
+        &requested_fields,
+        last_error.unwrap_or_else(|| {
+            InterspireError::Http(
+                "post-apply campaign Step1 readback did not return proof before retry budget expired"
+                    .to_string(),
+            )
+        }),
+    ))
+}
+
+fn requested_change_names(changes: &[FormFieldChange]) -> Vec<String> {
+    changes.iter().map(|change| change.name.clone()).collect()
+}
+
+fn post_apply_proof_recoverable(err: &InterspireError) -> bool {
+    matches!(
+        err,
+        InterspireError::Http(message)
+            if message == ADMIN_LOGIN_PAGE_ERROR
+                || message == ADMIN_LOGIN_REJECTED_ERROR
+                || message.contains("login page")
+    )
+}
+
+fn apply_posted_unproven_error(
+    target: GuardedFormTarget,
+    requested_fields: &[String],
+    err: InterspireError,
+) -> InterspireError {
+    let field_list = if requested_fields.is_empty() {
+        "<none>".to_string()
+    } else {
+        requested_fields.join(", ")
+    };
+    InterspireError::ApplyPostedUnproven(format!(
+        "guarded {} POST was accepted, but post-apply proof_degraded readback could not prove requested field(s) {}; do not retry the apply without a fresh preview/readback; proof error: {}",
+        target.label(),
+        field_list,
+        err
+    ))
 }
 
 fn campaign_step1_field_persisted(

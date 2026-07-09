@@ -8,6 +8,8 @@ pub enum InterspireError {
     Safety(String),
     #[error("Interspire HTTP request failed: {0}")]
     Http(String),
+    #[error("Interspire apply was posted but post-apply proof is degraded: {0}")]
+    ApplyPostedUnproven(String),
     #[error("Interspire XML response could not be parsed: {0}")]
     XmlParse(String),
     #[error("Interspire XML authentication failed: {0}")]
@@ -27,6 +29,7 @@ impl InterspireError {
             Self::AdminHtmlNotConfigured => "admin_html_not_configured",
             Self::Safety(_) => "safety_policy_blocked",
             Self::Http(_) => "http_error",
+            Self::ApplyPostedUnproven(_) => "apply_posted_unproven",
             Self::XmlParse(_) => "xml_parse_error",
             Self::XmlAuth(_) => "xml_auth_error",
             Self::HtmlParse(_) => "html_parse_error",

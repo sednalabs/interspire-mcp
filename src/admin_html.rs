@@ -3537,6 +3537,154 @@ mod tests {
     }
 
     #[test]
+    fn campaign_preheader_apply_recovers_post_apply_session_loss_without_reposting_save() {
+        let server = spawn_campaign_step2_fixture_server_with_post_apply_auth_loss(1, 1, 1, false);
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [FormFieldUpdate {
+            name: "preheader".to_string(),
+            value: Some("Recovered preheader".to_string()),
+            checked: None,
+        }];
+        let preview = client
+            .campaign_update_preview(7, &updates)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let apply = client
+            .campaign_update_apply(
+                7,
+                &preview.plan_id,
+                &updates,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(apply.ok);
+        assert!(apply.applied);
+        assert!(apply.post_apply_fields.iter().any(|field| {
+            field.name == "preheader"
+                && field
+                    .value
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("[content len=19 sha256="))
+        }));
+
+        let requests = server.requests();
+        assert_eq!(
+            count_requests_starting_with(
+                &requests,
+                "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7 ",
+            ),
+            1
+        );
+        assert_eq!(
+            count_requests_starting_with(
+                &requests,
+                "POST /admin/index.php?Page=Login&Action=Login ",
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn campaign_metadata_apply_recovers_post_apply_session_loss_without_reposting_wizard() {
+        let server = spawn_campaign_step2_fixture_server_with_post_apply_auth_loss(1, 1, 1, false);
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [FormFieldUpdate {
+            name: "name".to_string(),
+            value: Some("Recovered fixture campaign".to_string()),
+            checked: None,
+        }];
+        let preview = client
+            .campaign_update_preview(7, &updates)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let apply = client
+            .campaign_update_apply(
+                7,
+                &preview.plan_id,
+                &updates,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(apply.ok);
+        assert!(apply.applied);
+        let name = apply
+            .post_apply_fields
+            .iter()
+            .find(|field| field.name == "name")
+            .and_then(|field| field.value.as_deref());
+        assert_eq!(name, Some("Recovered fixture campaign"));
+
+        let requests = server.requests();
+        assert_eq!(
+            count_requests_starting_with(
+                &requests,
+                "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7 ",
+            ),
+            1
+        );
+        assert_eq!(
+            count_requests_starting_with(
+                &requests,
+                "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7 ",
+            ),
+            1
+        );
+        assert_eq!(
+            count_requests_starting_with(
+                &requests,
+                "POST /admin/index.php?Page=Login&Action=Login ",
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn campaign_metadata_apply_returns_posted_unproven_when_readback_cannot_be_proved() {
+        let server = spawn_campaign_step2_fixture_server_with_post_apply_auth_loss(0, 0, 0, true);
+        let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let updates = [FormFieldUpdate {
+            name: "name".to_string(),
+            value: Some("Unproven fixture campaign".to_string()),
+            checked: None,
+        }];
+        let preview = client
+            .campaign_update_preview(7, &updates)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let err = client
+            .campaign_update_apply(
+                7,
+                &preview.plan_id,
+                &updates,
+                crate::config::WriteExecutionMode::PreviewApply,
+            )
+            .expect_err("unprovable post-apply readback should fail closed");
+
+        assert_eq!(err.code(), "apply_posted_unproven");
+        assert!(err.to_string().contains("proof_degraded"));
+        let requests = server.requests();
+        assert_eq!(
+            count_requests_starting_with(
+                &requests,
+                "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Step2&id=7 ",
+            ),
+            1
+        );
+        assert_eq!(
+            count_requests_starting_with(
+                &requests,
+                "POST /admin/index.php?Page=Newsletters&Action=Edit&SubAction=Complete&id=7 ",
+            ),
+            1
+        );
+    }
+
+    #[test]
     fn campaign_template_apply_posts_step2_body_and_preserves_tracking_flags() {
         let server = spawn_campaign_step2_fixture_server();
         let client = AdminHtmlClient::new(test_admin_config(&server.base_url))
@@ -4427,6 +4575,15 @@ mod tests {
     }
 
     fn spawn_campaign_step2_fixture_server() -> TestAdminServer {
+        spawn_campaign_step2_fixture_server_with_post_apply_auth_loss(0, 0, 0, false)
+    }
+
+    fn spawn_campaign_step2_fixture_server_with_post_apply_auth_loss(
+        edit_login_challenges_after_complete: usize,
+        list_login_challenges_after_complete: usize,
+        login_post_rejections_after_complete: usize,
+        edit_always_login_after_complete: bool,
+    ) -> TestAdminServer {
         let listener =
             TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
         listener
@@ -4447,6 +4604,17 @@ mod tests {
             campaign_name: Arc::new(Mutex::new("Fixture campaign".to_string())),
             campaign_preheader: Arc::new(Mutex::new("Original preheader".to_string())),
             pending_campaign_name: Arc::new(Mutex::new(None::<String>)),
+            complete_posts: Arc::new(Mutex::new(0)),
+            edit_login_challenges_after_complete: Arc::new(Mutex::new(
+                edit_login_challenges_after_complete,
+            )),
+            list_login_challenges_after_complete: Arc::new(Mutex::new(
+                list_login_challenges_after_complete,
+            )),
+            login_post_rejections_after_complete: Arc::new(Mutex::new(
+                login_post_rejections_after_complete,
+            )),
+            edit_always_login_after_complete,
         };
         let thread_fixture_state = fixture_state.clone();
 
@@ -4712,6 +4880,11 @@ mod tests {
         campaign_name: Arc<Mutex<String>>,
         campaign_preheader: Arc<Mutex<String>>,
         pending_campaign_name: Arc<Mutex<Option<String>>>,
+        complete_posts: Arc<Mutex<usize>>,
+        edit_login_challenges_after_complete: Arc<Mutex<usize>>,
+        list_login_challenges_after_complete: Arc<Mutex<usize>>,
+        login_post_rejections_after_complete: Arc<Mutex<usize>>,
+        edit_always_login_after_complete: bool,
     }
 
     fn write_campaign_step2_fixture_response(
@@ -4719,6 +4892,10 @@ mod tests {
         request: &str,
         state: &CampaignStep2FixtureState,
     ) {
+        let complete_posts = *state
+            .complete_posts
+            .lock()
+            .unwrap_or_else(|err| panic!("complete post lock poisoned: {err}"));
         let body = if request.starts_with("GET /admin/index.php?Page=Login&Action=Login ") {
             r#"<form method="post" action="index.php?Page=Login&Action=Login">
                 <input type="hidden" name="csrf_token" value="fixture-csrf">
@@ -4727,8 +4904,28 @@ mod tests {
               </form>"#
                 .to_string()
         } else if request.starts_with("POST /admin/index.php?Page=Login&Action=Login ") {
+            if complete_posts > 0
+                && take_post_apply_challenge(&state.login_post_rejections_after_complete)
+            {
+                return write_html_response(stream, login_form_html());
+            }
             "<html><body>logged in</body></html>".to_string()
+        } else if request.starts_with("GET /admin/index.php?Page=Lists ") {
+            if complete_posts > 0
+                && take_post_apply_challenge(&state.list_login_challenges_after_complete)
+            {
+                login_form_html().to_string()
+            } else {
+                "<html><body><a href=\"index.php?Page=Lists&Action=Edit&id=1\">List</a></body></html>"
+                    .to_string()
+            }
         } else if request.starts_with("GET /admin/index.php?Page=Newsletters&Action=Edit&id=7 ") {
+            if complete_posts > 0
+                && (state.edit_always_login_after_complete
+                    || take_post_apply_challenge(&state.edit_login_challenges_after_complete))
+            {
+                return write_html_response(stream, login_form_html());
+            }
             let format = state
                 .campaign_format
                 .lock()
@@ -4863,10 +5060,41 @@ mod tests {
                     panic!("campaign name lock poisoned while complete: {err}")
                 }) = normalize_fixture_campaign_name(&value);
             }
+            *state
+                .complete_posts
+                .lock()
+                .unwrap_or_else(|err| panic!("complete post lock poisoned while update: {err}")) +=
+                1;
             "<html><body>saved</body></html>".to_string()
         } else {
             "<html><body>unexpected request</body></html>".to_string()
         };
+        write_html_response(stream, &body);
+    }
+
+    fn normalize_fixture_campaign_name(value: &str) -> String {
+        value.replace(',', "")
+    }
+
+    fn login_form_html() -> &'static str {
+        r#"<form method="post" action="index.php?Page=Login&Action=Login">
+            <input name="ss_username">
+            <input name="ss_password">
+          </form>"#
+    }
+
+    fn take_post_apply_challenge(challenges: &Arc<Mutex<usize>>) -> bool {
+        let mut remaining = challenges
+            .lock()
+            .unwrap_or_else(|err| panic!("post-apply challenge lock poisoned: {err}"));
+        if *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+        true
+    }
+
+    fn write_html_response(stream: &mut std::net::TcpStream, body: &str) {
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
             body.len(),
@@ -4877,8 +5105,11 @@ mod tests {
             .unwrap_or_else(|err| panic!("test response write failed: {err}"));
     }
 
-    fn normalize_fixture_campaign_name(value: &str) -> String {
-        value.replace(',', "")
+    fn count_requests_starting_with(requests: &[String], prefix: &str) -> usize {
+        requests
+            .iter()
+            .filter(|request| request.starts_with(prefix))
+            .count()
     }
 
     fn write_fixture_response(stream: &mut std::net::TcpStream, request: &str) {
