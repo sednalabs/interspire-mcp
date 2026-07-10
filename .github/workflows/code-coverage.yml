@@ -45,7 +45,7 @@ jobs:
 
       - name: Install coverage tool
         # taiki-e/install-action v2
-        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb
         with:
           tool: cargo-llvm-cov
 
