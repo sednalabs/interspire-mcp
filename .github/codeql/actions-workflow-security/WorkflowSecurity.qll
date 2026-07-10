@@ -46,6 +46,28 @@ predicate jobUsesAction(Job job, string callee) {
   )
 }
 
+predicate sarifPublishingReusableWorkflow(string callee) {
+  callee = "google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml"
+  or
+  callee = "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml"
+}
+
+predicate jobDelegatesSarifUpload(Job job) {
+  exists(ExternalJob reusableJob, string callee |
+    reusableJob = job and
+    callee = reusableJob.getCallee() and
+    sarifPublishingReusableWorkflow(callee)
+  )
+}
+
+predicate jobPublishesScorecardResults(Job job) {
+  exists(UsesStep step |
+    step.getEnclosingJob() = job and
+    step.getCallee() = "ossf/scorecard-action" and
+    step.getArgument("publish_results").toLowerCase() = "true"
+  )
+}
+
 bindingset[pattern]
 predicate jobUsesActionMatching(Job job, string pattern, string callee) {
   jobUsesAction(job, callee) and
@@ -248,13 +270,13 @@ predicate jobNeedsWritePermission(Job job, string permissionName) {
   jobHasPublishingSink(job, _)
   or
   permissionName = "id-token" and
-  jobHasSigningMarker(job)
+  (jobHasSigningMarker(job) or jobPublishesScorecardResults(job))
   or
   permissionName = "attestations" and
   jobHasNativeAttestationMarker(job)
   or
   permissionName = "security-events" and
-  jobUsesActionMatching(job, "(?i)^github/codeql-action.*", _)
+  (jobUsesActionMatching(job, "(?i)^github/codeql-action.*", _) or jobDelegatesSarifUpload(job))
   or
   permissionName = "code-quality" and
   (
