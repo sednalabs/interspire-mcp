@@ -17,7 +17,7 @@ mcp-toolkit-core = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-
 mcp-toolkit-observability = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "aa0fbced690f80f0d04396b99f18c5fce833a73c" }
 mcp-toolkit-policy-core = { version = "0.1.0", git = "https://github.com/sednalabs/mcp-toolkit-rs", rev = "aa0fbced690f80f0d04396b99f18c5fce833a73c" }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "cookies", "rustls-tls"] }
-rmcp = { version = "=1.8.0", default-features = false, features = ["macros", "schemars", "server", "transport-io"] }
+rmcp = { version = "=2.2.0", default-features = false, features = ["macros", "schemars", "server", "transport-io"] }
 roxmltree = "0.21.1"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 schemars = "1.2.1"
