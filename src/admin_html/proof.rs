@@ -1463,7 +1463,7 @@ impl AdminHtmlClient {
         let unsent_count = if smtp_reason.is_some() {
             Some(input.expected_recipient_count)
         } else {
-            Some(0).filter(|_| stats_changed || popup_steps > 0)
+            (stats_changed || popup_steps > 0).then_some(0)
         };
         let mut proof_gaps = Vec::new();
         let status = if smtp_reason.is_some() {

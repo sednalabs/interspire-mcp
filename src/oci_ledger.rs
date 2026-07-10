@@ -879,10 +879,9 @@ fn ledger_row_fingerprint(value: &Value) -> Option<String> {
         ("message", hash.trim().to_ascii_lowercase())
     } else if let Some(hash) = string_any(value, &["correlation_id_hash", "correlationIdHash"]) {
         ("correlation", hash.trim().to_ascii_lowercase())
-    } else if let Some(hash) = string_any(value, &["header_value_hash", "headerValueHash"]) {
-        ("header", hash.trim().to_ascii_lowercase())
     } else {
-        return None;
+        let hash = string_any(value, &["header_value_hash", "headerValueHash"])?;
+        ("header", hash.trim().to_ascii_lowercase())
     };
     Some(format!(
         "{campaign_hash}\0{batch_hash}\0{sender_domain}\0{manifest_sha256}\0{recipient_hash}\0{trace_kind}\0{trace_hash}"
