@@ -1,0 +1,40 @@
+name: Security permission negative controls
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unused-security-events:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - run: echo "no SARIF sink"
+
+  unrecognized-reusable-workflow:
+    permissions:
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-audit.yml@0123456789abcdef0123456789abcdef01234567
+
+  scorecard-without-publishing:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: ossf/scorecard-action@0123456789abcdef0123456789abcdef01234567
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          publish_results: false
+
+  broad-write:
+    runs-on: ubuntu-24.04
+    permissions: write-all
+    steps:
+      - run: echo "no write sink"

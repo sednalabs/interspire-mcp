@@ -1,0 +1,36 @@
+name: Safe security publishers fixture
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  osv-pr:
+    permissions:
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@0123456789abcdef0123456789abcdef01234567
+
+  osv-main:
+    permissions:
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@0123456789abcdef0123456789abcdef01234567
+
+  scorecard:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    steps:
+      - uses: ossf/scorecard-action@0123456789abcdef0123456789abcdef01234567
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          publish_results: true
+      - uses: github/codeql-action/upload-sarif@0123456789abcdef0123456789abcdef01234567
+        with:
+          sarif_file: scorecard-results.sarif
