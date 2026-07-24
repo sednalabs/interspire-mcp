@@ -18,8 +18,8 @@ use crate::{
     response::{
         CampaignManageRow, CampaignReadbackReport, Evidence, FormFieldUpdate,
         GuardedWriteApplyReport, GuardedWritePreviewReport, ListSummary, ListSummaryReport,
-        QueueControlAction, QueueControlCandidate, QueueControlSource, QueueStatsReadbackReport, RedactedField,
-        SensitiveFieldDenial, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
+        QueueControlAction, QueueControlCandidate, QueueControlSource, QueueStatsReadbackReport,
+        RedactedField, SensitiveFieldDenial, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
         SensitiveFieldTarget, SensitiveFieldValue, SettingsAuditReport,
         SettingsInventoryOmittedField, SettingsInventoryReport, SettingsInventoryRequest,
         SettingsInventorySection, SettingsSection, SettingsSectionName, UserSmtpReadbackReport,
@@ -683,14 +683,14 @@ impl AdminHtmlClient {
         let mut notes = Vec::new();
         if selected.candidate.action == QueueControlAction::Delete {
             if let Some(pause_url) = selected.pause_before_delete.clone() {
-                let response =
-                    self.queue_control_get_request(pause_url, QueueControlSource::Schedule)?
-                        .send()
-                        .map_err(|err| {
-                            InterspireError::Http(format!(
-                                "queue control pause preflight failed: {err}"
-                            ))
-                        })?;
+                let response = self
+                    .queue_control_get_request(pause_url, QueueControlSource::Schedule)?
+                    .send()
+                    .map_err(|err| {
+                        InterspireError::Http(format!(
+                            "queue control pause preflight failed: {err}"
+                        ))
+                    })?;
                 let pause_status = response.status();
                 if !pause_status.is_success() && !pause_status.is_redirection() {
                     return Err(InterspireError::Http(format!(
@@ -759,8 +759,7 @@ impl AdminHtmlClient {
             .any(|source| *source != selected.route.source)
         {
             return Err(InterspireError::Safety(
-                "queue control apply returned conflicting cross-source target evidence"
-                    .to_string(),
+                "queue control apply returned conflicting cross-source target evidence".to_string(),
             ));
         }
         let apply_proven = queue_control_apply_is_proven(
@@ -5479,13 +5478,9 @@ mod tests {
         assert!(links
             .iter()
             .any(|link| link.candidate.action == QueueControlAction::Delete));
-        let serialized = serde_json::to_string(
-            &links
-                .iter()
-                .map(|link| &link.candidate)
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        let serialized =
+            serde_json::to_string(&links.iter().map(|link| &link.candidate).collect::<Vec<_>>())
+                .unwrap_or_else(|err| panic!("{err}"));
         assert!(!serialized.contains("person@example.invalid"));
         assert!(!serialized.contains("index.php"));
     }

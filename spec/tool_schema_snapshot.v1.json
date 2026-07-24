@@ -1636,6 +1636,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "acknowledge_queue_mutation": {
+            "description": "Explicit acknowledgement that this call may mutate one queue job.",
             "type": "boolean"
           },
           "action": {

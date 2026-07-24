@@ -2068,11 +2068,9 @@ mod tests {
             "index.php?Page=Schedule&Action=Cancel&id=1"
         )
         .is_ok());
-        let (_, manage_pause) = ensure_allowed_queue_control(
-            base_url,
-            "index.php?Page=Send&Action=PauseSend&Job=88",
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        let (_, manage_pause) =
+            ensure_allowed_queue_control(base_url, "index.php?Page=Send&Action=PauseSend&Job=88")
+                .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(manage_pause.action, QueueControlAction::Pause);
         assert_eq!(manage_pause.source, QueueControlSource::CampaignManage);
         assert_eq!(manage_pause.identifier_value, 88);

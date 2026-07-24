@@ -529,12 +529,6 @@ fn parse_sent_total(row: &str) -> Option<(Option<u64>, Option<u64>)> {
     None
 }
 
-fn parse_named_count(row: &str, name: &str) -> Option<u64> {
-    let lower = row.to_ascii_lowercase().replace(',', "");
-    let offset = lower.find(name)?;
-    number_after(&lower[offset + name.len()..])
-}
-
 fn number_before(value: &str) -> Option<u64> {
     value
         .trim_end()
@@ -563,7 +557,7 @@ fn number_after(value: &str) -> Option<u64> {
 struct StatsRowCounts {
     recipients: u64,
     _unsubscribes: u64,
-    bounces: u64,
+    _bounces: u64,
 }
 
 fn parse_stats_row_counts(row: &str) -> Option<StatsRowCounts> {
@@ -583,7 +577,7 @@ fn parse_stats_row_counts(row: &str) -> Option<StatsRowCounts> {
     Some(StatsRowCounts {
         recipients,
         _unsubscribes: unsubscribes,
-        bounces,
+        _bounces: bounces,
     })
 }
 
@@ -1190,12 +1184,9 @@ mod tests {
               </tr>
             </table>
         "#;
-        let links = super::super::parse_queue_control_links(
-            "https://example.test/admin/",
-            manage_html,
-            25,
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        let links =
+            super::super::parse_queue_control_links("https://example.test/admin/", manage_html, 25)
+                .unwrap_or_else(|err| panic!("{err}"));
 
         let report = build_send_job_status_report(
             &request,
@@ -1234,16 +1225,15 @@ mod tests {
               <td><a href="index.php?Page=Send&Action=PauseSend&Job=88">Pause</a></td>
             </tr></table>
         "#;
-        let links = super::super::parse_queue_control_links(
-            "https://example.test/admin/",
-            manage_html,
-            25,
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        let links =
+            super::super::parse_queue_control_links("https://example.test/admin/", manage_html, 25)
+                .unwrap_or_else(|err| panic!("{err}"));
 
         let error = build_send_job_status_report(&request, Vec::new(), Vec::new(), links)
             .expect_err("campaign mismatch must fail closed");
-        assert!(error.to_string().contains("did not prove expected campaign"));
+        assert!(error
+            .to_string()
+            .contains("did not prove expected campaign"));
     }
 
     #[test]
