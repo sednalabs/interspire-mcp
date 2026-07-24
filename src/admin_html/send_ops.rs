@@ -1253,7 +1253,7 @@ mod tests {
         );
         assert_eq!(report.stats.state, "ambiguous");
         assert_eq!(report.queue_counters.source, "admin_html_campaign_manage");
-        assert_eq!(report.queue_counters.processed, None);
+        assert_eq!(report.queue_counters.processed, Some(0));
     }
 
     #[test]

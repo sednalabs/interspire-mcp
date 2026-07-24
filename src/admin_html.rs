@@ -2621,14 +2621,8 @@ fn queue_control_page_is_complete(html: &str, max_rows: usize) -> Result<bool, I
 }
 
 fn queue_control_page_has_pagination(document: &Html) -> Result<bool, InterspireError> {
-    let document_text = compact_text(
-        &document
-            .root_element()
-            .text()
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
-    .to_ascii_lowercase();
+    let document_text = compact_text(&document.root_element().text().collect::<Vec<_>>().join(" "))
+        .to_ascii_lowercase();
     if document_text.contains("results per page")
         || document_text.contains("records per page")
         || document_text.contains("page 1 of ")
