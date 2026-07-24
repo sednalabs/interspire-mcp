@@ -367,7 +367,8 @@ fn build_send_job_status_report(
         _ => None,
     };
     let identity_verified = !matching_links.is_empty();
-    let campaign_id = request.expected_campaign_id;
+    let proven_manage_campaign_id = manage_campaign_ids.iter().flatten().next().copied();
+    let campaign_id = request.expected_campaign_id.or(proven_manage_campaign_id);
     let mut warnings = Vec::new();
     if !identity_verified {
         warnings.push(format!(
@@ -541,7 +542,7 @@ fn send_job_status_not_configured(
 fn parse_sent_total(row: &str) -> Option<(Option<u64>, Option<u64>)> {
     let normalized = row.replace(',', "");
     let lower = normalized.to_ascii_lowercase();
-    if !lower.contains("sent") && !lower.contains('/') {
+    if !lower.contains("sent") && !lower.contains('/') && !lower.contains(" of ") {
         return None;
     }
     let bytes = normalized.as_bytes();
@@ -551,6 +552,13 @@ fn parse_sent_total(row: &str) -> Option<(Option<u64>, Option<u64>)> {
         }
         let left = number_before(&normalized[..index]);
         let right = number_after(&normalized[index + 1..]);
+        if left.is_some() || right.is_some() {
+            return Some((left, right));
+        }
+    }
+    for (index, _) in lower.match_indices(" of ") {
+        let left = number_before(&normalized[..index]);
+        let right = number_after(&normalized[index + " of ".len()..]);
         if left.is_some() || right.is_some() {
             return Some((left, right));
         }
@@ -1234,7 +1242,11 @@ mod tests {
 
         assert!(report.ok);
         assert!(report.identity_verified);
+        assert_eq!(report.campaign_id, Some(44));
         assert_eq!(report.schedule.matched_rows, 1);
+        assert_eq!(report.schedule.sent_count, Some(0));
+        assert_eq!(report.schedule.total_count, Some(70));
+        assert!(report.follow_up_contract.is_some());
         assert_eq!(
             report.schedule.action_plans[0].source,
             crate::response::QueueControlSource::CampaignManage

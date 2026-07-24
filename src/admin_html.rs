@@ -2240,6 +2240,16 @@ fn parse_queue_control_links(
                     route.source.as_str()
                 )));
             }
+            if route.source == QueueControlSource::Schedule {
+                if let Some((_, row_job_id)) = row_checkbox.as_ref() {
+                    if route.identifier_value != *row_job_id {
+                        return Err(InterspireError::Safety(
+                            "Schedule row exposed a queue-control route for a different job identity"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
             let route_key = canonical_queue_route_key(&url, &route, &execution);
             let pause_before_delete = if route.action == QueueControlAction::Delete
                 && route.source == QueueControlSource::Schedule
@@ -2611,6 +2621,20 @@ fn queue_control_page_is_complete(html: &str, max_rows: usize) -> Result<bool, I
 }
 
 fn queue_control_page_has_pagination(document: &Html) -> Result<bool, InterspireError> {
+    let document_text = compact_text(
+        &document
+            .root_element()
+            .text()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+    .to_ascii_lowercase();
+    if document_text.contains("results per page")
+        || document_text.contains("records per page")
+        || document_text.contains("page 1 of ")
+    {
+        return Ok(true);
+    }
     let selector = Selector::parse("a, form, input, select, button")
         .map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
     for element in document.select(&selector) {
@@ -6031,7 +6055,7 @@ mod tests {
                 <td><input type="checkbox" name="jobs[]" value="3"></td>
                 <td>Other job</td>
                 <td>
-                  <a href="index.php?Page=Schedule&Action=Pause&job=99&csrfToken=abc">Pause</a>
+                  <a href="index.php?Page=Schedule&Action=Pause&job=3&csrfToken=abc">Pause</a>
                   <a href="index.php?Page=Schedule&Action=Delete&job=3&csrfToken=abc">Delete</a>
                 </td>
               </tr>
@@ -6059,14 +6083,32 @@ mod tests {
         assert!(!candidate_json.contains("index.php"));
         assert!(!candidate_json.contains("csrfToken"));
 
-        let mismatched = links
+        let second = links
             .iter()
             .find(|link| {
                 link.candidate.action == QueueControlAction::Delete
                     && link.route.identifier_value == 3
             })
             .unwrap_or_else(|| panic!("second delete candidate should be present"));
-        assert!(mismatched.pause_before_delete.is_none());
+        assert!(second.pause_before_delete.is_some());
+    }
+
+    #[test]
+    fn schedule_queue_route_must_match_row_checkbox_job() {
+        let html = r#"
+            <table><tr>
+              <td><input type="checkbox" name="jobs[]" value="3"></td>
+              <td><a href="index.php?Page=Schedule&Action=Pause&job=99">Pause</a></td>
+            </tr></table>
+        "#;
+        let error = parse_queue_control_links(
+            "https://example.test/admin/",
+            html,
+            25,
+            QueueControlSource::Schedule,
+        )
+        .expect_err("cross-job Schedule route must fail closed");
+        assert!(error.to_string().contains("different job identity"));
     }
 
     #[test]
