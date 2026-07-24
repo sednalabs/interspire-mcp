@@ -2726,6 +2726,12 @@ fn ensure_queue_control_page_identity(
         .iter()
         .any(|marker| document_text.contains(marker)),
     };
+    let cron_disabled_schedule_state = source == QueueControlSource::Schedule
+        && document_text.contains("cron sending has not been enabled")
+        && document_text.contains("powered by interspire email marketer");
+    if cron_disabled_schedule_state {
+        return Ok(());
+    }
     if heading_matches && (structure_matches || explicit_empty_state) {
         return Ok(());
     }
@@ -6447,6 +6453,22 @@ mod tests {
         assert!(ensure_queue_control_page_identity(
             base_url,
             "<h1>View Scheduled Email Queue</h1><p>unexpected</p>",
+            QueueControlSource::Schedule
+        )
+        .is_err());
+        assert!(ensure_queue_control_page_identity(
+            base_url,
+            r#"
+              <h1>Cron sending has not been enabled. Please speak to your
+                administrator about setting this up.</h1>
+              <footer>Powered by Interspire Email Marketer 8.7.4</footer>
+            "#,
+            QueueControlSource::Schedule
+        )
+        .is_ok());
+        assert!(ensure_queue_control_page_identity(
+            base_url,
+            "<h1>Cron sending has not been enabled.</h1>",
             QueueControlSource::Schedule
         )
         .is_err());
