@@ -109,7 +109,8 @@ Preview:
 - finds cancel/delete/pause/resume links inside bounded table rows;
 - validates that each link is either a Schedule queue route or an exact
   `Send` `PauseSend`, `ResumeSend`, or `DeleteSend` immediate-job route with
-  one numeric job identifier;
+  one positive numeric job identifier, and rejects a link whose route source
+  does not match the authenticated page that exposed it;
 - returns a deterministic plan id, redacted row summary, action, source, and
   route fingerprint;
 - binds the plan id to stable route/action/job identity rather than volatile
@@ -132,8 +133,10 @@ Apply:
   `Pause` route when Interspire exposes one, then applies the selected delete
   plan;
 - re-reads Schedule and newsletter Manage after apply;
-- proves cancel/delete by confirming the target no longer exposes allowlisted
-  queue controls;
+- rejects redirects, login pages, and authentication loss at the mutation
+  response boundary;
+- proves cancel/delete only when the bounded post-apply inventories are
+  complete and the target no longer exposes allowlisted queue controls;
 - proves pause/resume by confirming the requested action is gone and the
   expected opposite action appears for the same job;
 - returns before/after counts, action-specific target actions, and evidence.

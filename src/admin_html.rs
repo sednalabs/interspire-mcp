@@ -93,6 +93,12 @@ struct QueueControlLink {
 }
 
 #[derive(Debug, Clone)]
+struct QueueControlInventory {
+    links: Vec<QueueControlLink>,
+    complete: bool,
+}
+
+#[derive(Debug, Clone)]
 enum QueueControlExecution {
     Get,
     DeletePost {
@@ -644,6 +650,7 @@ impl AdminHtmlClient {
 
         Ok(self
             .load_queue_control_links(max_rows)?
+            .links
             .into_iter()
             .map(|link| link.candidate)
             .collect())
@@ -661,8 +668,9 @@ impl AdminHtmlClient {
         self.login()?;
 
         let before = self.load_queue_control_links(max_rows)?;
-        let before_candidate_count = before.len();
+        let before_candidate_count = before.links.len();
         let selected = before
+            .links
             .iter()
             .find(|link| link.candidate.plan_id == plan_id && link.candidate.action == action)
             .cloned()
@@ -672,7 +680,7 @@ impl AdminHtmlClient {
                         .to_string(),
                 )
             })?;
-        let before_sources = queue_control_target_sources(&selected.route, &before);
+        let before_sources = queue_control_target_sources(&selected.route, &before.links);
         if before_sources.len() != 1 || !before_sources.contains(&selected.route.source) {
             return Err(InterspireError::Safety(
                 "queue control target was exposed on conflicting Schedule and campaign Manage sources; no apply attempted"
@@ -692,18 +700,14 @@ impl AdminHtmlClient {
                         ))
                     })?;
                 let pause_status = response.status();
-                if !pause_status.is_success() && !pause_status.is_redirection() {
-                    return Err(InterspireError::Http(format!(
-                        "queue control pause preflight returned HTTP {}",
-                        pause_status.as_u16()
-                    )));
-                }
-                if pause_status.is_success() {
-                    let body = response
-                        .text()
-                        .map_err(|err| InterspireError::Http(err.to_string()))?;
-                    ensure_authenticated_html(&body)?;
-                }
+                let body = response
+                    .text()
+                    .map_err(|err| InterspireError::Http(err.to_string()))?;
+                ensure_queue_control_mutation_response(
+                    pause_status,
+                    &body,
+                    "queue control pause preflight",
+                )?;
                 notes.push(format!(
                     "allowlisted Schedule pause preflight returned HTTP {} before delete",
                     pause_status.as_u16()
@@ -733,27 +737,19 @@ impl AdminHtmlClient {
             }
         };
         let status = response.status();
-        if !status.is_success() && !status.is_redirection() {
-            return Err(InterspireError::Http(format!(
-                "queue control apply returned HTTP {}",
-                status.as_u16()
-            )));
-        }
-
-        if status.is_success() {
-            let body = response
-                .text()
-                .map_err(|err| InterspireError::Http(err.to_string()))?;
-            ensure_authenticated_html(&body)?;
-        }
+        let body = response
+            .text()
+            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        ensure_queue_control_mutation_response(status, &body, "queue control apply")?;
 
         let after = self.load_queue_control_links(max_rows)?;
         let before_row_summary = Some(selected.candidate.row_summary.clone());
         let after_matching_action_still_available = after
+            .links
             .iter()
             .any(|candidate| same_queue_control_action(&selected.route, &candidate.route));
-        let after_target_actions = queue_control_target_actions(&selected.route, &after);
-        let after_sources = queue_control_target_sources(&selected.route, &after);
+        let after_target_actions = queue_control_target_actions(&selected.route, &after.links);
+        let after_sources = queue_control_target_sources(&selected.route, &after.links);
         if after_sources
             .iter()
             .any(|source| *source != selected.route.source)
@@ -766,6 +762,7 @@ impl AdminHtmlClient {
             selected.candidate.action,
             after_matching_action_still_available,
             &after_target_actions,
+            after.complete,
         );
         if !apply_proven {
             let actions = after_target_actions
@@ -798,7 +795,7 @@ impl AdminHtmlClient {
         Ok(QueueControlApplyEvidence {
             before_candidate_count,
             before_row_summary,
-            after_candidate_count: after.len(),
+            after_candidate_count: after.links.len(),
             after_row_still_present: !after_target_actions.is_empty(),
             after_matching_action_still_available,
             after_target_actions,
@@ -1227,20 +1224,26 @@ impl AdminHtmlClient {
     fn load_queue_control_links(
         &self,
         max_rows: usize,
-    ) -> Result<Vec<QueueControlLink>, InterspireError> {
+    ) -> Result<QueueControlInventory, InterspireError> {
         let schedule_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
         let manage_html = self.get_allowed(&AdminReadPage::NewslettersManage.path())?;
         let mut links = parse_queue_control_links(
             self.config.base_url.as_deref().unwrap_or_default(),
             &schedule_html,
             max_rows,
+            QueueControlSource::Schedule,
         )?;
         links.extend(parse_queue_control_links(
             self.config.base_url.as_deref().unwrap_or_default(),
             &manage_html,
             max_rows,
+            QueueControlSource::CampaignManage,
         )?);
-        Ok(links)
+        Ok(QueueControlInventory {
+            links,
+            complete: queue_control_page_is_complete(&schedule_html, max_rows)?
+                && queue_control_page_is_complete(&manage_html, max_rows)?,
+        })
     }
 
     pub(super) fn with_access_headers(&self, request: RequestBuilder) -> RequestBuilder {
@@ -2131,6 +2134,7 @@ fn parse_queue_control_links(
     base_url: &str,
     html: &str,
     max_rows: usize,
+    expected_source: QueueControlSource,
 ) -> Result<Vec<QueueControlLink>, InterspireError> {
     let document = Html::parse_document(html);
     let row_selector =
@@ -2156,8 +2160,6 @@ fn parse_queue_control_links(
         let row_summary = redact::redact_sensitive_text(&row_text);
         let row_checkbox = extract_row_checkbox(&row)?;
         let manage_campaign_id = extract_manage_campaign_id(base_url, &row, &link_selector)?;
-        let pause_before_delete =
-            parse_row_pause_control(base_url, &row, &link_selector, row_checkbox.as_ref())?;
         for link in row.select(&link_selector) {
             let action_label = compact_text(&link.text().collect::<Vec<_>>().join(" "));
             if !looks_like_queue_control_label(&action_label) {
@@ -2166,7 +2168,7 @@ fn parse_queue_control_links(
             let Some(href) = link.value().attr("href") else {
                 continue;
             };
-            let Some((url, route, execution, route_key)) = parse_queue_control_link_target(
+            let Some((url, route, execution, _raw_route_key)) = parse_queue_control_link_target(
                 base_url,
                 href,
                 row_checkbox.as_ref(),
@@ -2174,6 +2176,26 @@ fn parse_queue_control_links(
             )?
             else {
                 continue;
+            };
+            if route.source != expected_source {
+                return Err(InterspireError::Safety(format!(
+                    "{} page exposed a queue-control route belonging to {}; source identity is ambiguous",
+                    expected_source.as_str(),
+                    route.source.as_str()
+                )));
+            }
+            let route_key = stable_queue_route_key(&route, &execution);
+            let pause_before_delete = if route.action == QueueControlAction::Delete
+                && route.source == QueueControlSource::Schedule
+            {
+                parse_row_pause_control(
+                    base_url,
+                    &row,
+                    &link_selector,
+                    route.identifier_value,
+                )?
+            } else {
+                None
             };
             let plan_id = guarded_write::stable_plan_id(&[
                 route.action.as_str(),
@@ -2224,7 +2246,20 @@ fn extract_manage_campaign_id(
         let Some(href) = link.value().attr("href") else {
             continue;
         };
-        let Ok(url) = safety::ensure_allowed_admin_get(base_url, href) else {
+        let Ok(base) = Url::parse(base_url) else {
+            continue;
+        };
+        let Ok(mut candidate) = base.join(href) else {
+            continue;
+        };
+        let retained_pairs = candidate
+            .query_pairs()
+            .filter(|(key, _)| !is_csrf_field_name(key))
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect::<Vec<_>>();
+        candidate.set_query(None);
+        candidate.query_pairs_mut().extend_pairs(retained_pairs);
+        let Ok(url) = safety::ensure_allowed_admin_get(base_url, candidate.as_str()) else {
             continue;
         };
         let pairs = url.query_pairs().collect::<Vec<_>>();
@@ -2259,7 +2294,7 @@ fn parse_row_pause_control(
     base_url: &str,
     row: &ElementRef<'_>,
     link_selector: &Selector,
-    row_checkbox: Option<&(String, u64)>,
+    expected_job_id: u64,
 ) -> Result<Option<Url>, InterspireError> {
     for link in row.select(link_selector) {
         let action_label = compact_text(&link.text().collect::<Vec<_>>().join(" "));
@@ -2273,10 +2308,8 @@ fn parse_row_pause_control(
         else {
             continue;
         };
-        if let Some((_, row_job)) = row_checkbox {
-            if pause_job != *row_job {
-                continue;
-            }
+        if pause_job != expected_job_id {
+            continue;
         }
         return Ok(Some(url));
     }
@@ -2434,6 +2467,51 @@ fn route_key(url: &Url) -> String {
     }
 }
 
+fn stable_queue_route_key(route: &QueueControlRoute, execution: &QueueControlExecution) -> String {
+    let method = match execution {
+        QueueControlExecution::Get => "get",
+        QueueControlExecution::DeletePost { .. } => "post",
+    };
+    format!(
+        "source={}&action={}&job={}&method={method}",
+        route.source.as_str(),
+        route.action.as_str(),
+        route.identifier_value
+    )
+}
+
+fn ensure_queue_control_mutation_response(
+    status: reqwest::StatusCode,
+    body: &str,
+    operation: &str,
+) -> Result<(), InterspireError> {
+    if !status.is_success() {
+        return Err(InterspireError::Http(format!(
+            "{operation} returned HTTP {}",
+            status.as_u16()
+        )));
+    }
+    ensure_authenticated_html(body)
+}
+
+fn queue_control_page_is_complete(
+    html: &str,
+    max_rows: usize,
+) -> Result<bool, InterspireError> {
+    let document = Html::parse_document(html);
+    let row_selector =
+        Selector::parse("tr").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let count = document
+        .select(&row_selector)
+        .filter(|row| !row_contains_nested_rows(row, &row_selector))
+        .filter(|row| {
+            let row_text = compact_text(&row.text().collect::<Vec<_>>().join(" "));
+            row_text.len() >= 3 && !row_text.eq_ignore_ascii_case("actions")
+        })
+        .count();
+    Ok(count <= max_rows)
+}
+
 fn route_fingerprint(route_key: &str) -> String {
     let digest = Sha256::digest(route_key.as_bytes());
     format!("route:{}", &hex::encode(digest)[..12])
@@ -2474,10 +2552,7 @@ fn admin_origin(base_url: &str) -> Result<String, InterspireError> {
 fn same_queue_control_action(left: &QueueControlRoute, right: &QueueControlRoute) -> bool {
     left.action == right.action
         && left.source == right.source
-        && left
-            .identifier_key
-            .eq_ignore_ascii_case(&right.identifier_key)
-        && left.identifier_value == right.identifier_value
+        && same_queue_control_target(left, right)
 }
 
 fn same_queue_control_target(left: &QueueControlRoute, right: &QueueControlRoute) -> bool {
@@ -2528,12 +2603,15 @@ fn queue_control_apply_is_proven(
     action: QueueControlAction,
     after_matching_action_still_available: bool,
     after_target_actions: &[QueueControlAction],
+    complete_readback: bool,
 ) -> bool {
     if after_matching_action_still_available {
         return false;
     }
     match action {
-        QueueControlAction::Cancel | QueueControlAction::Delete => after_target_actions.is_empty(),
+        QueueControlAction::Cancel | QueueControlAction::Delete => {
+            complete_readback && after_target_actions.is_empty()
+        }
         QueueControlAction::Pause => after_target_actions.contains(&QueueControlAction::Resume),
         QueueControlAction::Resume => after_target_actions.contains(&QueueControlAction::Pause),
     }
@@ -5386,7 +5464,12 @@ mod tests {
             </table>
         "#;
 
-        let links = parse_queue_control_links("https://example.test/admin/", html, 25)
+        let links = parse_queue_control_links(
+            "https://example.test/admin/",
+            html,
+            25,
+            QueueControlSource::Schedule,
+        )
             .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(links.len(), 1);
@@ -5420,7 +5503,12 @@ mod tests {
             </table>
         "#;
 
-        let links = parse_queue_control_links("https://example.test/admin/", html, 25)
+        let links = parse_queue_control_links(
+            "https://example.test/admin/",
+            html,
+            25,
+            QueueControlSource::Schedule,
+        )
             .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(links.len(), 2);
@@ -5463,7 +5551,12 @@ mod tests {
             </table>
         "#;
 
-        let links = parse_queue_control_links("https://example.test/admin/", html, 25)
+        let links = parse_queue_control_links(
+            "https://example.test/admin/",
+            html,
+            25,
+            QueueControlSource::CampaignManage,
+        )
             .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(links.len(), 2);
@@ -5486,6 +5579,46 @@ mod tests {
     }
 
     #[test]
+    fn queue_control_links_bind_routes_to_the_page_source() {
+        let schedule_with_manage_route = r#"
+            <table><tr>
+              <td>Unexpected immediate job</td>
+              <td><a href="index.php?Page=Send&Action=PauseSend&Job=88">Pause</a></td>
+            </tr></table>
+        "#;
+        let error = parse_queue_control_links(
+            "https://example.test/admin/",
+            schedule_with_manage_route,
+            25,
+            QueueControlSource::Schedule,
+        )
+        .expect_err("cross-source route must fail closed");
+        assert!(error.to_string().contains("source identity is ambiguous"));
+    }
+
+    #[test]
+    fn manage_campaign_identity_accepts_csrf_bearing_edit_links() {
+        let html = r#"
+            <table><tr>
+              <td>Campaign Alpha</td>
+              <td>
+                <a href="index.php?Page=Newsletters&Action=Edit&id=44&csrfToken=rotating">Edit</a>
+                <a href="index.php?Page=Send&Action=PauseSend&Job=88">Pause</a>
+              </td>
+            </tr></table>
+        "#;
+        let links = parse_queue_control_links(
+            "https://example.test/admin/",
+            html,
+            25,
+            QueueControlSource::CampaignManage,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].candidate.campaign_id, Some(44));
+    }
+
+    #[test]
     fn queue_control_plan_id_ignores_active_progress_text() {
         let first_html = r#"
             <table>
@@ -5496,8 +5629,8 @@ mod tests {
                 <td><input type="checkbox" name="jobs[]" value="17"></td>
                 <td>Newsletter Job In Progress (Sent to 84 / 500)</td>
                 <td>
-                  <a href="index.php?Page=Schedule&Action=Pause&job=17&csrfToken=abc">Pause</a>
-                  <a href="index.php?Page=Schedule&Action=Delete&job=17&csrfToken=abc">Delete</a>
+                  <a href="index.php?csrfToken=rotated&job=17&Action=Pause&Page=Schedule">Pause</a>
+                  <a href="index.php?Page=Schedule&csrfToken=rotated&job=17&Action=Delete">Delete</a>
                 </td>
               </tr>
             </table>
@@ -5518,9 +5651,19 @@ mod tests {
             </table>
         "#;
 
-        let first = parse_queue_control_links("https://example.test/admin/", first_html, 25)
+        let first = parse_queue_control_links(
+            "https://example.test/admin/",
+            first_html,
+            25,
+            QueueControlSource::Schedule,
+        )
             .unwrap_or_else(|err| panic!("{err}"));
-        let second = parse_queue_control_links("https://example.test/admin/", second_html, 25)
+        let second = parse_queue_control_links(
+            "https://example.test/admin/",
+            second_html,
+            25,
+            QueueControlSource::Schedule,
+        )
             .unwrap_or_else(|err| panic!("{err}"));
 
         let first_pause = first
@@ -5568,7 +5711,12 @@ mod tests {
             </table>
         "#;
 
-        let links = parse_queue_control_links("https://example.test/admin/", html, 25)
+        let links = parse_queue_control_links(
+            "https://example.test/admin/",
+            html,
+            25,
+            QueueControlSource::Schedule,
+        )
             .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(links.len(), 2);
@@ -5608,7 +5756,12 @@ mod tests {
             </form>
         "#;
 
-        let links = parse_queue_control_links("https://example.test/admin/", html, 25)
+        let links = parse_queue_control_links(
+            "https://example.test/admin/",
+            html,
+            25,
+            QueueControlSource::Schedule,
+        )
             .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(links.len(), 2);
@@ -5669,7 +5822,12 @@ mod tests {
             </table>
         "#;
 
-        let links = parse_queue_control_links("https://example.test/admin/", html, 25)
+        let links = parse_queue_control_links(
+            "https://example.test/admin/",
+            html,
+            25,
+            QueueControlSource::Schedule,
+        )
             .unwrap_or_else(|err| panic!("{err}"));
 
         let delete = links
@@ -5700,33 +5858,90 @@ mod tests {
         assert!(queue_control_apply_is_proven(
             QueueControlAction::Cancel,
             false,
-            &[]
+            &[],
+            true
         ));
         assert!(!queue_control_apply_is_proven(
             QueueControlAction::Delete,
             false,
-            &[QueueControlAction::Resume]
+            &[QueueControlAction::Resume],
+            true
         ));
         assert!(queue_control_apply_is_proven(
             QueueControlAction::Pause,
             false,
-            &[QueueControlAction::Resume, QueueControlAction::Delete]
+            &[QueueControlAction::Resume, QueueControlAction::Delete],
+            true
         ));
         assert!(queue_control_apply_is_proven(
             QueueControlAction::Resume,
             false,
-            &[QueueControlAction::Pause, QueueControlAction::Delete]
+            &[QueueControlAction::Pause, QueueControlAction::Delete],
+            true
         ));
         assert!(!queue_control_apply_is_proven(
             QueueControlAction::Pause,
             false,
-            &[QueueControlAction::Delete]
+            &[QueueControlAction::Delete],
+            true
         ));
         assert!(!queue_control_apply_is_proven(
             QueueControlAction::Resume,
             true,
-            &[QueueControlAction::Pause]
+            &[QueueControlAction::Pause],
+            true
         ));
+        assert!(!queue_control_apply_is_proven(
+            QueueControlAction::Delete,
+            false,
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn queue_control_requested_action_matching_is_alias_independent() {
+        let selected = QueueControlRoute {
+            action: QueueControlAction::Pause,
+            source: QueueControlSource::Schedule,
+            identifier_key: "job".to_string(),
+            identifier_value: 88,
+        };
+        let refreshed = QueueControlRoute {
+            action: QueueControlAction::Pause,
+            source: QueueControlSource::Schedule,
+            identifier_key: "id".to_string(),
+            identifier_value: 88,
+        };
+        assert!(same_queue_control_action(&selected, &refreshed));
+    }
+
+    #[test]
+    fn queue_control_mutation_response_rejects_redirects_and_login_pages() {
+        assert!(ensure_queue_control_mutation_response(
+            reqwest::StatusCode::FOUND,
+            "",
+            "queue control apply"
+        )
+        .is_err());
+        assert!(ensure_queue_control_mutation_response(
+            reqwest::StatusCode::OK,
+            r#"<form><input name="ss_username"><input name="ss_password"></form>"#,
+            "queue control apply"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn queue_control_page_completeness_detects_row_cap() {
+        let html = r#"
+            <table>
+              <tr><td>First row</td></tr>
+              <tr><td>Second row</td></tr>
+            </table>
+        "#;
+        assert!(!queue_control_page_is_complete(html, 1).unwrap_or(false));
+        assert!(queue_control_page_is_complete(html, 2).unwrap_or(false));
     }
 
     #[test]

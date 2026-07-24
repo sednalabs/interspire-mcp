@@ -29,7 +29,7 @@ impl AdminHtmlClient {
         let stats_html = self.get_allowed(&AdminReadPage::Stats.path())?;
         let schedule_rows = parse_table_rows(&schedule_html, max_rows)?;
         let stats_rows = parse_table_rows(&stats_html, max_rows)?;
-        let links = self.load_queue_control_links(max_rows)?;
+        let links = self.load_queue_control_links(max_rows)?.links;
         build_send_job_status_report(request, schedule_rows, stats_rows, links)
     }
 
@@ -297,11 +297,26 @@ fn build_send_job_status_report(
         .iter()
         .find_map(|row| parse_sent_total(row))
         .unwrap_or((None, None));
+    let matching_sources = matching_links
+        .iter()
+        .map(|link| link.candidate.source)
+        .collect::<BTreeSet<_>>();
+    if matching_sources.len() > 1 {
+        return Err(InterspireError::Safety(format!(
+            "send job {} exposed queue controls on conflicting Schedule and campaign Manage sources",
+            request.expected_job_id
+        )));
+    }
+    let queue_source = matching_sources
+        .iter()
+        .next()
+        .map(|source| format!("admin_html_{}", source.as_str()))
+        .unwrap_or_else(|| "admin_html_unproven".to_string());
     if let (Some(expected), Some(actual)) = (request.expected_queue_total, schedule_total) {
         if expected != actual {
             return Err(InterspireError::Safety(format!(
-                "send job {} expected queue total {expected} but Schedule shows {actual}",
-                request.expected_job_id
+                "send job {} expected queue total {expected} but {} shows {actual}",
+                request.expected_job_id, queue_source
             )));
         }
     }
@@ -315,16 +330,6 @@ fn build_send_job_status_report(
     let stats_row_has_incidental_job_id = stats_matches
         .iter()
         .any(|row| row_mentions_id(row, request.expected_job_id));
-    let matching_sources = matching_links
-        .iter()
-        .map(|link| link.candidate.source)
-        .collect::<BTreeSet<_>>();
-    if matching_sources.len() > 1 {
-        return Err(InterspireError::Safety(format!(
-            "send job {} exposed queue controls on conflicting Schedule and campaign Manage sources",
-            request.expected_job_id
-        )));
-    }
     // Stats rows do not carry the current queue job identity. Keep their
     // redacted rows/count-shape as ambiguity context, but never project their
     // counters onto the current job or stop-gate calculation.
@@ -443,7 +448,7 @@ fn build_send_job_status_report(
             },
         },
         queue_counters: SendJobQueueCounters {
-            source: "admin_html_schedule".to_string(),
+            source: queue_source,
             total,
             processed,
             unprocessed,
@@ -1142,6 +1147,7 @@ mod tests {
             "https://example.test/admin/",
             schedule_html,
             25,
+            crate::response::QueueControlSource::Schedule,
         )
         .unwrap_or_else(|err| panic!("{err}"));
         let report = build_send_job_status_report(
@@ -1184,9 +1190,13 @@ mod tests {
               </tr>
             </table>
         "#;
-        let links =
-            super::super::parse_queue_control_links("https://example.test/admin/", manage_html, 25)
-                .unwrap_or_else(|err| panic!("{err}"));
+        let links = super::super::parse_queue_control_links(
+            "https://example.test/admin/",
+            manage_html,
+            25,
+            crate::response::QueueControlSource::CampaignManage,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
 
         let report = build_send_job_status_report(
             &request,
@@ -1206,6 +1216,10 @@ mod tests {
             crate::response::QueueControlSource::CampaignManage
         );
         assert_eq!(report.stats.state, "ambiguous");
+        assert_eq!(
+            report.queue_counters.source,
+            "admin_html_campaign_manage"
+        );
         assert_eq!(report.queue_counters.processed, None);
     }
 
@@ -1225,9 +1239,13 @@ mod tests {
               <td><a href="index.php?Page=Send&Action=PauseSend&Job=88">Pause</a></td>
             </tr></table>
         "#;
-        let links =
-            super::super::parse_queue_control_links("https://example.test/admin/", manage_html, 25)
-                .unwrap_or_else(|err| panic!("{err}"));
+        let links = super::super::parse_queue_control_links(
+            "https://example.test/admin/",
+            manage_html,
+            25,
+            crate::response::QueueControlSource::CampaignManage,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
 
         let error = build_send_job_status_report(&request, Vec::new(), Vec::new(), links)
             .expect_err("campaign mismatch must fail closed");

@@ -919,7 +919,7 @@ pub fn classify_allowed_queue_control(url: &Url) -> Result<QueueControlRoute, In
         ))
     })?;
 
-    let (identifier_key, identifier_value) = single_numeric_identifier(&pairs)?;
+    let (identifier_key, identifier_value) = single_numeric_identifier(&pairs, source)?;
 
     Ok(QueueControlRoute {
         action,
@@ -1346,8 +1346,9 @@ fn classify_queue_control_action(raw: &str) -> Option<QueueControlAction> {
 
 fn single_numeric_identifier(
     pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+    source: QueueControlSource,
 ) -> Result<(String, u64), InterspireError> {
-    let keys = [
+    const ALL_IDENTIFIER_KEYS: &[&str] = &[
         "id",
         "job",
         "jobid",
@@ -1356,25 +1357,43 @@ fn single_numeric_identifier(
         "newsletterid",
         "campaignid",
     ];
-    let matches = keys
+    let present = pairs
         .iter()
-        .filter_map(|wanted| {
-            pairs
+        .filter(|(key, _)| {
+            ALL_IDENTIFIER_KEYS
                 .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case(wanted))
-                .and_then(|(key, value)| value.parse::<u64>().ok().map(|id| (key.to_string(), id)))
+                .any(|wanted| key.eq_ignore_ascii_case(wanted))
         })
         .collect::<Vec<_>>();
-
-    match matches.as_slice() {
-        [] => Err(InterspireError::Safety(
-            "queue control route must include exactly one numeric queue identifier".to_string(),
-        )),
-        [single] => Ok(single.clone()),
-        _ => Err(InterspireError::Safety(
-            "queue control route includes multiple queue identifiers".to_string(),
-        )),
+    if present.len() != 1 {
+        return Err(InterspireError::Safety(
+            "queue control route must include exactly one queue identifier alias".to_string(),
+        ));
     }
+    let (key, value) = present[0];
+    let key_allowed = match source {
+        QueueControlSource::Schedule => ["id", "job", "jobid", "queueid"]
+            .iter()
+            .any(|wanted| key.eq_ignore_ascii_case(wanted)),
+        QueueControlSource::CampaignManage => key.eq_ignore_ascii_case("job"),
+    };
+    if !key_allowed {
+        return Err(InterspireError::Safety(
+            "queue control route uses an identifier alias that is not valid for its source"
+                .to_string(),
+        ));
+    }
+    let identifier_value = value.parse::<u64>().map_err(|_| {
+        InterspireError::Safety(
+            "queue control route identifier must be a positive numeric job id".to_string(),
+        )
+    })?;
+    if identifier_value == 0 {
+        return Err(InterspireError::Safety(
+            "queue control route identifier must be a positive numeric job id".to_string(),
+        ));
+    }
+    Ok((key.to_string(), identifier_value))
 }
 
 fn required_numeric_query_value(
@@ -2104,6 +2123,10 @@ mod tests {
             "index.php?Page=Send&Action=PauseSend&Job=88&Next=Send",
             "index.php?Page=Send&Action=ResumeSend&Job=88&Next=Send",
             "index.php?Page=Send&Action=DeleteSend&Job=88&Job=89",
+            "index.php?Page=Send&Action=PauseSend&Job=88&id=abc",
+            "index.php?Page=Send&Action=PauseSend&id=88",
+            "index.php?Page=Send&Action=PauseSend&campaignid=88",
+            "index.php?Page=Send&Action=PauseSend&Job=0",
         ] {
             assert!(
                 classify_allowed_queue_control(&url(path)).is_err(),
