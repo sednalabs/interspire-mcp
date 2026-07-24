@@ -271,9 +271,7 @@ fn build_send_job_status_report(
     }
     let manage_campaign_ids = matching_links
         .iter()
-        .filter(|link| {
-            link.candidate.source == crate::response::QueueControlSource::CampaignManage
-        })
+        .filter(|link| link.candidate.source == crate::response::QueueControlSource::CampaignManage)
         .map(|link| link.candidate.campaign_id)
         .collect::<BTreeSet<_>>();
     if !manage_campaign_ids.is_empty()

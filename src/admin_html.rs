@@ -716,24 +716,17 @@ impl AdminHtmlClient {
                 )?;
                 let paused_actions = queue_control_target_actions(&selected.route, &paused.links);
                 let paused_sources = queue_control_target_sources(&selected.route, &paused.links);
-                if paused_sources.len() != 1
-                    || !paused_sources.contains(&selected.route.source)
-                {
+                if paused_sources.len() != 1 || !paused_sources.contains(&selected.route.source) {
                     return Err(InterspireError::Safety(
                         "queue control pause preflight returned conflicting source evidence; delete was not attempted"
                             .to_string(),
                     ));
                 }
-                let pause_still_available = paused
-                    .links
-                    .iter()
-                    .any(|candidate| {
-                        candidate.candidate.action == QueueControlAction::Pause
-                            && same_queue_control_target(&selected.route, &candidate.route)
-                    });
-                if pause_still_available
-                    || !paused_actions.contains(&QueueControlAction::Resume)
-                {
+                let pause_still_available = paused.links.iter().any(|candidate| {
+                    candidate.candidate.action == QueueControlAction::Pause
+                        && same_queue_control_target(&selected.route, &candidate.route)
+                });
+                if pause_still_available || !paused_actions.contains(&QueueControlAction::Resume) {
                     return Err(InterspireError::Safety(
                         "queue control pause preflight did not prove the same job transitioned to Resume; delete was not attempted"
                             .to_string(),
