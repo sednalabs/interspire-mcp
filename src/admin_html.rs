@@ -2188,12 +2188,7 @@ fn parse_queue_control_links(
             let pause_before_delete = if route.action == QueueControlAction::Delete
                 && route.source == QueueControlSource::Schedule
             {
-                parse_row_pause_control(
-                    base_url,
-                    &row,
-                    &link_selector,
-                    route.identifier_value,
-                )?
+                parse_row_pause_control(base_url, &row, &link_selector, route.identifier_value)?
             } else {
                 None
             };
@@ -2494,10 +2489,7 @@ fn ensure_queue_control_mutation_response(
     ensure_authenticated_html(body)
 }
 
-fn queue_control_page_is_complete(
-    html: &str,
-    max_rows: usize,
-) -> Result<bool, InterspireError> {
+fn queue_control_page_is_complete(html: &str, max_rows: usize) -> Result<bool, InterspireError> {
     let document = Html::parse_document(html);
     let row_selector =
         Selector::parse("tr").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
@@ -5470,7 +5462,7 @@ mod tests {
             25,
             QueueControlSource::Schedule,
         )
-            .unwrap_or_else(|err| panic!("{err}"));
+        .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].candidate.action, QueueControlAction::Cancel);
@@ -5509,7 +5501,7 @@ mod tests {
             25,
             QueueControlSource::Schedule,
         )
-            .unwrap_or_else(|err| panic!("{err}"));
+        .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(links.len(), 2);
         let pause = links
@@ -5557,7 +5549,7 @@ mod tests {
             25,
             QueueControlSource::CampaignManage,
         )
-            .unwrap_or_else(|err| panic!("{err}"));
+        .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(links.len(), 2);
         assert!(links.iter().all(|link| {
@@ -5657,14 +5649,14 @@ mod tests {
             25,
             QueueControlSource::Schedule,
         )
-            .unwrap_or_else(|err| panic!("{err}"));
+        .unwrap_or_else(|err| panic!("{err}"));
         let second = parse_queue_control_links(
             "https://example.test/admin/",
             second_html,
             25,
             QueueControlSource::Schedule,
         )
-            .unwrap_or_else(|err| panic!("{err}"));
+        .unwrap_or_else(|err| panic!("{err}"));
 
         let first_pause = first
             .iter()
@@ -5717,7 +5709,7 @@ mod tests {
             25,
             QueueControlSource::Schedule,
         )
-            .unwrap_or_else(|err| panic!("{err}"));
+        .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(links.len(), 2);
         assert!(links
@@ -5762,7 +5754,7 @@ mod tests {
             25,
             QueueControlSource::Schedule,
         )
-            .unwrap_or_else(|err| panic!("{err}"));
+        .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(links.len(), 2);
         let resume = links
@@ -5828,7 +5820,7 @@ mod tests {
             25,
             QueueControlSource::Schedule,
         )
-            .unwrap_or_else(|err| panic!("{err}"));
+        .unwrap_or_else(|err| panic!("{err}"));
 
         let delete = links
             .iter()
