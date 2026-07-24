@@ -1293,8 +1293,17 @@ impl AdminHtmlClient {
         } else {
             self.get_allowed_once(&manage_path)?
         };
-        ensure_queue_control_page_identity(&schedule_html, QueueControlSource::Schedule)?;
-        ensure_queue_control_page_identity(&manage_html, QueueControlSource::CampaignManage)?;
+        let base_url = self.config.base_url.as_deref().unwrap_or_default();
+        ensure_queue_control_page_identity(
+            base_url,
+            &schedule_html,
+            QueueControlSource::Schedule,
+        )?;
+        ensure_queue_control_page_identity(
+            base_url,
+            &manage_html,
+            QueueControlSource::CampaignManage,
+        )?;
         let mut links = parse_queue_control_links(
             self.config.base_url.as_deref().unwrap_or_default(),
             &schedule_html,
@@ -2647,6 +2656,7 @@ fn ensure_queue_control_redirect_location(
 }
 
 fn ensure_queue_control_page_identity(
+    base_url: &str,
     html: &str,
     source: QueueControlSource,
 ) -> Result<(), InterspireError> {
@@ -2666,7 +2676,63 @@ fn ensure_queue_control_page_identity(
             }
         }
     });
-    if heading_matches {
+    let table_selector =
+        Selector::parse("table").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let link_selector = Selector::parse("a[href], form[action]")
+        .map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let input_selector =
+        Selector::parse("input[name]").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let structure_matches = document.select(&table_selector).any(|table| match source {
+        QueueControlSource::Schedule => {
+            table.select(&input_selector).any(|input| {
+                input
+                    .value()
+                    .attr("name")
+                    .is_some_and(|name| name.eq_ignore_ascii_case("jobs[]"))
+            }) || table.select(&link_selector).any(|element| {
+                let target = element
+                    .value()
+                    .attr("href")
+                    .or_else(|| element.value().attr("action"));
+                target.is_some_and(|target| {
+                    safety::ensure_allowed_queue_control(base_url, target)
+                        .is_ok_and(|(_, route)| route.source == QueueControlSource::Schedule)
+                })
+            })
+        }
+        QueueControlSource::CampaignManage => {
+            table.select(&link_selector).any(|element| {
+                let target = element
+                    .value()
+                    .attr("href")
+                    .or_else(|| element.value().attr("action"));
+                target.is_some_and(|target| {
+                    safety::ensure_allowed_admin_get(base_url, target)
+                        .and_then(|url| safety::classify_allowed_admin_get(&url))
+                        .is_ok_and(|page| matches!(page, AdminReadPage::NewsletterEdit { .. }))
+                })
+            })
+        }
+    });
+    let document_text = compact_text(&document.root_element().text().collect::<Vec<_>>().join(" "))
+        .to_ascii_lowercase();
+    let explicit_empty_state = match source {
+        QueueControlSource::Schedule => [
+            "there are no emails currently scheduled",
+            "there are no scheduled emails",
+            "no emails have been scheduled",
+        ]
+        .iter()
+        .any(|marker| document_text.contains(marker)),
+        QueueControlSource::CampaignManage => [
+            "there are no email campaigns",
+            "you do not have any email campaigns",
+            "no email campaigns have been created",
+        ]
+        .iter()
+        .any(|marker| document_text.contains(marker)),
+    };
+    if heading_matches && (structure_matches || explicit_empty_state) {
         return Ok(());
     }
 
@@ -6335,32 +6401,69 @@ mod tests {
     #[test]
     fn queue_control_page_identity_rejects_generic_success_html() {
         let generic = "<html><body>unexpected request</body></html>";
-        assert!(ensure_queue_control_page_identity(generic, QueueControlSource::Schedule).is_err());
+        let base_url = "https://example.test/admin/";
         assert!(
-            ensure_queue_control_page_identity(generic, QueueControlSource::CampaignManage)
-                .is_err()
+            ensure_queue_control_page_identity(
+                base_url,
+                generic,
+                QueueControlSource::Schedule
+            )
+            .is_err()
         );
+        assert!(ensure_queue_control_page_identity(
+            base_url,
+            generic,
+            QueueControlSource::CampaignManage
+        )
+        .is_err());
 
         assert!(ensure_queue_control_page_identity(
-            "<h1>View Scheduled Email Queue</h1>",
+            base_url,
+            r#"
+              <h1>View Scheduled Email Queue</h1>
+              <table><tr>
+                <td><input name="jobs[]" value="88"></td>
+                <td><a href="index.php?Page=Schedule&Action=Pause&job=88">Pause</a></td>
+              </tr></table>
+            "#,
             QueueControlSource::Schedule
         )
         .is_ok());
         assert!(ensure_queue_control_page_identity(
-            "<h2>View Email Campaigns</h2>",
+            base_url,
+            r#"
+              <h2>View Email Campaigns</h2>
+              <table><tr><td>
+                <a href="index.php?Page=Newsletters&Action=Edit&id=44">Campaign</a>
+              </td></tr></table>
+            "#,
             QueueControlSource::CampaignManage
         )
         .is_ok());
         assert!(ensure_queue_control_page_identity(
+            base_url,
             r#"<a href="index.php?Page=Schedule">Schedule</a>"#,
             QueueControlSource::Schedule
         )
         .is_err());
         assert!(ensure_queue_control_page_identity(
+            base_url,
             r#"<a href="index.php?Page=Newsletters&Action=Edit&id=44">Campaign</a>"#,
             QueueControlSource::CampaignManage
         )
         .is_err());
+        assert!(ensure_queue_control_page_identity(
+            base_url,
+            "<h1>View Scheduled Email Queue</h1><p>unexpected</p>",
+            QueueControlSource::Schedule
+        )
+        .is_err());
+        assert!(ensure_queue_control_page_identity(
+            base_url,
+            "<h2>View Email Campaigns</h2><p>There are no email campaigns.</p>",
+            QueueControlSource::CampaignManage
+        )
+        .is_ok());
     }
 
     #[test]
