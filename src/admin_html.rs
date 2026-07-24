@@ -1293,6 +1293,8 @@ impl AdminHtmlClient {
         } else {
             self.get_allowed_once(&manage_path)?
         };
+        ensure_queue_control_page_identity(&schedule_html, QueueControlSource::Schedule)?;
+        ensure_queue_control_page_identity(&manage_html, QueueControlSource::CampaignManage)?;
         let mut links = parse_queue_control_links(
             self.config.base_url.as_deref().unwrap_or_default(),
             &schedule_html,
@@ -2642,6 +2644,61 @@ fn ensure_queue_control_redirect_location(
             "{operation} redirect did not target Schedule or newsletter Manage"
         ))),
     }
+}
+
+fn ensure_queue_control_page_identity(
+    html: &str,
+    source: QueueControlSource,
+) -> Result<(), InterspireError> {
+    ensure_authenticated_html(html)?;
+    let document = Html::parse_document(html);
+    let document_text = compact_text(&document.root_element().text().collect::<Vec<_>>().join(" "))
+        .to_ascii_lowercase();
+    let heading_matches = match source {
+        QueueControlSource::Schedule => document_text.contains("scheduled email queue"),
+        QueueControlSource::CampaignManage => {
+            document_text.contains("email campaigns")
+                || document_text.contains("manage newsletters")
+                || document_text.contains("manage email campaigns")
+        }
+    };
+    if heading_matches {
+        return Ok(());
+    }
+
+    let selector = Selector::parse("a[href], form[action]")
+        .map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let route_matches = document.select(&selector).any(|element| {
+        let target = element
+            .value()
+            .attr("href")
+            .or_else(|| element.value().attr("action"));
+        let Some(target) = target else {
+            return false;
+        };
+        let Ok(url) = Url::parse("https://example.invalid/admin/").and_then(|base| base.join(target))
+        else {
+            return false;
+        };
+        match source {
+            QueueControlSource::Schedule => {
+                safety::classify_allowed_admin_get(&url).ok() == Some(AdminReadPage::Schedule)
+            }
+            QueueControlSource::CampaignManage => matches!(
+                safety::classify_allowed_admin_get(&url),
+                Ok(AdminReadPage::NewslettersManage)
+                    | Ok(AdminReadPage::NewsletterEdit { .. })
+            ),
+        }
+    });
+    if route_matches {
+        return Ok(());
+    }
+
+    Err(InterspireError::Safety(format!(
+        "{} readback did not prove the expected Interspire page identity",
+        source.as_str()
+    )))
 }
 
 fn queue_control_page_is_complete(html: &str, max_rows: usize) -> Result<bool, InterspireError> {
@@ -6298,6 +6355,27 @@ mod tests {
             <div>Page size: 10</div>
         "#;
         assert!(!queue_control_page_is_complete(plain_text_page_size, 100).unwrap_or(false));
+    }
+
+    #[test]
+    fn queue_control_page_identity_rejects_generic_success_html() {
+        let generic = "<html><body>unexpected request</body></html>";
+        assert!(ensure_queue_control_page_identity(generic, QueueControlSource::Schedule).is_err());
+        assert!(
+            ensure_queue_control_page_identity(generic, QueueControlSource::CampaignManage)
+                .is_err()
+        );
+
+        assert!(ensure_queue_control_page_identity(
+            "<h1>View Scheduled Email Queue</h1>",
+            QueueControlSource::Schedule
+        )
+        .is_ok());
+        assert!(ensure_queue_control_page_identity(
+            r#"<a href="index.php?Page=Newsletters&Action=Edit&id=44">Campaign</a>"#,
+            QueueControlSource::CampaignManage
+        )
+        .is_ok());
     }
 
     #[test]

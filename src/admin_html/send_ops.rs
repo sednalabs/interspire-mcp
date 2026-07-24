@@ -543,13 +543,28 @@ fn parse_sent_total(row: &str) -> Option<(Option<u64>, Option<u64>)> {
     let normalized = row.replace(',', "");
     let lower = normalized.to_ascii_lowercase();
     let marker = "in progress";
-    let progress_start = lower.rfind(marker)? + marker.len();
-    let progress_tail = normalized[progress_start..].trim_start();
-    if !progress_tail.starts_with('(') {
-        return None;
-    }
-    let progress_end = progress_tail.find(')')?;
-    let progress = &progress_tail[..=progress_end];
+    let progress = if let Some(progress_start) = lower.rfind(marker) {
+        let progress_tail = normalized[progress_start + marker.len()..].trim_start();
+        if !progress_tail.starts_with('(') {
+            return None;
+        }
+        let progress_end = progress_tail.find(')')?;
+        &progress_tail[..=progress_end]
+    } else {
+        let sent_marker = "sent to";
+        let sent_start = lower.rfind(sent_marker)?;
+        let status_prefix = lower[..sent_start].trim_end();
+        let bounded_status = status_prefix.is_empty()
+            || status_prefix
+                .rsplit(|ch: char| !ch.is_ascii_alphanumeric())
+                .filter(|token| !token.is_empty())
+                .next()
+                .is_some_and(|token| matches!(token, "sending" | "progress"));
+        if !bounded_status {
+            return None;
+        }
+        &normalized[sent_start..]
+    };
     let lower_progress = progress.to_ascii_lowercase();
     let bytes = progress.as_bytes();
     for index in 0..bytes.len() {
@@ -807,6 +822,18 @@ mod tests {
         );
         assert_eq!(parse_sent_total("Campaign 2024 of 2025 Complete"), None);
         assert_eq!(parse_sent_total("In Progress Campaign 2024 of 2025"), None);
+    }
+
+    #[test]
+    fn parses_bounded_standalone_sent_to_progress() {
+        assert_eq!(
+            parse_sent_total("Sending — Sent to 63 / 100"),
+            Some((Some(63), Some(100)))
+        );
+        assert_eq!(
+            parse_sent_total("Campaign Sent to Market 63 / 100"),
+            None
+        );
     }
 
     #[test]
