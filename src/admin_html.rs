@@ -718,7 +718,7 @@ impl AdminHtmlClient {
                         "queue control pause preflight",
                     )?;
                 }
-                let paused = self.complete_queue_control_inventory(
+                let paused = self.complete_queue_control_inventory_once(
                     max_rows,
                     "queue control pause preflight readback",
                 )?;
@@ -783,7 +783,7 @@ impl AdminHtmlClient {
         }
 
         let after =
-            self.complete_queue_control_inventory(max_rows, "queue control apply readback")?;
+            self.complete_queue_control_inventory_once(max_rows, "queue control apply readback")?;
         let before_row_summary = Some(selected.candidate.row_summary.clone());
         let after_matching_action_still_available = after
             .links
@@ -1266,8 +1266,33 @@ impl AdminHtmlClient {
         &self,
         max_rows: usize,
     ) -> Result<QueueControlInventory, InterspireError> {
-        let schedule_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
-        let manage_html = self.get_allowed(&AdminReadPage::NewslettersManage.path())?;
+        self.load_queue_control_links_with_reauth(max_rows, true)
+    }
+
+    fn load_queue_control_links_once(
+        &self,
+        max_rows: usize,
+    ) -> Result<QueueControlInventory, InterspireError> {
+        self.load_queue_control_links_with_reauth(max_rows, false)
+    }
+
+    fn load_queue_control_links_with_reauth(
+        &self,
+        max_rows: usize,
+        allow_reauth: bool,
+    ) -> Result<QueueControlInventory, InterspireError> {
+        let schedule_path = AdminReadPage::Schedule.path();
+        let manage_path = AdminReadPage::NewslettersManage.path();
+        let schedule_html = if allow_reauth {
+            self.get_allowed(&schedule_path)?
+        } else {
+            self.get_allowed_once(&schedule_path)?
+        };
+        let manage_html = if allow_reauth {
+            self.get_allowed(&manage_path)?
+        } else {
+            self.get_allowed_once(&manage_path)?
+        };
         let mut links = parse_queue_control_links(
             self.config.base_url.as_deref().unwrap_or_default(),
             &schedule_html,
@@ -1294,6 +1319,20 @@ impl AdminHtmlClient {
         operation: &str,
     ) -> Result<QueueControlInventory, InterspireError> {
         let inventory = self.load_queue_control_links(max_rows)?;
+        if !inventory.complete {
+            return Err(InterspireError::Safety(format!(
+                "{operation} reached the configured row cap on Schedule or campaign Manage; increase max_rows and preview again"
+            )));
+        }
+        Ok(inventory)
+    }
+
+    fn complete_queue_control_inventory_once(
+        &self,
+        max_rows: usize,
+        operation: &str,
+    ) -> Result<QueueControlInventory, InterspireError> {
+        let inventory = self.load_queue_control_links_once(max_rows)?;
         if !inventory.complete {
             return Err(InterspireError::Safety(format!(
                 "{operation} reached the configured row cap on Schedule or campaign Manage; increase max_rows and preview again"
@@ -2625,6 +2664,7 @@ fn queue_control_page_has_pagination(document: &Html) -> Result<bool, Interspire
         .to_ascii_lowercase();
     if document_text.contains("results per page")
         || document_text.contains("records per page")
+        || document_text.contains("page size")
         || has_numeric_page_indicator(&document_text)
     {
         return Ok(true);
@@ -2638,6 +2678,10 @@ fn queue_control_page_has_pagination(document: &Html) -> Result<bool, Interspire
             .collect::<Vec<_>>()
             .join(" ")
             .to_ascii_lowercase();
+        let compact_attributes = attributes
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .collect::<String>();
         let text = compact_text(&element.text().collect::<Vec<_>>().join(" ")).to_ascii_lowercase();
         let pagination_query = element
             .value()
@@ -2667,9 +2711,11 @@ fn queue_control_page_has_pagination(document: &Html) -> Result<bool, Interspire
                 "prevpage",
                 "perpage",
                 "pagesize",
+                "resultsperpage",
+                "recordsperpage",
             ]
             .iter()
-            .any(|needle| attributes.contains(needle))
+            .any(|needle| compact_attributes.contains(needle))
             || matches!(text.as_str(), "next" | "next >" | "previous" | "< previous")
             || text.contains("results per page")
             || text.contains("records per page")
@@ -6242,6 +6288,16 @@ mod tests {
             <div>Page 2 of 5</div>
         "#;
         assert!(!queue_control_page_is_complete(plain_text_page_two, 100).unwrap_or(false));
+        let result_limit_control = r#"
+            <table><tr><td>Only visible row</td></tr></table>
+            <select name="results_per_page"><option>10</option></select>
+        "#;
+        assert!(!queue_control_page_is_complete(result_limit_control, 100).unwrap_or(false));
+        let plain_text_page_size = r#"
+            <table><tr><td>Only visible row</td></tr></table>
+            <div>Page size: 10</div>
+        "#;
+        assert!(!queue_control_page_is_complete(plain_text_page_size, 100).unwrap_or(false));
     }
 
     #[test]

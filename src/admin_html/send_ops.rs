@@ -542,11 +542,15 @@ fn send_job_status_not_configured(
 fn parse_sent_total(row: &str) -> Option<(Option<u64>, Option<u64>)> {
     let normalized = row.replace(',', "");
     let lower = normalized.to_ascii_lowercase();
-    let progress_start = lower
-        .rfind("in progress")
-        .or_else(|| lower.rfind("sent to"))?;
-    let progress = &normalized[progress_start..];
-    let lower_progress = &lower[progress_start..];
+    let marker = "in progress";
+    let progress_start = lower.rfind(marker)? + marker.len();
+    let progress_tail = normalized[progress_start..].trim_start();
+    if !progress_tail.starts_with('(') {
+        return None;
+    }
+    let progress_end = progress_tail.find(')')?;
+    let progress = &progress_tail[..=progress_end];
+    let lower_progress = progress.to_ascii_lowercase();
     let bytes = progress.as_bytes();
     for index in 0..bytes.len() {
         if bytes[index] != b'/' {
@@ -802,6 +806,10 @@ mod tests {
             Some((Some(0), Some(70)))
         );
         assert_eq!(parse_sent_total("Campaign 2024 of 2025 Complete"), None);
+        assert_eq!(
+            parse_sent_total("In Progress Campaign 2024 of 2025"),
+            None
+        );
     }
 
     #[test]
