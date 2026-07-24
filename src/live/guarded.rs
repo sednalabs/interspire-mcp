@@ -54,7 +54,10 @@ impl LiveInterspireBackend {
             ],
             evidence: Evidence {
                 source: "interspire_admin_html".to_string(),
-                notes: vec!["allowlisted Schedule GET read for queue-control preview".to_string()],
+                notes: vec![
+                    "allowlisted Schedule and newsletter Manage GET reads for queue-control preview"
+                        .to_string(),
+                ],
             },
         })
     }
@@ -64,6 +67,11 @@ impl LiveInterspireBackend {
         request: &QueueControlApplyRequest,
     ) -> Result<QueueControlApplyReport, InterspireError> {
         guarded_write::require_queue_controls_enabled(&self.config.guarded_writes)?;
+        if !request.acknowledge_queue_mutation {
+            return Err(InterspireError::Safety(
+                "queue control apply requires acknowledge_queue_mutation=true".to_string(),
+            ));
+        }
         let html = self.html_client()?;
         if !html.configured() {
             return Ok(QueueControlApplyReport {

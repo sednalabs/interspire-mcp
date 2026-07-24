@@ -423,21 +423,21 @@ impl InterspireMcpServer {
                     .with_group("guarded-write")
                     .with_read_only(true)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Preview cancel/delete/pause/resume plan ids for Interspire scheduled queue rows.",
+                        "Preview source-bound cancel/delete/pause/resume plans from Schedule and newsletter Manage queue rows.",
                         ["interspire", "queue", "preview", "guarded-write"],
                     )),
                 ToolCapability::new("interspire_queue_control_apply")
                     .with_group("guarded-write")
                     .with_read_only(false)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Apply a previously previewed Interspire scheduled queue cancel/delete/pause/resume plan.",
+                        "Apply one acknowledged, previously previewed Interspire queue plan and prove its transition.",
                         ["interspire", "queue", "apply", "guarded-write"],
                     )),
                 ToolCapability::new("interspire_send_job_status_readback")
                     .with_group("read")
                     .with_read_only(true)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Read structured Schedule/Stats status for one expected Interspire send job without exporting recipients.",
+                        "Read structured Schedule/Manage/Stats context for one expected Interspire send job without exporting recipients.",
                         ["interspire", "send", "job", "status", "readback"],
                     )),
                 ToolCapability::new("interspire_cron_readiness")
@@ -1072,7 +1072,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Preview cancel/delete/pause/resume plan ids for Interspire scheduled queue rows. Preview is read-only."
+        description = "Preview source-bound cancel/delete/pause/resume plan ids from Interspire Schedule and newsletter Manage queue rows. Preview is read-only."
     )]
     fn interspire_queue_control_preview(
         &self,
@@ -1082,7 +1082,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Apply a previously previewed Interspire scheduled queue cancel/delete/pause/resume plan. Requires guarded write environment flags."
+        description = "Apply one acknowledged, previously previewed Interspire queue cancel/delete/pause/resume plan and prove its transition. Requires guarded write environment flags."
     )]
     fn interspire_queue_control_apply(
         &self,
@@ -1092,7 +1092,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Read structured Schedule/Stats status for one expected Interspire send job without sending, triggering cron, exporting recipients, or mutating queue state."
+        description = "Read structured Schedule/Manage/Stats context for one expected Interspire send job without sending, triggering cron, exporting recipients, or mutating queue state. Historical Stats counts never establish current job identity."
     )]
     fn interspire_send_job_status_readback(
         &self,

@@ -1620,7 +1620,7 @@
       "name": "interspire_production_send_apply"
     },
     {
-      "description": "Apply a previously previewed Interspire scheduled queue cancel/delete/pause/resume plan. Requires guarded write environment flags.",
+      "description": "Apply one acknowledged, previously previewed Interspire queue cancel/delete/pause/resume plan and prove its transition. Requires guarded write environment flags.",
       "inputSchema": {
         "$defs": {
           "QueueControlAction": {
@@ -1635,6 +1635,9 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "acknowledge_queue_mutation": {
+            "type": "boolean"
+          },
           "action": {
             "$ref": "#/$defs/QueueControlAction"
           },
@@ -1644,14 +1647,15 @@
         },
         "required": [
           "plan_id",
-          "action"
+          "action",
+          "acknowledge_queue_mutation"
         ],
         "type": "object"
       },
       "name": "interspire_queue_control_apply"
     },
     {
-      "description": "Preview cancel/delete/pause/resume plan ids for Interspire scheduled queue rows. Preview is read-only.",
+      "description": "Preview source-bound cancel/delete/pause/resume plan ids from Interspire Schedule and newsletter Manage queue rows. Preview is read-only.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1913,7 +1917,7 @@
         "readOnlyHint": true,
         "title": "Send job status readback"
       },
-      "description": "Read structured Schedule/Stats status for one expected Interspire send job without sending, triggering cron, exporting recipients, or mutating queue state.",
+      "description": "Read structured Schedule/Manage/Stats context for one expected Interspire send job without sending, triggering cron, exporting recipients, or mutating queue state. Historical Stats counts never establish current job identity.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {

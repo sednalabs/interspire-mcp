@@ -111,9 +111,9 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_admin_session_probe` | Read | Probe authenticated admin reachability through allowlisted read pages. |
 | `interspire_user_smtp_readback` | Read | Read redacted per-user SMTP override state. |
 | `interspire_queue_stats_readback` | Read | Read scheduled queue and stats rows without triggering cron. |
-| `interspire_queue_control_preview` | Read preview | Build plan IDs for cancel/delete/pause/resume actions found on the schedule page. |
-| `interspire_queue_control_apply` | Guarded apply | Apply one previously previewed queue cancel/delete/pause/resume plan when write gates are enabled. |
-| `interspire_send_job_status_readback` | Read | Read structured Schedule/Stats status for one expected send job, including redacted row summaries, progress counters when present, queue-control action plans, unique expected-total completed Stats-row proof, and explicit unproven table-counter gaps. |
+| `interspire_queue_control_preview` | Read preview | Build source-bound plan IDs for cancel/delete/pause/resume actions found on Schedule or exact immediate-job actions on newsletter Manage. |
+| `interspire_queue_control_apply` | Guarded apply | Apply one acknowledged, previously previewed queue plan when write gates are enabled, then prove the transition from fresh Schedule and Manage reads. |
+| `interspire_send_job_status_readback` | Read | Read structured Schedule/Manage/Stats context for one expected send job. Current identity requires an exact queue-control route; historical Stats counts never establish job identity. |
 | `interspire_cron_readiness` | Read | Compare Interspire cron settings with Schedule-page cron detection without triggering `cron.php`. |
 | `interspire_send_stop_gate_readiness` | No-mutation proof | Combine send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation; any pause still requires separate queue-control apply. |
 | `interspire_campaign_readback` | Read | Read campaign manage rows with structured campaign ids/action flags, or one campaign edit-page summary. |

@@ -800,6 +800,7 @@ fn queue_control_apply_contract_does_not_mutate_lists_or_authorize_send() {
         .queue_control_apply(&QueueControlApplyRequest {
             plan_id: "iqc_000000000000000000000000".to_string(),
             action: interspire_mcp::QueueControlAction::Cancel,
+            acknowledge_queue_mutation: true,
         })
         .unwrap_or_else(|err| panic!("{err}"));
 

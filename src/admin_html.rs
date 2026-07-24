@@ -18,7 +18,7 @@ use crate::{
     response::{
         CampaignManageRow, CampaignReadbackReport, Evidence, FormFieldUpdate,
         GuardedWriteApplyReport, GuardedWritePreviewReport, ListSummary, ListSummaryReport,
-        QueueControlAction, QueueControlCandidate, QueueStatsReadbackReport, RedactedField,
+        QueueControlAction, QueueControlCandidate, QueueControlSource, QueueStatsReadbackReport, RedactedField,
         SensitiveFieldDenial, SensitiveFieldQueryReport, SensitiveFieldQueryRequest,
         SensitiveFieldTarget, SensitiveFieldValue, SettingsAuditReport,
         SettingsInventoryOmittedField, SettingsInventoryReport, SettingsInventoryRequest,
@@ -668,16 +668,23 @@ impl AdminHtmlClient {
             .cloned()
             .ok_or_else(|| {
                 InterspireError::Safety(
-                    "queue control plan id was not found on the current Schedule page; preview again before applying"
+                    "queue control plan id was not found on the current Schedule or campaign Manage pages; preview again before applying"
                         .to_string(),
                 )
             })?;
+        let before_sources = queue_control_target_sources(&selected.route, &before);
+        if before_sources.len() != 1 || !before_sources.contains(&selected.route.source) {
+            return Err(InterspireError::Safety(
+                "queue control target was exposed on conflicting Schedule and campaign Manage sources; no apply attempted"
+                    .to_string(),
+            ));
+        }
 
         let mut notes = Vec::new();
         if selected.candidate.action == QueueControlAction::Delete {
             if let Some(pause_url) = selected.pause_before_delete.clone() {
                 let response =
-                    self.queue_control_get_request(pause_url)?
+                    self.queue_control_get_request(pause_url, QueueControlSource::Schedule)?
                         .send()
                         .map_err(|err| {
                             InterspireError::Http(format!(
@@ -706,7 +713,7 @@ impl AdminHtmlClient {
 
         let response = match &selected.execution {
             QueueControlExecution::Get => self
-                .queue_control_get_request(selected.url.clone())?
+                .queue_control_get_request(selected.url.clone(), selected.route.source)?
                 .send()
                 .map_err(|err| InterspireError::Http(err.to_string()))?,
             QueueControlExecution::DeletePost {
@@ -746,6 +753,16 @@ impl AdminHtmlClient {
             .iter()
             .any(|candidate| same_queue_control_action(&selected.route, &candidate.route));
         let after_target_actions = queue_control_target_actions(&selected.route, &after);
+        let after_sources = queue_control_target_sources(&selected.route, &after);
+        if after_sources
+            .iter()
+            .any(|source| *source != selected.route.source)
+        {
+            return Err(InterspireError::Safety(
+                "queue control apply returned conflicting cross-source target evidence"
+                    .to_string(),
+            ));
+        }
         let apply_proven = queue_control_apply_is_proven(
             selected.candidate.action,
             after_matching_action_still_available,
@@ -759,7 +776,7 @@ impl AdminHtmlClient {
                 .join(",");
             return Err(InterspireError::Safety(
                 format!(
-                    "queue control route returned but Schedule readback did not prove the requested {} action; after target actions: [{}]",
+                    "queue control route returned but fresh Schedule/Manage readback did not prove the requested {} action; after target actions: [{}]",
                     selected.candidate.action.as_str(),
                     actions
                 ),
@@ -768,11 +785,12 @@ impl AdminHtmlClient {
 
         notes.extend([
             format!(
-                "allowlisted Schedule queue {} route applied via guarded plan id",
+                "allowlisted {} queue {} route applied via guarded plan id",
+                selected.route.source.as_str(),
                 action.as_str()
             ),
             format!(
-                "admin returned HTTP {}; Schedule page re-read after apply",
+                "admin returned HTTP {}; Schedule and campaign Manage pages re-read after apply",
                 status.as_u16()
             ),
             queue_control_apply_proof_note(selected.candidate.action, &after_target_actions),
@@ -789,14 +807,22 @@ impl AdminHtmlClient {
         })
     }
 
-    fn queue_control_get_request(&self, url: Url) -> Result<RequestBuilder, InterspireError> {
+    fn queue_control_get_request(
+        &self,
+        url: Url,
+        source: QueueControlSource,
+    ) -> Result<RequestBuilder, InterspireError> {
+        let referer = match source {
+            QueueControlSource::Schedule => AdminReadPage::Schedule.path(),
+            QueueControlSource::CampaignManage => AdminReadPage::NewslettersManage.path(),
+        };
         Ok(self
             .with_access_headers(self.http.get(url))
             .header(
                 "referer",
                 safety::ensure_allowed_admin_get(
                     self.config.base_url.as_deref().unwrap_or_default(),
-                    &AdminReadPage::Schedule.path(),
+                    &referer,
                 )?
                 .as_str(),
             )
@@ -1204,11 +1230,18 @@ impl AdminHtmlClient {
         max_rows: usize,
     ) -> Result<Vec<QueueControlLink>, InterspireError> {
         let schedule_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
-        parse_queue_control_links(
+        let manage_html = self.get_allowed(&AdminReadPage::NewslettersManage.path())?;
+        let mut links = parse_queue_control_links(
             self.config.base_url.as_deref().unwrap_or_default(),
             &schedule_html,
             max_rows,
-        )
+        )?;
+        links.extend(parse_queue_control_links(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &manage_html,
+            max_rows,
+        )?);
+        Ok(links)
     }
 
     pub(super) fn with_access_headers(&self, request: RequestBuilder) -> RequestBuilder {
@@ -2123,6 +2156,7 @@ fn parse_queue_control_links(
         }
         let row_summary = redact::redact_sensitive_text(&row_text);
         let row_checkbox = extract_row_checkbox(&row)?;
+        let manage_campaign_id = extract_manage_campaign_id(base_url, &row, &link_selector)?;
         let pause_before_delete =
             parse_row_pause_control(base_url, &row, &link_selector, row_checkbox.as_ref())?;
         for link in row.select(&link_selector) {
@@ -2144,8 +2178,13 @@ fn parse_queue_control_links(
             };
             let plan_id = guarded_write::stable_plan_id(&[
                 route.action.as_str(),
+                route.source.as_str(),
                 &route.identifier_key,
                 &route.identifier_value.to_string(),
+                &manage_campaign_id
+                    .filter(|_| route.source == QueueControlSource::CampaignManage)
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
                 &route_key,
             ]);
             let route_action = route.action;
@@ -2153,6 +2192,9 @@ fn parse_queue_control_links(
                 candidate: QueueControlCandidate {
                     plan_id,
                     action: route_action,
+                    source: route.source,
+                    campaign_id: manage_campaign_id
+                        .filter(|_| route.source == QueueControlSource::CampaignManage),
                     action_label: redact::redact_sensitive_text(&action_label),
                     row_summary: row_summary.clone(),
                     route_fingerprint: route_fingerprint(&route_key),
@@ -2171,6 +2213,47 @@ fn parse_queue_control_links(
     }
 
     Ok(links)
+}
+
+fn extract_manage_campaign_id(
+    base_url: &str,
+    row: &ElementRef<'_>,
+    link_selector: &Selector,
+) -> Result<Option<u64>, InterspireError> {
+    let mut ids = Vec::new();
+    for link in row.select(link_selector) {
+        let Some(href) = link.value().attr("href") else {
+            continue;
+        };
+        let Ok(url) = safety::ensure_allowed_admin_get(base_url, href) else {
+            continue;
+        };
+        let pairs = url.query_pairs().collect::<Vec<_>>();
+        let is_newsletter_edit = pairs.iter().any(|(key, value)| {
+            key.eq_ignore_ascii_case("Page") && value.eq_ignore_ascii_case("Newsletters")
+        }) && pairs.iter().any(|(key, value)| {
+            key.eq_ignore_ascii_case("Action") && value.eq_ignore_ascii_case("Edit")
+        });
+        if !is_newsletter_edit {
+            continue;
+        }
+        if let Some(id) = pairs
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("id"))
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+        {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    match ids.as_slice() {
+        [] => Ok(None),
+        [id] => Ok(Some(*id)),
+        _ => Err(InterspireError::Safety(
+            "campaign Manage row exposed multiple campaign edit identities".to_string(),
+        )),
+    }
 }
 
 fn parse_row_pause_control(
@@ -2231,6 +2314,7 @@ fn parse_queue_control_link_target(
 
     let route = QueueControlRoute {
         action: QueueControlAction::Delete,
+        source: QueueControlSource::Schedule,
         identifier_key: checkbox_name.clone(),
         identifier_value: confirm_delete_job,
     };
@@ -2390,6 +2474,7 @@ fn admin_origin(base_url: &str) -> Result<String, InterspireError> {
 
 fn same_queue_control_action(left: &QueueControlRoute, right: &QueueControlRoute) -> bool {
     left.action == right.action
+        && left.source == right.source
         && left
             .identifier_key
             .eq_ignore_ascii_case(&right.identifier_key)
@@ -2425,6 +2510,21 @@ fn queue_control_target_actions(
     actions
 }
 
+fn queue_control_target_sources(
+    selected: &QueueControlRoute,
+    candidates: &[QueueControlLink],
+) -> Vec<QueueControlSource> {
+    let mut sources = Vec::new();
+    for candidate in candidates {
+        if same_queue_control_target(selected, &candidate.route)
+            && !sources.contains(&candidate.route.source)
+        {
+            sources.push(candidate.route.source);
+        }
+    }
+    sources
+}
+
 fn queue_control_apply_is_proven(
     action: QueueControlAction,
     after_matching_action_still_available: bool,
@@ -2446,7 +2546,7 @@ fn queue_control_apply_proof_note(
 ) -> String {
     match action {
         QueueControlAction::Cancel | QueueControlAction::Delete => {
-            "Schedule readback no longer shows any allowlisted controls for the same queue target"
+            "Schedule/Manage readback no longer shows any allowlisted controls for the same queue target"
                 .to_string()
         }
         QueueControlAction::Pause | QueueControlAction::Resume => {
@@ -2456,7 +2556,7 @@ fn queue_control_apply_proof_note(
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                "Schedule readback no longer shows the requested {} action and now shows target actions [{}]",
+                "Schedule/Manage readback no longer shows the requested {} action and now shows target actions [{}]",
                 action.as_str(),
                 actions
             )
@@ -5343,6 +5443,51 @@ mod tests {
             assert!(!candidate_json.contains("csrfToken"));
             assert!(!candidate_json.contains("person@example.com"));
         }
+    }
+
+    #[test]
+    fn queue_control_links_include_manage_only_immediate_jobs() {
+        let html = r#"
+            <table>
+              <tr>
+                <th>Campaign</th><th>Status</th><th>Actions</th>
+              </tr>
+              <tr>
+                <td>Campaign Alpha for person@example.invalid</td>
+                <td>In Progress (0 of 70)</td>
+                <td>
+                  <a href="index.php?Page=Newsletters&amp;Action=Edit&amp;id=44">Edit</a>
+                  <a href="index.php?Page=Send&amp;Action=PauseSend&amp;Job=88">Pause</a>
+                  <a href="index.php?Page=Send&amp;Action=DeleteSend&amp;Job=88">Delete</a>
+                </td>
+              </tr>
+            </table>
+        "#;
+
+        let links = parse_queue_control_links("https://example.test/admin/", html, 25)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(links.len(), 2);
+        assert!(links.iter().all(|link| {
+            link.candidate.source == QueueControlSource::CampaignManage
+                && link.route.identifier_value == 88
+                && link.candidate.campaign_id == Some(44)
+        }));
+        assert!(links
+            .iter()
+            .any(|link| link.candidate.action == QueueControlAction::Pause));
+        assert!(links
+            .iter()
+            .any(|link| link.candidate.action == QueueControlAction::Delete));
+        let serialized = serde_json::to_string(
+            &links
+                .iter()
+                .map(|link| &link.candidate)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(!serialized.contains("person@example.invalid"));
+        assert!(!serialized.contains("index.php"));
     }
 
     #[test]

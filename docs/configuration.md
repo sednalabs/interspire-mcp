@@ -77,7 +77,8 @@ INTERSPIRE_OCI_SEND_LEDGER_PATH=/secure/private/oci-send-ledger.jsonl
 Current public behavior:
 
 - `INTERSPIRE_QUEUE_WRITE_CONTROLS=1` enables guarded queue
-  cancel/delete/pause/resume apply.
+  cancel/delete/pause/resume apply. Each apply also requires
+  `acknowledge_queue_mutation=true`.
 - `interspire_send_job_status_readback` and `interspire_cron_readiness` are
   read-only admin-HTML tools. They require only the admin HTML configuration
   above and do not need write-control flags.
