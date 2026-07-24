@@ -2652,46 +2652,21 @@ fn ensure_queue_control_page_identity(
 ) -> Result<(), InterspireError> {
     ensure_authenticated_html(html)?;
     let document = Html::parse_document(html);
-    let document_text = compact_text(&document.root_element().text().collect::<Vec<_>>().join(" "))
-        .to_ascii_lowercase();
-    let heading_matches = match source {
-        QueueControlSource::Schedule => document_text.contains("scheduled email queue"),
-        QueueControlSource::CampaignManage => {
-            document_text.contains("email campaigns")
-                || document_text.contains("manage newsletters")
-                || document_text.contains("manage email campaigns")
-        }
-    };
-    if heading_matches {
-        return Ok(());
-    }
-
-    let selector = Selector::parse("a[href], form[action]")
+    let selector = Selector::parse("title, h1, h2, h3, legend")
         .map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
-    let route_matches = document.select(&selector).any(|element| {
-        let target = element
-            .value()
-            .attr("href")
-            .or_else(|| element.value().attr("action"));
-        let Some(target) = target else {
-            return false;
-        };
-        let Ok(url) =
-            Url::parse("https://example.invalid/admin/").and_then(|base| base.join(target))
-        else {
-            return false;
-        };
+    let heading_matches = document.select(&selector).any(|element| {
+        let heading =
+            compact_text(&element.text().collect::<Vec<_>>().join(" ")).to_ascii_lowercase();
         match source {
-            QueueControlSource::Schedule => {
-                safety::classify_allowed_admin_get(&url).ok() == Some(AdminReadPage::Schedule)
+            QueueControlSource::Schedule => heading.contains("scheduled email queue"),
+            QueueControlSource::CampaignManage => {
+                heading.contains("email campaigns")
+                    || heading.contains("manage newsletters")
+                    || heading.contains("manage email campaigns")
             }
-            QueueControlSource::CampaignManage => matches!(
-                safety::classify_allowed_admin_get(&url),
-                Ok(AdminReadPage::NewslettersManage) | Ok(AdminReadPage::NewsletterEdit { .. })
-            ),
         }
     });
-    if route_matches {
+    if heading_matches {
         return Ok(());
     }
 
@@ -6372,10 +6347,20 @@ mod tests {
         )
         .is_ok());
         assert!(ensure_queue_control_page_identity(
-            r#"<a href="index.php?Page=Newsletters&Action=Edit&id=44">Campaign</a>"#,
+            "<h2>View Email Campaigns</h2>",
             QueueControlSource::CampaignManage
         )
         .is_ok());
+        assert!(ensure_queue_control_page_identity(
+            r#"<a href="index.php?Page=Schedule">Schedule</a>"#,
+            QueueControlSource::Schedule
+        )
+        .is_err());
+        assert!(ensure_queue_control_page_identity(
+            r#"<a href="index.php?Page=Newsletters&Action=Edit&id=44">Campaign</a>"#,
+            QueueControlSource::CampaignManage
+        )
+        .is_err());
     }
 
     #[test]
