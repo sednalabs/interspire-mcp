@@ -2531,12 +2531,7 @@ fn canonical_queue_route_key(
     let mut pairs = url
         .query_pairs()
         .filter(|(key, _)| !is_csrf_field_name(key))
-        .map(|(key, value)| {
-            (
-                key.to_ascii_lowercase(),
-                value.to_ascii_lowercase(),
-            )
-        })
+        .map(|(key, value)| (key.to_ascii_lowercase(), value.to_ascii_lowercase()))
         .collect::<Vec<_>>();
     pairs.sort();
     let query = pairs
@@ -2625,8 +2620,7 @@ fn queue_control_page_has_pagination(document: &Html) -> Result<bool, Interspire
             .collect::<Vec<_>>()
             .join(" ")
             .to_ascii_lowercase();
-        let text = compact_text(&element.text().collect::<Vec<_>>().join(" "))
-            .to_ascii_lowercase();
+        let text = compact_text(&element.text().collect::<Vec<_>>().join(" ")).to_ascii_lowercase();
         let pagination_query = element
             .value()
             .attr("href")
@@ -2635,8 +2629,7 @@ fn queue_control_page_has_pagination(document: &Html) -> Result<bool, Interspire
                 url.query_pairs().any(|(key, _)| {
                     matches!(
                         key.to_ascii_lowercase().as_str(),
-                        "p"
-                            | "pagenumber"
+                        "p" | "pagenumber"
                             | "currentpage"
                             | "start"
                             | "startrow"
@@ -5888,10 +5881,7 @@ mod tests {
             QueueControlSource::Schedule,
         )
         .unwrap_or_else(|err| panic!("{err}"));
-        assert_ne!(
-            pause[0].candidate.plan_id,
-            pause_job[0].candidate.plan_id
-        );
+        assert_ne!(pause[0].candidate.plan_id, pause_job[0].candidate.plan_id);
     }
 
     #[test]
