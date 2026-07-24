@@ -3,7 +3,7 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct QueueControlPreviewRequest {
-    /// Maximum scheduled rows to inspect. Defaults to 25 and is capped at 100.
+    /// Maximum rows per queue source to inspect. Defaults to 25 and is capped at 100.
     #[serde(default)]
     #[schemars(range(min = 1, max = 100))]
     pub max_rows: Option<usize>,

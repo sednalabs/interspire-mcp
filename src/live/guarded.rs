@@ -67,11 +67,7 @@ impl LiveInterspireBackend {
         request: &QueueControlApplyRequest,
     ) -> Result<QueueControlApplyReport, InterspireError> {
         guarded_write::require_queue_controls_enabled(&self.config.guarded_writes)?;
-        if !request.acknowledge_queue_mutation {
-            return Err(InterspireError::Safety(
-                "queue control apply requires acknowledge_queue_mutation=true".to_string(),
-            ));
-        }
+        require_queue_mutation_acknowledged(request.acknowledge_queue_mutation)?;
         let html = self.html_client()?;
         if !html.configured() {
             return Ok(QueueControlApplyReport {
@@ -332,6 +328,15 @@ impl LiveInterspireBackend {
     }
 }
 
+fn require_queue_mutation_acknowledged(acknowledged: bool) -> Result<(), InterspireError> {
+    if acknowledged {
+        return Ok(());
+    }
+    Err(InterspireError::Safety(
+        "queue control apply requires acknowledge_queue_mutation=true".to_string(),
+    ))
+}
+
 fn unconfigured_preview(
     guarded_writes: &crate::config::GuardedWriteConfig,
     target: &str,
@@ -357,5 +362,20 @@ fn unconfigured_preview(
             source: "interspire_admin_html".to_string(),
             notes: vec!["no request sent".to_string()],
         },
+    }
+}
+
+#[cfg(test)]
+mod queue_control_tests {
+    use super::require_queue_mutation_acknowledged;
+
+    #[test]
+    fn queue_control_apply_requires_explicit_acknowledgement() {
+        assert!(require_queue_mutation_acknowledged(true).is_ok());
+        let error = require_queue_mutation_acknowledged(false)
+            .expect_err("missing acknowledgement must fail closed");
+        assert!(error
+            .to_string()
+            .contains("acknowledge_queue_mutation=true"));
     }
 }
