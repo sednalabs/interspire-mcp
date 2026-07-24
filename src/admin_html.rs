@@ -2625,7 +2625,7 @@ fn queue_control_page_has_pagination(document: &Html) -> Result<bool, Interspire
         .to_ascii_lowercase();
     if document_text.contains("results per page")
         || document_text.contains("records per page")
-        || document_text.contains("page 1 of ")
+        || has_numeric_page_indicator(&document_text)
     {
         return Ok(true);
     }
@@ -2678,6 +2678,19 @@ fn queue_control_page_has_pagination(document: &Html) -> Result<bool, Interspire
         }
     }
     Ok(false)
+}
+
+fn has_numeric_page_indicator(text: &str) -> bool {
+    let tokens = text
+        .split_whitespace()
+        .map(|token| token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()))
+        .collect::<Vec<_>>();
+    tokens.windows(4).any(|window| {
+        window[0].eq_ignore_ascii_case("page")
+            && window[1].parse::<u64>().is_ok()
+            && window[2].eq_ignore_ascii_case("of")
+            && window[3].parse::<u64>().is_ok()
+    })
 }
 
 fn ensure_unique_queue_plan_ids(links: &[QueueControlLink]) -> Result<(), InterspireError> {
@@ -6224,6 +6237,11 @@ mod tests {
             <a class="pagination nextpage" href="index.php?Page=Newsletters&Action=Manage&PageNumber=2">Next</a>
         "#;
         assert!(!queue_control_page_is_complete(paginated, 100).unwrap_or(false));
+        let plain_text_page_two = r#"
+            <table><tr><td>Only visible row</td></tr></table>
+            <div>Page 2 of 5</div>
+        "#;
+        assert!(!queue_control_page_is_complete(plain_text_page_two, 100).unwrap_or(false));
     }
 
     #[test]

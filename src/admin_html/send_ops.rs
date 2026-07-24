@@ -542,23 +542,25 @@ fn send_job_status_not_configured(
 fn parse_sent_total(row: &str) -> Option<(Option<u64>, Option<u64>)> {
     let normalized = row.replace(',', "");
     let lower = normalized.to_ascii_lowercase();
-    if !lower.contains("sent") && !lower.contains('/') && !lower.contains(" of ") {
-        return None;
-    }
-    let bytes = normalized.as_bytes();
+    let progress_start = lower
+        .rfind("in progress")
+        .or_else(|| lower.rfind("sent to"))?;
+    let progress = &normalized[progress_start..];
+    let lower_progress = &lower[progress_start..];
+    let bytes = progress.as_bytes();
     for index in 0..bytes.len() {
         if bytes[index] != b'/' {
             continue;
         }
-        let left = number_before(&normalized[..index]);
-        let right = number_after(&normalized[index + 1..]);
+        let left = number_before(&progress[..index]);
+        let right = number_after(&progress[index + 1..]);
         if left.is_some() || right.is_some() {
             return Some((left, right));
         }
     }
-    for (index, _) in lower.match_indices(" of ") {
-        let left = number_before(&normalized[..index]);
-        let right = number_after(&normalized[index + " of ".len()..]);
+    for (index, _) in lower_progress.match_indices(" of ") {
+        let left = number_before(&progress[..index]);
+        let right = number_after(&progress[index + " of ".len()..]);
         if left.is_some() || right.is_some() {
             return Some((left, right));
         }
@@ -791,6 +793,15 @@ mod tests {
             parse_sent_total("Job 13 In Progress (Sent to / 100)"),
             Some((None, Some(100)))
         );
+    }
+
+    #[test]
+    fn progress_counts_ignore_unrelated_campaign_title_pair() {
+        assert_eq!(
+            parse_sent_total("Campaign 2024 of 2025 In Progress (0 of 70)"),
+            Some((Some(0), Some(70)))
+        );
+        assert_eq!(parse_sent_total("Campaign 2024 of 2025 Complete"), None);
     }
 
     #[test]
