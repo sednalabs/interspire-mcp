@@ -113,9 +113,12 @@ Preview:
   does not match the authenticated page that exposed it;
 - returns a deterministic plan id, redacted row summary, action, source, and
   route fingerprint;
-- binds the plan id to stable route/action/job identity rather than volatile
-  row text, so an active send whose `Sent to N / total` progress changes can
-  still be paused or resumed safely from a fresh apply read.
+- binds the plan id to the canonical non-secret route, source, action, job, and
+  method while excluding volatile CSRF/session values and row text, so an
+  active send whose `Sent to N / total` progress changes can still be paused or
+  resumed safely from a fresh apply read;
+- fails closed when Schedule or Manage reaches the row cap or exposes
+  pagination/result-limit controls.
 
 Apply:
 
@@ -133,8 +136,9 @@ Apply:
   `Pause` route when Interspire exposes one, then applies the selected delete
   plan;
 - re-reads Schedule and newsletter Manage after apply;
-- rejects redirects, login pages, and authentication loss at the mutation
-  response boundary;
+- accepts only authenticated same-admin redirects to Schedule or newsletter
+  Manage, and rejects login, external, or other redirects plus authentication
+  loss at the mutation response boundary;
 - proves cancel/delete only when the bounded post-apply inventories are
   complete and the target no longer exposes allowlisted queue controls;
 - proves pause/resume by confirming the requested action is gone and the

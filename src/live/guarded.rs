@@ -40,7 +40,7 @@ impl LiveInterspireBackend {
         }
 
         let candidates =
-            html.queue_control_candidates(cap_usize(request.max_rows.unwrap_or(25), 100))?;
+            html.queue_control_candidates(cap_usize(request.max_rows.unwrap_or(100), 100))?;
         Ok(QueueControlPreviewReport {
             ok: true,
             configured: true,

@@ -24,7 +24,7 @@ impl AdminHtmlClient {
         }
         self.login()?;
 
-        let max_rows = request.max_rows.unwrap_or(25).clamp(1, 100);
+        let max_rows = request.max_rows.unwrap_or(100).clamp(1, 100);
         let schedule_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
         let stats_html = self.get_allowed(&AdminReadPage::Stats.path())?;
         let schedule_rows = parse_table_rows(&schedule_html, max_rows)?;
@@ -350,7 +350,7 @@ fn build_send_job_status_report(
         .iter()
         .filter_map(|row| parse_stats_row_counts(row))
         .collect::<Vec<_>>();
-    let stats_rows_maybe_capped = stats_rows.len() >= request.max_rows.unwrap_or(25);
+    let stats_rows_maybe_capped = stats_rows.len() >= request.max_rows.unwrap_or(100);
     let stats_row_has_incidental_job_id = stats_matches
         .iter()
         .any(|row| row_mentions_id(row, request.expected_job_id));

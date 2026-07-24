@@ -702,14 +702,22 @@ impl AdminHtmlClient {
                         ))
                     })?;
                 let pause_status = response.status();
-                let body = response
-                    .text()
-                    .map_err(|err| InterspireError::Http(err.to_string()))?;
-                ensure_queue_control_mutation_response(
-                    pause_status,
-                    &body,
-                    "queue control pause preflight",
-                )?;
+                if pause_status.is_redirection() {
+                    ensure_queue_control_mutation_redirect(
+                        &response,
+                        self.config.base_url.as_deref().unwrap_or_default(),
+                        "queue control pause preflight",
+                    )?;
+                } else {
+                    let body = response
+                        .text()
+                        .map_err(|err| InterspireError::Http(err.to_string()))?;
+                    ensure_queue_control_mutation_response(
+                        pause_status,
+                        &body,
+                        "queue control pause preflight",
+                    )?;
+                }
                 let paused = self.complete_queue_control_inventory(
                     max_rows,
                     "queue control pause preflight readback",
@@ -761,10 +769,18 @@ impl AdminHtmlClient {
             }
         };
         let status = response.status();
-        let body = response
-            .text()
-            .map_err(|err| InterspireError::Http(err.to_string()))?;
-        ensure_queue_control_mutation_response(status, &body, "queue control apply")?;
+        if status.is_redirection() {
+            ensure_queue_control_mutation_redirect(
+                &response,
+                self.config.base_url.as_deref().unwrap_or_default(),
+                "queue control apply",
+            )?;
+        } else {
+            let body = response
+                .text()
+                .map_err(|err| InterspireError::Http(err.to_string()))?;
+            ensure_queue_control_mutation_response(status, &body, "queue control apply")?;
+        }
 
         let after =
             self.complete_queue_control_inventory(max_rows, "queue control apply readback")?;
@@ -1264,6 +1280,7 @@ impl AdminHtmlClient {
             max_rows,
             QueueControlSource::CampaignManage,
         )?);
+        ensure_unique_queue_plan_ids(&links)?;
         Ok(QueueControlInventory {
             links,
             complete: queue_control_page_is_complete(&schedule_html, max_rows)?
@@ -2223,7 +2240,7 @@ fn parse_queue_control_links(
                     route.source.as_str()
                 )));
             }
-            let route_key = stable_queue_route_key(&route, &execution);
+            let route_key = canonical_queue_route_key(&url, &route, &execution);
             let pause_before_delete = if route.action == QueueControlAction::Delete
                 && route.source == QueueControlSource::Schedule
             {
@@ -2502,15 +2519,37 @@ fn route_key(url: &Url) -> String {
     }
 }
 
-fn stable_queue_route_key(route: &QueueControlRoute, execution: &QueueControlExecution) -> String {
+fn canonical_queue_route_key(
+    url: &Url,
+    route: &QueueControlRoute,
+    execution: &QueueControlExecution,
+) -> String {
     let method = match execution {
         QueueControlExecution::Get => "get",
         QueueControlExecution::DeletePost { .. } => "post",
     };
+    let mut pairs = url
+        .query_pairs()
+        .filter(|(key, _)| !is_csrf_field_name(key))
+        .map(|(key, value)| {
+            (
+                key.to_ascii_lowercase(),
+                value.to_ascii_lowercase(),
+            )
+        })
+        .collect::<Vec<_>>();
+    pairs.sort();
+    let query = pairs
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&");
     format!(
-        "source={}&action={}&job={}&method={method}",
+        "path={}&query={query}&source={}&action={}&identifier={}:{}&method={method}",
+        url.path(),
         route.source.as_str(),
         route.action.as_str(),
+        route.identifier_key.to_ascii_lowercase(),
         route.identifier_value
     )
 }
@@ -2529,6 +2568,38 @@ fn ensure_queue_control_mutation_response(
     ensure_authenticated_html(body)
 }
 
+fn ensure_queue_control_mutation_redirect(
+    response: &reqwest::blocking::Response,
+    base_url: &str,
+    operation: &str,
+) -> Result<(), InterspireError> {
+    if !response.status().is_redirection() || redirects_to_login(response)? {
+        return Err(InterspireError::Http(format!(
+            "{operation} returned an untrusted redirect"
+        )));
+    }
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| InterspireError::Http(format!("{operation} redirect had no Location")))?;
+    ensure_queue_control_redirect_location(base_url, location, operation)
+}
+
+fn ensure_queue_control_redirect_location(
+    base_url: &str,
+    location: &str,
+    operation: &str,
+) -> Result<(), InterspireError> {
+    let url = safety::ensure_allowed_admin_get(base_url, location)?;
+    match safety::classify_allowed_admin_get(&url)? {
+        AdminReadPage::Schedule | AdminReadPage::NewslettersManage => Ok(()),
+        _ => Err(InterspireError::Http(format!(
+            "{operation} redirect did not target Schedule or newsletter Manage"
+        ))),
+    }
+}
+
 fn queue_control_page_is_complete(html: &str, max_rows: usize) -> Result<bool, InterspireError> {
     let document = Html::parse_document(html);
     let row_selector =
@@ -2541,7 +2612,77 @@ fn queue_control_page_is_complete(html: &str, max_rows: usize) -> Result<bool, I
             row_text.len() >= 3 && !row_text.eq_ignore_ascii_case("actions")
         })
         .count();
-    Ok(count < max_rows)
+    Ok(count < max_rows && !queue_control_page_has_pagination(&document)?)
+}
+
+fn queue_control_page_has_pagination(document: &Html) -> Result<bool, InterspireError> {
+    let selector = Selector::parse("a, form, input, select, button")
+        .map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    for element in document.select(&selector) {
+        let attributes = ["href", "action", "name", "id", "class", "rel", "title"]
+            .iter()
+            .filter_map(|name| element.value().attr(name))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        let text = compact_text(&element.text().collect::<Vec<_>>().join(" "))
+            .to_ascii_lowercase();
+        let pagination_query = element
+            .value()
+            .attr("href")
+            .and_then(|href| Url::parse("https://example.invalid/").ok()?.join(href).ok())
+            .is_some_and(|url| {
+                url.query_pairs().any(|(key, _)| {
+                    matches!(
+                        key.to_ascii_lowercase().as_str(),
+                        "p"
+                            | "pagenumber"
+                            | "currentpage"
+                            | "start"
+                            | "startrow"
+                            | "offset"
+                            | "perpage"
+                            | "pagesize"
+                    )
+                })
+            });
+        if pagination_query
+            || [
+                "pagination",
+                "paging",
+                "pagenumber",
+                "currentpage",
+                "nextpage",
+                "prevpage",
+                "perpage",
+                "pagesize",
+            ]
+            .iter()
+            .any(|needle| attributes.contains(needle))
+            || matches!(text.as_str(), "next" | "next >" | "previous" | "< previous")
+            || text.contains("results per page")
+            || text.contains("records per page")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_unique_queue_plan_ids(links: &[QueueControlLink]) -> Result<(), InterspireError> {
+    let mut plan_counts = HashMap::new();
+    for link in links {
+        *plan_counts
+            .entry(link.candidate.plan_id.as_str())
+            .or_insert(0usize) += 1;
+    }
+    if plan_counts.values().any(|count| *count > 1) {
+        return Err(InterspireError::Safety(
+            "queue control inventory exposed duplicate plan identities; no candidate is safe to apply"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn route_fingerprint(route_key: &str) -> String {
@@ -5720,6 +5861,61 @@ mod tests {
     }
 
     #[test]
+    fn queue_control_plan_id_binds_canonical_route_aliases() {
+        let pause_html = r#"
+            <table><tr>
+              <td>Job</td>
+              <td><a href="index.php?Page=Schedule&Action=Pause&job=17">Pause</a></td>
+            </tr></table>
+        "#;
+        let pause_job_html = r#"
+            <table><tr>
+              <td>Job</td>
+              <td><a href="index.php?Page=Schedule&Action=PauseJob&jobid=17">Pause</a></td>
+            </tr></table>
+        "#;
+        let pause = parse_queue_control_links(
+            "https://example.test/admin/",
+            pause_html,
+            25,
+            QueueControlSource::Schedule,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let pause_job = parse_queue_control_links(
+            "https://example.test/admin/",
+            pause_job_html,
+            25,
+            QueueControlSource::Schedule,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert_ne!(
+            pause[0].candidate.plan_id,
+            pause_job[0].candidate.plan_id
+        );
+    }
+
+    #[test]
+    fn duplicate_queue_plan_identities_fail_closed() {
+        let html = r#"
+            <table><tr>
+              <td>Job</td>
+              <td>
+                <a href="index.php?Page=Schedule&Action=Pause&job=17">Pause</a>
+                <a href="index.php?Page=Schedule&Action=Pause&job=17">Pause again</a>
+              </td>
+            </tr></table>
+        "#;
+        let links = parse_queue_control_links(
+            "https://example.test/admin/",
+            html,
+            25,
+            QueueControlSource::Schedule,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(ensure_unique_queue_plan_ids(&links).is_err());
+    }
+
+    #[test]
     fn queue_control_preview_ignores_nested_container_rows() {
         let html = r#"
             <table>
@@ -5966,6 +6162,24 @@ mod tests {
             "queue control apply"
         )
         .is_err());
+        assert!(ensure_queue_control_redirect_location(
+            "https://example.test/admin/",
+            "index.php?Page=Schedule",
+            "queue control apply"
+        )
+        .is_ok());
+        for location in [
+            "index.php?Page=Login",
+            "index.php?Page=Send",
+            "https://attacker.example/index.php?Page=Schedule",
+        ] {
+            assert!(ensure_queue_control_redirect_location(
+                "https://example.test/admin/",
+                location,
+                "queue control apply"
+            )
+            .is_err());
+        }
     }
 
     #[test]
@@ -5979,6 +6193,11 @@ mod tests {
         assert!(!queue_control_page_is_complete(html, 1).unwrap_or(false));
         assert!(!queue_control_page_is_complete(html, 2).unwrap_or(false));
         assert!(queue_control_page_is_complete(html, 3).unwrap_or(false));
+        let paginated = r#"
+            <table><tr><td>Only visible row</td></tr></table>
+            <a class="pagination nextpage" href="index.php?Page=Newsletters&Action=Manage&PageNumber=2">Next</a>
+        "#;
+        assert!(!queue_control_page_is_complete(paginated, 100).unwrap_or(false));
     }
 
     #[test]

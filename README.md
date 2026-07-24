@@ -339,7 +339,10 @@ exclude volatile row progress, query order, and CSRF/session values.
 Post-apply readback must be complete across Schedule and Manage:
 cancel/delete targets must disappear from allowlisted queue controls; pause and
 resume must remove the requested action and expose the expected opposite action
-for the same job.
+for the same job. The tool fails closed when either page reaches the row cap or
+exposes pagination/result-limit controls. Queue mutations may return an
+authenticated same-admin redirect to Schedule or Manage; login, external, and
+other redirects are rejected before readback.
 It does not use Interspire's queue controls to send, schedule, import, export,
 edit contacts, edit suppressions, change provider APIs, DNS, or secrets, or
 authorize any later send.

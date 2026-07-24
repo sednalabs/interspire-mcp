@@ -1662,7 +1662,7 @@
         "properties": {
           "max_rows": {
             "default": null,
-            "description": "Maximum rows per queue source to inspect. Defaults to 25 and is capped at 100.",
+            "description": "Maximum rows per queue source to inspect. Defaults to 100 and is capped at 100.",
             "format": "uint",
             "maximum": 100,
             "minimum": 1,
