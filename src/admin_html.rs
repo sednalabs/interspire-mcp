@@ -1294,11 +1294,7 @@ impl AdminHtmlClient {
             self.get_allowed_once(&manage_path)?
         };
         let base_url = self.config.base_url.as_deref().unwrap_or_default();
-        ensure_queue_control_page_identity(
-            base_url,
-            &schedule_html,
-            QueueControlSource::Schedule,
-        )?;
+        ensure_queue_control_page_identity(base_url, &schedule_html, QueueControlSource::Schedule)?;
         ensure_queue_control_page_identity(
             base_url,
             &manage_html,
@@ -2680,8 +2676,8 @@ fn ensure_queue_control_page_identity(
         Selector::parse("table").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
     let link_selector = Selector::parse("a[href], form[action]")
         .map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
-    let input_selector =
-        Selector::parse("input[name]").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let input_selector = Selector::parse("input[name]")
+        .map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
     let structure_matches = document.select(&table_selector).any(|table| match source {
         QueueControlSource::Schedule => {
             table.select(&input_selector).any(|input| {
@@ -2700,19 +2696,17 @@ fn ensure_queue_control_page_identity(
                 })
             })
         }
-        QueueControlSource::CampaignManage => {
-            table.select(&link_selector).any(|element| {
-                let target = element
-                    .value()
-                    .attr("href")
-                    .or_else(|| element.value().attr("action"));
-                target.is_some_and(|target| {
-                    safety::ensure_allowed_admin_get(base_url, target)
-                        .and_then(|url| safety::classify_allowed_admin_get(&url))
-                        .is_ok_and(|page| matches!(page, AdminReadPage::NewsletterEdit { .. }))
-                })
+        QueueControlSource::CampaignManage => table.select(&link_selector).any(|element| {
+            let target = element
+                .value()
+                .attr("href")
+                .or_else(|| element.value().attr("action"));
+            target.is_some_and(|target| {
+                safety::ensure_allowed_admin_get(base_url, target)
+                    .and_then(|url| safety::classify_allowed_admin_get(&url))
+                    .is_ok_and(|page| matches!(page, AdminReadPage::NewsletterEdit { .. }))
             })
-        }
+        }),
     });
     let document_text = compact_text(&document.root_element().text().collect::<Vec<_>>().join(" "))
         .to_ascii_lowercase();
@@ -6402,14 +6396,12 @@ mod tests {
     fn queue_control_page_identity_rejects_generic_success_html() {
         let generic = "<html><body>unexpected request</body></html>";
         let base_url = "https://example.test/admin/";
-        assert!(
-            ensure_queue_control_page_identity(
-                base_url,
-                generic,
-                QueueControlSource::Schedule
-            )
-            .is_err()
-        );
+        assert!(ensure_queue_control_page_identity(
+            base_url,
+            generic,
+            QueueControlSource::Schedule
+        )
+        .is_err());
         assert!(ensure_queue_control_page_identity(
             base_url,
             generic,
