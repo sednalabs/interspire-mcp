@@ -2732,6 +2732,13 @@ fn ensure_queue_control_page_identity(
     if cron_disabled_schedule_state {
         return Ok(());
     }
+    let legacy_campaign_manage_state = source == QueueControlSource::CampaignManage
+        && document_text.contains("view email campaigns")
+        && document_text.contains("powered by interspire email marketer")
+        && structure_matches;
+    if legacy_campaign_manage_state {
+        return Ok(());
+    }
     if heading_matches && (structure_matches || explicit_empty_state) {
         return Ok(());
     }
@@ -6470,6 +6477,29 @@ mod tests {
             base_url,
             "<h1>Cron sending has not been enabled.</h1>",
             QueueControlSource::Schedule
+        )
+        .is_err());
+        assert!(ensure_queue_control_page_identity(
+            base_url,
+            r#"
+              <div>View Email Campaigns</div>
+              <table><tr><td>
+                <a href="index.php?Page=Newsletters&Action=Edit&id=44">Campaign</a>
+              </td></tr></table>
+              <footer>Powered by Interspire Email Marketer 8.7.4</footer>
+            "#,
+            QueueControlSource::CampaignManage
+        )
+        .is_ok());
+        assert!(ensure_queue_control_page_identity(
+            base_url,
+            r#"
+              <div>View Email Campaigns</div>
+              <table><tr><td>
+                <a href="index.php?Page=Newsletters&Action=Edit&id=44">Campaign</a>
+              </td></tr></table>
+            "#,
+            QueueControlSource::CampaignManage
         )
         .is_err());
         assert!(ensure_queue_control_page_identity(
