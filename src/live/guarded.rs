@@ -40,7 +40,7 @@ impl LiveInterspireBackend {
         }
 
         let candidates =
-            html.queue_control_candidates(cap_usize(request.max_rows.unwrap_or(25), 100))?;
+            html.queue_control_candidates(cap_usize(request.max_rows.unwrap_or(100), 100))?;
         Ok(QueueControlPreviewReport {
             ok: true,
             configured: true,
@@ -49,12 +49,15 @@ impl LiveInterspireBackend {
             candidates,
             production_send_authorized: false,
             warnings: vec![
-                "preview only; apply requires INTERSPIRE_GUARDED_WRITES=1 and INTERSPIRE_QUEUE_WRITE_CONTROLS=1".to_string(),
-                "queue controls can cancel/delete/pause/resume scheduled rows only; they do not send, schedule, import, export, or mutate contacts".to_string(),
+                "preview only; apply requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_QUEUE_WRITE_CONTROLS=1, and acknowledge_queue_mutation=true".to_string(),
+                "queue controls can cancel/delete/pause/resume source-bound Schedule or exact Manage immediate-job rows only; they do not send, schedule, import, export, or mutate contacts".to_string(),
             ],
             evidence: Evidence {
                 source: "interspire_admin_html".to_string(),
-                notes: vec!["allowlisted Schedule GET read for queue-control preview".to_string()],
+                notes: vec![
+                    "allowlisted Schedule and newsletter Manage GET reads for queue-control preview"
+                        .to_string(),
+                ],
             },
         })
     }
@@ -64,6 +67,7 @@ impl LiveInterspireBackend {
         request: &QueueControlApplyRequest,
     ) -> Result<QueueControlApplyReport, InterspireError> {
         guarded_write::require_queue_controls_enabled(&self.config.guarded_writes)?;
+        require_queue_mutation_acknowledged(request.acknowledge_queue_mutation)?;
         let html = self.html_client()?;
         if !html.configured() {
             return Ok(QueueControlApplyReport {
@@ -324,6 +328,15 @@ impl LiveInterspireBackend {
     }
 }
 
+fn require_queue_mutation_acknowledged(acknowledged: bool) -> Result<(), InterspireError> {
+    if acknowledged {
+        return Ok(());
+    }
+    Err(InterspireError::Safety(
+        "queue control apply requires acknowledge_queue_mutation=true".to_string(),
+    ))
+}
+
 fn unconfigured_preview(
     guarded_writes: &crate::config::GuardedWriteConfig,
     target: &str,
@@ -349,5 +362,20 @@ fn unconfigured_preview(
             source: "interspire_admin_html".to_string(),
             notes: vec!["no request sent".to_string()],
         },
+    }
+}
+
+#[cfg(test)]
+mod queue_control_tests {
+    use super::require_queue_mutation_acknowledged;
+
+    #[test]
+    fn queue_control_apply_requires_explicit_acknowledgement() {
+        assert!(require_queue_mutation_acknowledged(true).is_ok());
+        let error = require_queue_mutation_acknowledged(false)
+            .expect_err("missing acknowledgement must fail closed");
+        assert!(error
+            .to_string()
+            .contains("acknowledge_queue_mutation=true"));
     }
 }

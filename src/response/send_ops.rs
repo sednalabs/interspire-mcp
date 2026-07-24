@@ -1,4 +1,7 @@
-use super::{Evidence, OciLedgerPreflightReport, OciLedgerPreflightRequest, QueueControlAction};
+use super::{
+    Evidence, OciLedgerPreflightReport, OciLedgerPreflightRequest, QueueControlAction,
+    QueueControlSource,
+};
 use serde::Serialize;
 
 #[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -78,6 +81,7 @@ pub struct SendJobScheduleState {
 #[derive(Debug, Clone, Serialize)]
 pub struct SendJobActionPlan {
     pub action: QueueControlAction,
+    pub source: QueueControlSource,
     pub plan_id: String,
 }
 
@@ -195,6 +199,7 @@ impl SendJobStatusReadbackReport {
                 available_actions: vec![QueueControlAction::Pause],
                 action_plans: vec![SendJobActionPlan {
                     action: QueueControlAction::Pause,
+                    source: QueueControlSource::Schedule,
                     plan_id: "iqc_fixture_pause".to_string(),
                 }],
                 sent_count: Some(63),

@@ -6,7 +6,10 @@
 //! exceptions are narrow guarded routes: Schedule-page cancel/delete/pause/resume
 //! and the explicitly enabled guarded-send final form post.
 
-use crate::{error::InterspireError, response::QueueControlAction};
+use crate::{
+    error::InterspireError,
+    response::{QueueControlAction, QueueControlSource},
+};
 use std::collections::HashSet;
 use url::Url;
 
@@ -29,6 +32,7 @@ pub enum AdminReadPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueControlRoute {
     pub action: QueueControlAction,
+    pub source: QueueControlSource,
     pub identifier_key: String,
     pub identifier_value: u64,
 }
@@ -885,25 +889,41 @@ pub fn classify_allowed_queue_control(url: &Url) -> Result<QueueControlRoute, In
         .find(|(key, _)| key.eq_ignore_ascii_case("Action"))
         .map(|(_, value)| value.to_string());
 
-    if !matches!(page.as_deref(), Some("Schedule")) {
-        return Err(InterspireError::Safety(
-            "queue control route must target the Schedule page".to_string(),
-        ));
-    }
+    let (source, action) = match (page.as_deref(), action_raw.as_deref()) {
+        (Some("Schedule"), Some(raw)) => (
+            QueueControlSource::Schedule,
+            classify_queue_control_action(raw),
+        ),
+        (Some("Send"), Some("PauseSend")) => (
+            QueueControlSource::CampaignManage,
+            Some(QueueControlAction::Pause),
+        ),
+        (Some("Send"), Some("ResumeSend")) => (
+            QueueControlSource::CampaignManage,
+            Some(QueueControlAction::Resume),
+        ),
+        (Some("Send"), Some("DeleteSend")) => (
+            QueueControlSource::CampaignManage,
+            Some(QueueControlAction::Delete),
+        ),
+        _ => {
+            return Err(InterspireError::Safety(
+                "queue control route must target Schedule or an exact Send PauseSend/ResumeSend/DeleteSend action"
+                    .to_string(),
+            ));
+        }
+    };
+    let action = action.ok_or_else(|| {
+        InterspireError::Safety(format!(
+            "queue control action is not in the cancel/delete/pause/resume allowlist: {action_raw:?}"
+        ))
+    })?;
 
-    let action = action_raw
-        .as_deref()
-        .and_then(classify_queue_control_action)
-        .ok_or_else(|| {
-            InterspireError::Safety(format!(
-                "queue control action is not in the cancel/delete/pause/resume allowlist: {action_raw:?}"
-            ))
-        })?;
-
-    let (identifier_key, identifier_value) = single_numeric_identifier(&pairs)?;
+    let (identifier_key, identifier_value) = single_numeric_identifier(&pairs, source)?;
 
     Ok(QueueControlRoute {
         action,
+        source,
         identifier_key,
         identifier_value,
     })
@@ -1326,8 +1346,9 @@ fn classify_queue_control_action(raw: &str) -> Option<QueueControlAction> {
 
 fn single_numeric_identifier(
     pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+    source: QueueControlSource,
 ) -> Result<(String, u64), InterspireError> {
-    let keys = [
+    const ALL_IDENTIFIER_KEYS: &[&str] = &[
         "id",
         "job",
         "jobid",
@@ -1336,25 +1357,43 @@ fn single_numeric_identifier(
         "newsletterid",
         "campaignid",
     ];
-    let matches = keys
+    let present = pairs
         .iter()
-        .filter_map(|wanted| {
-            pairs
+        .filter(|(key, _)| {
+            ALL_IDENTIFIER_KEYS
                 .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case(wanted))
-                .and_then(|(key, value)| value.parse::<u64>().ok().map(|id| (key.to_string(), id)))
+                .any(|wanted| key.eq_ignore_ascii_case(wanted))
         })
         .collect::<Vec<_>>();
-
-    match matches.as_slice() {
-        [] => Err(InterspireError::Safety(
-            "queue control route must include exactly one numeric queue identifier".to_string(),
-        )),
-        [single] => Ok(single.clone()),
-        _ => Err(InterspireError::Safety(
-            "queue control route includes multiple queue identifiers".to_string(),
-        )),
+    if present.len() != 1 {
+        return Err(InterspireError::Safety(
+            "queue control route must include exactly one queue identifier alias".to_string(),
+        ));
     }
+    let (key, value) = present[0];
+    let key_allowed = match source {
+        QueueControlSource::Schedule => ["id", "job", "jobid", "queueid"]
+            .iter()
+            .any(|wanted| key.eq_ignore_ascii_case(wanted)),
+        QueueControlSource::CampaignManage => key.eq_ignore_ascii_case("job"),
+    };
+    if !key_allowed {
+        return Err(InterspireError::Safety(
+            "queue control route uses an identifier alias that is not valid for its source"
+                .to_string(),
+        ));
+    }
+    let identifier_value = value.parse::<u64>().map_err(|_| {
+        InterspireError::Safety(
+            "queue control route identifier must be a positive numeric job id".to_string(),
+        )
+    })?;
+    if identifier_value == 0 {
+        return Err(InterspireError::Safety(
+            "queue control route identifier must be a positive numeric job id".to_string(),
+        ));
+    }
+    Ok((key.to_string(), identifier_value))
 }
 
 fn required_numeric_query_value(
@@ -2048,6 +2087,12 @@ mod tests {
             "index.php?Page=Schedule&Action=Cancel&id=1"
         )
         .is_ok());
+        let (_, manage_pause) =
+            ensure_allowed_queue_control(base_url, "index.php?Page=Send&Action=PauseSend&Job=88")
+                .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(manage_pause.action, QueueControlAction::Pause);
+        assert_eq!(manage_pause.source, QueueControlSource::CampaignManage);
+        assert_eq!(manage_pause.identifier_value, 88);
 
         for path in [
             "cron/index.php?Page=Schedule&Action=Cancel&id=1",
@@ -2074,6 +2119,14 @@ mod tests {
             "index.php?Page=Newsletters&Action=Delete&id=1",
             "index.php?Page=Subscribers&Action=Delete&id=1",
             "index.php?Page=Schedule&Action=Cancel&id=1&Action=Delete",
+            "index.php?Page=Send&Action=PauseSend",
+            "index.php?Page=Send&Action=PauseSend&Job=88&Next=Send",
+            "index.php?Page=Send&Action=ResumeSend&Job=88&Next=Send",
+            "index.php?Page=Send&Action=DeleteSend&Job=88&Job=89",
+            "index.php?Page=Send&Action=PauseSend&Job=88&id=abc",
+            "index.php?Page=Send&Action=PauseSend&id=88",
+            "index.php?Page=Send&Action=PauseSend&campaignid=88",
+            "index.php?Page=Send&Action=PauseSend&Job=0",
         ] {
             assert!(
                 classify_allowed_queue_control(&url(path)).is_err(),

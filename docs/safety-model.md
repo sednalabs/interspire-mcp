@@ -105,32 +105,42 @@ Queue control has two phases.
 
 Preview:
 
-- reads the Schedule page;
+- reads the Schedule and newsletter Manage pages;
 - finds cancel/delete/pause/resume links inside bounded table rows;
-- validates that each link is a Schedule-page cancel/delete/pause/resume route with a
-  numeric identifier;
-- returns a deterministic plan id, redacted row summary, action, and route
-  fingerprint.
-- binds the plan id to stable route/action/job identity rather than volatile
-  row text, so an active send whose `Sent to N / total` progress changes can
-  still be paused or resumed safely from a fresh apply read.
+- validates that each link is either a Schedule queue route or an exact
+  `Send` `PauseSend`, `ResumeSend`, or `DeleteSend` immediate-job route with
+  one positive numeric job identifier, and rejects a link whose route source
+  does not match the authenticated page that exposed it;
+- returns a deterministic plan id, redacted row summary, action, source, and
+  route fingerprint;
+- binds the plan id to the canonical non-secret route, source, action, job, and
+  method while excluding volatile CSRF/session values and row text, so an
+  active send whose `Sent to N / total` progress changes can still be paused or
+  resumed safely from a fresh apply read;
+- fails closed when Schedule or Manage reaches the row cap or exposes
+  pagination/result-limit controls.
 
 Apply:
 
 - requires `INTERSPIRE_GUARDED_WRITES=1`;
 - requires `INTERSPIRE_QUEUE_WRITE_CONTROLS=1`;
+- requires `acknowledge_queue_mutation=true`;
 - requires the exact plan id and action from preview;
-- re-reads the Schedule page before apply;
+- re-reads Schedule and newsletter Manage before apply;
+- refuses a target exposed on conflicting sources;
 - applies only the matching Schedule cancel, pause, or resume route or one-job
-  Schedule delete form post;
-- sends Schedule referer/origin context and accepted CSRF token headers for
-  guarded queue applies;
+  Schedule delete form post, or the exact source-bound immediate-job route;
+- sends source-correct referer/origin context and accepted CSRF token headers
+  for guarded queue applies;
 - for delete candidates, may first follow a same-row, same-job Schedule
   `Pause` route when Interspire exposes one, then applies the selected delete
   plan;
-- re-reads the Schedule page after apply;
-- proves cancel/delete by confirming the target no longer exposes allowlisted
-  queue controls;
+- re-reads Schedule and newsletter Manage after apply;
+- accepts only authenticated same-admin redirects to Schedule or newsletter
+  Manage, and rejects login, external, or other redirects plus authentication
+  loss at the mutation response boundary;
+- proves cancel/delete only when the bounded post-apply inventories are
+  complete and the target no longer exposes allowlisted queue controls;
 - proves pause/resume by confirming the requested action is gone and the
   expected opposite action appears for the same job;
 - returns before/after counts, action-specific target actions, and evidence.
@@ -330,15 +340,13 @@ not for HTTP 200 or 302 alone.
 Queued-not-proven sends may include a `follow_up_contract` with the Interspire
 job id, campaign id, list ids, expected queue total, and the
 `interspire_send_job_status_readback` tool name. That status tool reads only
-allowlisted Schedule and Stats pages, returns redacted row summaries and
+allowlisted Schedule, newsletter Manage, and Stats pages, returns redacted row summaries and
 progress counters when Interspire exposes them, and explicitly marks direct
 queue-table, jobs-list, stats-table, and unsent-reason aggregates as unavailable
-unless a future reviewed source is added. Once the Schedule row disappears, a
-completed send can only be treated as application-side completion when exactly
-one Stats row in an uncapped read has the expected recipient count and the row
-does not contain an incidental expected-job-id token. Numeric campaign-id
-matches in Stats text are deliberately ignored because dates and times can
-contain the same tokens. The tool must not fabricate processed counts or unsent
+unless a future reviewed source is added. Stats rows are historical aggregate
+context only: recipient-count equality, uniqueness, campaign-like numeric text,
+or incidental job-id text never proves current job identity after the queue
+action disappears. The tool must not fabricate processed counts or unsent
 reasons from provider silence.
 
 `interspire_cron_readiness` is also read-only. It compares cron settings with

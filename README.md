@@ -111,9 +111,9 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_admin_session_probe` | Read | Probe authenticated admin reachability through allowlisted read pages. |
 | `interspire_user_smtp_readback` | Read | Read redacted per-user SMTP override state. |
 | `interspire_queue_stats_readback` | Read | Read scheduled queue and stats rows without triggering cron. |
-| `interspire_queue_control_preview` | Read preview | Build plan IDs for cancel/delete/pause/resume actions found on the schedule page. |
-| `interspire_queue_control_apply` | Guarded apply | Apply one previously previewed queue cancel/delete/pause/resume plan when write gates are enabled. |
-| `interspire_send_job_status_readback` | Read | Read structured Schedule/Stats status for one expected send job, including redacted row summaries, progress counters when present, queue-control action plans, unique expected-total completed Stats-row proof, and explicit unproven table-counter gaps. |
+| `interspire_queue_control_preview` | Read preview | Build source-bound plan IDs for cancel/delete/pause/resume actions found on Schedule or exact immediate-job actions on newsletter Manage. |
+| `interspire_queue_control_apply` | Guarded apply | Apply one acknowledged, previously previewed queue plan when write gates are enabled, then prove the transition from fresh Schedule and Manage reads. |
+| `interspire_send_job_status_readback` | Read | Read structured Schedule/Manage/Stats context for one expected send job. Current identity requires an exact queue-control route; historical Stats counts never establish job identity. |
 | `interspire_cron_readiness` | Read | Compare Interspire cron settings with Schedule-page cron detection without triggering `cron.php`. |
 | `interspire_send_stop_gate_readiness` | No-mutation proof | Combine send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation; any pause still requires separate queue-control apply. |
 | `interspire_campaign_readback` | Read | Read campaign manage rows with structured campaign ids/action flags, or one campaign edit-page summary. |
@@ -329,15 +329,20 @@ All write paths use the same safety pattern:
 
 ### Queue Controls
 
-Queue apply remains limited to Schedule-page cancel/delete/pause/resume actions.
+Queue apply remains limited to Schedule-page cancel/delete/pause/resume actions
+and exact newsletter Manage `PauseSend`, `ResumeSend`, or `DeleteSend` routes
+for one positive numeric `Job`.
 
-The apply route is limited to Interspire Schedule-page cancel, pause, and
-resume links plus the built-in Schedule delete form for one selected job.
-Plan ids bind the previewed action, numeric row/job identity, route
-fingerprint, and redacted row summary. Post-apply readback requires
-cancel/delete targets to disappear from allowlisted queue controls; pause and
+Plan ids bind the previewed action, source, numeric row/job identity, campaign
+association when available, and stable route fingerprint. They intentionally
+exclude volatile row progress, query order, and CSRF/session values.
+Post-apply readback must be complete across Schedule and Manage:
+cancel/delete targets must disappear from allowlisted queue controls; pause and
 resume must remove the requested action and expose the expected opposite action
-for the same job.
+for the same job. The tool fails closed when either page reaches the row cap or
+exposes pagination/result-limit controls. Queue mutations may return an
+authenticated same-admin redirect to Schedule or Manage; login, external, and
+other redirects are rejected before readback.
 It does not use Interspire's queue controls to send, schedule, import, export,
 edit contacts, edit suppressions, change provider APIs, DNS, or secrets, or
 authorize any later send.

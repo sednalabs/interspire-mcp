@@ -3,7 +3,7 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct QueueControlPreviewRequest {
-    /// Maximum scheduled rows to inspect. Defaults to 25 and is capped at 100.
+    /// Maximum rows per queue source to inspect. Defaults to 100 and is capped at 100.
     #[serde(default)]
     #[schemars(range(min = 1, max = 100))]
     pub max_rows: Option<usize>,
@@ -13,6 +13,8 @@ pub struct QueueControlPreviewRequest {
 pub struct QueueControlApplyRequest {
     pub plan_id: String,
     pub action: QueueControlAction,
+    /// Explicit acknowledgement that this call may mutate one queue job.
+    pub acknowledge_queue_mutation: bool,
 }
 
 #[derive(
@@ -24,6 +26,22 @@ pub enum QueueControlAction {
     Delete,
     Pause,
     Resume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueControlSource {
+    Schedule,
+    CampaignManage,
+}
+
+impl QueueControlSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Schedule => "schedule",
+            Self::CampaignManage => "campaign_manage",
+        }
+    }
 }
 
 impl QueueControlAction {
@@ -41,6 +59,8 @@ impl QueueControlAction {
 pub struct QueueControlCandidate {
     pub plan_id: String,
     pub action: QueueControlAction,
+    pub source: QueueControlSource,
+    pub campaign_id: Option<u64>,
     pub action_label: String,
     pub row_summary: String,
     pub route_fingerprint: String,
@@ -98,6 +118,8 @@ impl QueueControlPreviewReport {
             candidates: vec![QueueControlCandidate {
                 plan_id: "iqc_000000000000000000000000".to_string(),
                 action: QueueControlAction::Cancel,
+                source: QueueControlSource::Schedule,
+                campaign_id: None,
                 action_label: "Cancel".to_string(),
                 row_summary: "Campaign 7 scheduled for later".to_string(),
                 route_fingerprint: "route:000000000000".to_string(),
