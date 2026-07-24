@@ -806,10 +806,7 @@ mod tests {
             Some((Some(0), Some(70)))
         );
         assert_eq!(parse_sent_total("Campaign 2024 of 2025 Complete"), None);
-        assert_eq!(
-            parse_sent_total("In Progress Campaign 2024 of 2025"),
-            None
-        );
+        assert_eq!(parse_sent_total("In Progress Campaign 2024 of 2025"), None);
     }
 
     #[test]
