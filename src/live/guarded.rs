@@ -49,8 +49,8 @@ impl LiveInterspireBackend {
             candidates,
             production_send_authorized: false,
             warnings: vec![
-                "preview only; apply requires INTERSPIRE_GUARDED_WRITES=1 and INTERSPIRE_QUEUE_WRITE_CONTROLS=1".to_string(),
-                "queue controls can cancel/delete/pause/resume scheduled rows only; they do not send, schedule, import, export, or mutate contacts".to_string(),
+                "preview only; apply requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_QUEUE_WRITE_CONTROLS=1, and acknowledge_queue_mutation=true".to_string(),
+                "queue controls can cancel/delete/pause/resume source-bound Schedule or exact Manage immediate-job rows only; they do not send, schedule, import, export, or mutate contacts".to_string(),
             ],
             evidence: Evidence {
                 source: "interspire_admin_html".to_string(),

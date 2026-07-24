@@ -329,13 +329,15 @@ All write paths use the same safety pattern:
 
 ### Queue Controls
 
-Queue apply remains limited to Schedule-page cancel/delete/pause/resume actions.
+Queue apply remains limited to Schedule-page cancel/delete/pause/resume actions
+and exact newsletter Manage `PauseSend`, `ResumeSend`, or `DeleteSend` routes
+for one positive numeric `Job`.
 
-The apply route is limited to Interspire Schedule-page cancel, pause, and
-resume links plus the built-in Schedule delete form for one selected job.
-Plan ids bind the previewed action, numeric row/job identity, route
-fingerprint, and redacted row summary. Post-apply readback requires
-cancel/delete targets to disappear from allowlisted queue controls; pause and
+Plan ids bind the previewed action, source, numeric row/job identity, campaign
+association when available, and stable route fingerprint. They intentionally
+exclude volatile row progress, query order, and CSRF/session values.
+Post-apply readback must be complete across Schedule and Manage:
+cancel/delete targets must disappear from allowlisted queue controls; pause and
 resume must remove the requested action and expose the expected opposite action
 for the same job.
 It does not use Interspire's queue controls to send, schedule, import, export,

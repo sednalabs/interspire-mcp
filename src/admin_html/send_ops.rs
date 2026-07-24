@@ -29,7 +29,9 @@ impl AdminHtmlClient {
         let stats_html = self.get_allowed(&AdminReadPage::Stats.path())?;
         let schedule_rows = parse_table_rows(&schedule_html, max_rows)?;
         let stats_rows = parse_table_rows(&stats_html, max_rows)?;
-        let links = self.load_queue_control_links(max_rows)?.links;
+        let links = self
+            .complete_queue_control_inventory(max_rows, "send job status readback")?
+            .links;
         build_send_job_status_report(request, schedule_rows, stats_rows, links)
     }
 
@@ -251,14 +253,38 @@ fn build_send_job_status_report(
         .iter()
         .filter(|link| link.route.identifier_value == request.expected_job_id)
         .collect::<Vec<_>>();
+    let matching_rows = matching_links
+        .iter()
+        .map(|link| {
+            (
+                link.candidate.source,
+                link.row_ordinal,
+                link.candidate.campaign_id,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if matching_rows.len() > 1 {
+        return Err(InterspireError::Safety(format!(
+            "send job {} appeared on multiple current queue rows; identity is ambiguous",
+            request.expected_job_id
+        )));
+    }
+    let manage_campaign_ids = matching_links
+        .iter()
+        .filter(|link| {
+            link.candidate.source == crate::response::QueueControlSource::CampaignManage
+        })
+        .map(|link| link.candidate.campaign_id)
+        .collect::<BTreeSet<_>>();
+    if !manage_campaign_ids.is_empty()
+        && (manage_campaign_ids.len() != 1 || manage_campaign_ids.contains(&None))
+    {
+        return Err(InterspireError::Safety(format!(
+            "send job {} campaign Manage row did not prove one current campaign identity",
+            request.expected_job_id
+        )));
+    }
     if let Some(expected_campaign_id) = request.expected_campaign_id {
-        let manage_campaign_ids = matching_links
-            .iter()
-            .filter(|link| {
-                link.candidate.source == crate::response::QueueControlSource::CampaignManage
-            })
-            .map(|link| link.candidate.campaign_id)
-            .collect::<BTreeSet<_>>();
         if !manage_campaign_ids.is_empty()
             && manage_campaign_ids != BTreeSet::from([Some(expected_campaign_id)])
         {
@@ -1249,6 +1275,41 @@ mod tests {
         assert!(error
             .to_string()
             .contains("did not prove expected campaign"));
+    }
+
+    #[test]
+    fn duplicate_manage_rows_for_one_job_fail_closed() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 88,
+            expected_campaign_id: None,
+            expected_list_ids: Vec::new(),
+            expected_queue_total: None,
+            expected_body_sha256: None,
+            max_rows: Some(25),
+        };
+        let manage_html = r#"
+            <table>
+              <tr>
+                <td><a href="index.php?Page=Newsletters&Action=Edit&id=44">Edit</a></td>
+                <td><a href="index.php?Page=Send&Action=PauseSend&Job=88">Pause</a></td>
+              </tr>
+              <tr>
+                <td><a href="index.php?Page=Newsletters&Action=Edit&id=45">Edit</a></td>
+                <td><a href="index.php?Page=Send&Action=DeleteSend&Job=88">Delete</a></td>
+              </tr>
+            </table>
+        "#;
+        let links = super::super::parse_queue_control_links(
+            "https://example.test/admin/",
+            manage_html,
+            25,
+            crate::response::QueueControlSource::CampaignManage,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let error = build_send_job_status_report(&request, Vec::new(), Vec::new(), links)
+            .expect_err("duplicate current rows must fail closed");
+        assert!(error.to_string().contains("multiple current queue rows"));
     }
 
     #[test]

@@ -87,6 +87,7 @@ pub struct QueueControlApplyEvidence {
 struct QueueControlLink {
     candidate: QueueControlCandidate,
     route: QueueControlRoute,
+    row_ordinal: usize,
     url: Url,
     execution: QueueControlExecution,
     pause_before_delete: Option<Url>,
@@ -649,7 +650,7 @@ impl AdminHtmlClient {
         self.login()?;
 
         Ok(self
-            .load_queue_control_links(max_rows)?
+            .complete_queue_control_inventory(max_rows, "queue control preview")?
             .links
             .into_iter()
             .map(|link| link.candidate)
@@ -667,7 +668,8 @@ impl AdminHtmlClient {
         }
         self.login()?;
 
-        let before = self.load_queue_control_links(max_rows)?;
+        let before =
+            self.complete_queue_control_inventory(max_rows, "queue control apply pre-read")?;
         let before_candidate_count = before.links.len();
         let selected = before
             .links
@@ -708,8 +710,37 @@ impl AdminHtmlClient {
                     &body,
                     "queue control pause preflight",
                 )?;
+                let paused = self.complete_queue_control_inventory(
+                    max_rows,
+                    "queue control pause preflight readback",
+                )?;
+                let paused_actions = queue_control_target_actions(&selected.route, &paused.links);
+                let paused_sources = queue_control_target_sources(&selected.route, &paused.links);
+                if paused_sources.len() != 1
+                    || !paused_sources.contains(&selected.route.source)
+                {
+                    return Err(InterspireError::Safety(
+                        "queue control pause preflight returned conflicting source evidence; delete was not attempted"
+                            .to_string(),
+                    ));
+                }
+                let pause_still_available = paused
+                    .links
+                    .iter()
+                    .any(|candidate| {
+                        candidate.candidate.action == QueueControlAction::Pause
+                            && same_queue_control_target(&selected.route, &candidate.route)
+                    });
+                if pause_still_available
+                    || !paused_actions.contains(&QueueControlAction::Resume)
+                {
+                    return Err(InterspireError::Safety(
+                        "queue control pause preflight did not prove the same job transitioned to Resume; delete was not attempted"
+                            .to_string(),
+                    ));
+                }
                 notes.push(format!(
-                    "allowlisted Schedule pause preflight returned HTTP {} before delete",
+                    "allowlisted Schedule pause preflight returned HTTP {} and fresh readback proved Resume before delete",
                     pause_status.as_u16()
                 ));
             }
@@ -742,7 +773,8 @@ impl AdminHtmlClient {
             .map_err(|err| InterspireError::Http(err.to_string()))?;
         ensure_queue_control_mutation_response(status, &body, "queue control apply")?;
 
-        let after = self.load_queue_control_links(max_rows)?;
+        let after =
+            self.complete_queue_control_inventory(max_rows, "queue control apply readback")?;
         let before_row_summary = Some(selected.candidate.row_summary.clone());
         let after_matching_action_still_available = after
             .links
@@ -1244,6 +1276,20 @@ impl AdminHtmlClient {
             complete: queue_control_page_is_complete(&schedule_html, max_rows)?
                 && queue_control_page_is_complete(&manage_html, max_rows)?,
         })
+    }
+
+    fn complete_queue_control_inventory(
+        &self,
+        max_rows: usize,
+        operation: &str,
+    ) -> Result<QueueControlInventory, InterspireError> {
+        let inventory = self.load_queue_control_links(max_rows)?;
+        if !inventory.complete {
+            return Err(InterspireError::Safety(format!(
+                "{operation} reached the configured row cap on Schedule or campaign Manage; increase max_rows and preview again"
+            )));
+        }
+        Ok(inventory)
     }
 
     pub(super) fn with_access_headers(&self, request: RequestBuilder) -> RequestBuilder {
@@ -2217,6 +2263,7 @@ fn parse_queue_control_links(
                     requires_guarded_write: true,
                 },
                 route,
+                row_ordinal: inspected_rows,
                 url,
                 execution,
                 pause_before_delete: if route_action == QueueControlAction::Delete {
@@ -2501,7 +2548,7 @@ fn queue_control_page_is_complete(html: &str, max_rows: usize) -> Result<bool, I
             row_text.len() >= 3 && !row_text.eq_ignore_ascii_case("actions")
         })
         .count();
-    Ok(count <= max_rows)
+    Ok(count < max_rows)
 }
 
 fn route_fingerprint(route_key: &str) -> String {
@@ -2597,13 +2644,11 @@ fn queue_control_apply_is_proven(
     after_target_actions: &[QueueControlAction],
     complete_readback: bool,
 ) -> bool {
-    if after_matching_action_still_available {
+    if !complete_readback || after_matching_action_still_available {
         return false;
     }
     match action {
-        QueueControlAction::Cancel | QueueControlAction::Delete => {
-            complete_readback && after_target_actions.is_empty()
-        }
+        QueueControlAction::Cancel | QueueControlAction::Delete => after_target_actions.is_empty(),
         QueueControlAction::Pause => after_target_actions.contains(&QueueControlAction::Resume),
         QueueControlAction::Resume => after_target_actions.contains(&QueueControlAction::Pause),
     }
@@ -5889,6 +5934,12 @@ mod tests {
             &[],
             false
         ));
+        assert!(!queue_control_apply_is_proven(
+            QueueControlAction::Pause,
+            false,
+            &[QueueControlAction::Resume],
+            false
+        ));
     }
 
     #[test]
@@ -5933,7 +5984,8 @@ mod tests {
             </table>
         "#;
         assert!(!queue_control_page_is_complete(html, 1).unwrap_or(false));
-        assert!(queue_control_page_is_complete(html, 2).unwrap_or(false));
+        assert!(!queue_control_page_is_complete(html, 2).unwrap_or(false));
+        assert!(queue_control_page_is_complete(html, 3).unwrap_or(false));
     }
 
     #[test]
