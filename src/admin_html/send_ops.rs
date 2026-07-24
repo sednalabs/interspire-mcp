@@ -557,8 +557,7 @@ fn parse_sent_total(row: &str) -> Option<(Option<u64>, Option<u64>)> {
         let bounded_status = status_prefix.is_empty()
             || status_prefix
                 .rsplit(|ch: char| !ch.is_ascii_alphanumeric())
-                .filter(|token| !token.is_empty())
-                .next()
+                .find(|token| !token.is_empty())
                 .is_some_and(|token| matches!(token, "sending" | "progress"));
         if !bounded_status {
             return None;
@@ -830,10 +829,7 @@ mod tests {
             parse_sent_total("Sending — Sent to 63 / 100"),
             Some((Some(63), Some(100)))
         );
-        assert_eq!(
-            parse_sent_total("Campaign Sent to Market 63 / 100"),
-            None
-        );
+        assert_eq!(parse_sent_total("Campaign Sent to Market 63 / 100"), None);
     }
 
     #[test]

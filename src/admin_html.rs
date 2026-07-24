@@ -2676,7 +2676,8 @@ fn ensure_queue_control_page_identity(
         let Some(target) = target else {
             return false;
         };
-        let Ok(url) = Url::parse("https://example.invalid/admin/").and_then(|base| base.join(target))
+        let Ok(url) =
+            Url::parse("https://example.invalid/admin/").and_then(|base| base.join(target))
         else {
             return false;
         };
@@ -2686,8 +2687,7 @@ fn ensure_queue_control_page_identity(
             }
             QueueControlSource::CampaignManage => matches!(
                 safety::classify_allowed_admin_get(&url),
-                Ok(AdminReadPage::NewslettersManage)
-                    | Ok(AdminReadPage::NewsletterEdit { .. })
+                Ok(AdminReadPage::NewslettersManage) | Ok(AdminReadPage::NewsletterEdit { .. })
             ),
         }
     });
