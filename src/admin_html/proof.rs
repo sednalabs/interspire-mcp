@@ -1511,16 +1511,16 @@ impl AdminHtmlClient {
                                 ));
                             }
                         };
-                        if !approval_html.trim().is_empty() {
-                            if ensure_authenticated_html(&approval_html).is_err() {
-                                return Ok(guarded_send_evidence_from_progress(
-                                    &input,
-                                    progress,
-                                    Some(
-                                        "the schedule continuation could not be authenticated after request dispatch",
-                                    ),
-                                ));
-                            }
+                        if !approval_html.trim().is_empty()
+                            && ensure_authenticated_html(&approval_html).is_err()
+                        {
+                            return Ok(guarded_send_evidence_from_progress(
+                                &input,
+                                progress,
+                                Some(
+                                    "the schedule continuation could not be authenticated after request dispatch",
+                                ),
+                            ));
                         }
                     }
                 }
