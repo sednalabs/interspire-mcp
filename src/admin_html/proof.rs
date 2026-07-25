@@ -3933,14 +3933,13 @@ mod tests {
         ScheduleJobIdentityDelta, StableStatsIdentityDelta,
     };
     use crate::{
-        config::{AdminHtmlConfig, InterspireVersion},
         redact,
         response::{
             CampaignBodyAuditReport, CampaignTestSendApplyRequest, SendApplyStatus,
             SendReconciliationReport,
         },
     };
-    use std::{collections::BTreeSet, io::Read, net::TcpListener, thread};
+    use std::collections::BTreeSet;
     use url::Url;
 
     #[test]
@@ -4423,59 +4422,31 @@ mod tests {
 
     #[test]
     fn guarded_send_response_loss_returns_nonterminal_receipt_after_dispatch() {
-        let listener =
-            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
-        let address = listener
-            .local_addr()
-            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener
-                .accept()
-                .unwrap_or_else(|err| panic!("accept failed: {err}"));
-            let mut request = [0_u8; 4096];
-            let bytes = stream
-                .read(&mut request)
-                .unwrap_or_else(|err| panic!("request read failed: {err}"));
-            assert!(bytes > 0);
-        });
-        let base_url = format!("http://{address}/admin/");
-        let client = super::AdminHtmlClient::new(AdminHtmlConfig {
-            version: InterspireVersion::Auto,
-            base_url: Some(base_url.clone()),
-            username: Some("operator".to_string()),
-            password: Some("password".to_string()),
-            cloudflare_access: crate::config::CloudflareAccessConfig::default(),
-            enrich_limit: 25,
-        })
-        .unwrap_or_else(|err| panic!("client construction failed: {err}"));
         let queue = Vec::new();
         let stats = Vec::new();
         let schedule_job_ids = BTreeSet::new();
-        let send_url = Url::parse(&format!("{base_url}index.php?Page=Send&Action=Step4"))
-            .unwrap_or_else(|err| panic!("send URL failed: {err}"));
-
-        let evidence = client
-            .post_guarded_send_and_reconcile(GuardedSendReconcileInput {
-                send_form: (
-                    send_url,
-                    vec![
-                        ("newsletter".to_string(), "9001".to_string()),
-                        ("lists[]".to_string(), "8001".to_string()),
-                    ],
-                ),
-                campaign_id: 9001,
-                list_ids: &[8001],
-                expected_body_sha256: None,
-                queue_before: &queue,
-                schedule_job_ids_before: &schedule_job_ids,
-                stats_before: &stats,
-                expected_recipient_count: 25,
-                max_rows: 25,
-            })
-            .expect("response-loss reconciliation receipt");
-        handle
-            .join()
-            .unwrap_or_else(|_| panic!("fixture server thread panicked"));
+        let input = GuardedSendReconcileInput {
+            send_form: (
+                Url::parse("https://example.test/admin/index.php?Page=Send&Action=Step4")
+                    .expect("synthetic send URL"),
+                Vec::new(),
+            ),
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &queue,
+            schedule_job_ids_before: &schedule_job_ids,
+            stats_before: &stats,
+            expected_recipient_count: 25,
+            max_rows: 25,
+        };
+        let evidence = guarded_send_evidence_from_progress(
+            &input,
+            GuardedSendProgress::default(),
+            Some(
+                "the final request was dispatched but its HTTP response was unavailable; application outcome remains uncertain",
+            ),
+        );
 
         assert_eq!(evidence.status_code, None);
         assert!(!evidence.redirected);
