@@ -978,14 +978,20 @@ mod tests {
             rows: rows
                 .iter()
                 .enumerate()
-                .map(|(index, (stat_id, recipients))| StatsRowIdentity {
-                    stat_id: *stat_id,
-                    row_ordinal: index + 1,
-                    row_summary: format!(
-                        "Synthetic Stats row {} {} {}",
-                        campaign_label, stat_id, recipients
-                    ),
-                    recipients: *recipients,
+                .map(|(index, (stat_id, recipients))| {
+                    let row_summary = [
+                        "Synthetic Stats row".to_string(),
+                        campaign_label.to_string(),
+                        stat_id.to_string(),
+                        recipients.to_string(),
+                    ]
+                    .join(" ");
+                    StatsRowIdentity {
+                        stat_id: *stat_id,
+                        row_ordinal: index + 1,
+                        row_summary,
+                        recipients: *recipients,
+                    }
                 })
                 .collect(),
         }
