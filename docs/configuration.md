@@ -76,6 +76,11 @@ INTERSPIRE_OCI_SEND_LEDGER_PATH=/secure/private/oci-send-ledger.jsonl
 
 Current public behavior:
 
+- `interspire_status` reports
+  `guarded_send_dispatch_available=false` for the current admin HTML adapter,
+  even when send-control flags are enabled. Its warning explains that those
+  flags permit authority evaluation but do not supply the authenticated atomic
+  state binding required for dispatch.
 - `INTERSPIRE_QUEUE_WRITE_CONTROLS=1` enables guarded queue
   cancel/delete/pause/resume apply. Each apply also requires
   `acknowledge_queue_mutation=true`.

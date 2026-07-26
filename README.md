@@ -224,9 +224,12 @@ First smoke test: call `interspire_status`. A healthy default posture should
 report configured read capabilities, `safe_mode: true`,
 `guarded_writes_enabled: false`, and `queue_controls_enabled: false`.
 For a default runtime it should also report `form_write_controls_enabled: false`
-and `write_execution_mode: "preview_apply"`. If the Interspire admin or XML API
-is behind Cloudflare Access, `cloudflare_access_configured: true` confirms that
-the service-token header values were loaded without revealing those values.
+and `write_execution_mode: "preview_apply"`. The current adapter always reports
+`guarded_send_dispatch_available: false` and a warning that send-control flags
+permit authority evaluation but do not supply the missing authenticated atomic
+state binding or enable dispatch. If the Interspire admin or XML API is behind
+Cloudflare Access, `cloudflare_access_configured: true` confirms that the
+service-token header values were loaded without revealing those values.
 Then call `interspire_xml_auth_probe`. It uses Interspire's
 `authentication/XmlApiTest` route and performs no list, contact, queue, form,
 or send action. A `xml_auth_error` means the XML username, XML token, XML API
@@ -536,7 +539,9 @@ does not authorize dispatch.
 The native-bound reconciliation seam remains fail-closed for future work and
 for synthetic regression proof. If a reviewed atomic binding later permits a
 dispatch, only a positive job id carried by that invocation's native response
-or popup continuation can bind job context. Schedule/Manage singleton
+or popup continuation can bind job context. Every identity alias present on a
+popup continuation must parse as the same positive job id; conflicting,
+non-numeric, or zero aliases refuse the route. Schedule/Manage singleton
 differences, campaign association, Stats changes, labels, counts, timing, and
 row order remain diagnostic and never create request/job identity.
 

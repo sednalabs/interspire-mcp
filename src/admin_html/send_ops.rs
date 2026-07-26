@@ -982,7 +982,8 @@ mod tests {
                     stat_id: *stat_id,
                     row_ordinal: index + 1,
                     row_summary: format!(
-                        "Synthetic Stats row {campaign_label} {stat_id} {recipients}"
+                        "Synthetic Stats row {} {} {}",
+                        campaign_label, stat_id, recipients
                     ),
                     recipients: *recipients,
                 })

@@ -3990,16 +3990,7 @@ fn validate_guarded_send_baseline_context(
 }
 
 fn send_popup_job_id(url: &Url) -> Option<u64> {
-    for key in ["job", "Job", "jobid", "JobID", "id", "sendid", "SendID"] {
-        if let Some(value) = url
-            .query_pairs()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
-            .and_then(|(_, value)| value.as_ref().parse::<u64>().ok())
-        {
-            return Some(value);
-        }
-    }
-    None
+    safety::guarded_send_popup_job_id(url).ok()
 }
 
 fn seed_send_apply_warnings(reconciliation: &SendReconciliationReport) -> Vec<String> {

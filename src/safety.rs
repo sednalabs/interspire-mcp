@@ -864,16 +864,7 @@ pub fn classify_allowed_guarded_send_popup(url: &Url) -> Result<(), InterspireEr
         )));
     }
 
-    let has_numeric_job = ["job", "jobid", "id", "sendid"].iter().any(|key| {
-        query_value(&pairs, key)
-            .as_deref()
-            .is_some_and(|value| value.parse::<u64>().is_ok())
-    });
-    if !has_numeric_job {
-        return Err(InterspireError::Safety(
-            "guarded send popup route missing numeric job identifier".to_string(),
-        ));
-    }
+    guarded_send_popup_job_id_from_pairs(&pairs)?;
     if let Some(started) = query_value(&pairs, "Started").or_else(|| query_value(&pairs, "started"))
     {
         if !matches!(started.as_str(), "0" | "1") {
@@ -884,6 +875,11 @@ pub fn classify_allowed_guarded_send_popup(url: &Url) -> Result<(), InterspireEr
     }
 
     Ok(())
+}
+
+pub fn guarded_send_popup_job_id(url: &Url) -> Result<u64, InterspireError> {
+    classify_allowed_guarded_send_popup(url)?;
+    guarded_send_popup_job_id_from_pairs(&url.query_pairs().collect::<Vec<_>>())
 }
 
 pub fn classify_allowed_guarded_schedule_approval(url: &Url) -> Result<(), InterspireError> {
@@ -1473,6 +1469,48 @@ fn query_value(
         .map(|(_, value)| value.to_string())
 }
 
+fn guarded_send_popup_job_id_from_pairs(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+) -> Result<u64, InterspireError> {
+    let aliases = ["job", "jobid", "id", "sendid"];
+    let mut identities = pairs
+        .iter()
+        .filter(|(key, _)| aliases.iter().any(|alias| key.eq_ignore_ascii_case(alias)))
+        .map(|(_, value)| {
+            value.parse::<u64>().map_err(|_| {
+                InterspireError::Safety(
+                    "guarded send popup job identifier must be a positive integer".to_string(),
+                )
+            })
+        });
+
+    let first = identities.next().transpose()?.ok_or_else(|| {
+        InterspireError::Safety(
+            "guarded send popup route missing numeric job identifier".to_string(),
+        )
+    })?;
+    if first == 0 {
+        return Err(InterspireError::Safety(
+            "guarded send popup job identifier must be a positive integer".to_string(),
+        ));
+    }
+    for identity in identities {
+        let identity = identity?;
+        if identity == 0 {
+            return Err(InterspireError::Safety(
+                "guarded send popup job identifier must be a positive integer".to_string(),
+            ));
+        }
+        if identity != first {
+            return Err(InterspireError::Safety(
+                "guarded send popup route exposed conflicting job identifiers".to_string(),
+            ));
+        }
+    }
+
+    Ok(first)
+}
+
 fn subscriber_search_list_id(
     pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
 ) -> Result<u64, InterspireError> {
@@ -1990,12 +2028,30 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("{err}"));
         assert!(popup.as_str().contains("Action=Send"));
+        assert_eq!(
+            guarded_send_popup_job_id(&popup).unwrap_or_else(|err| panic!("{err}")),
+            2
+        );
+
+        let consistent_aliases = ensure_allowed_guarded_send_popup(
+            base_url,
+            "index.php?Page=Send&Action=Send&Job=2&id=2",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            guarded_send_popup_job_id(&consistent_aliases)
+                .unwrap_or_else(|err| panic!("{err}")),
+            2
+        );
 
         for path in [
             "index.php?Page=Send&Action=Send",
             "index.php?Page=Send&Action=Step4&Job=2",
             "index.php?Page=Schedule&Action=Send&Job=2",
             "index.php?Page=Send&Action=Send&Job=abc",
+            "index.php?Page=Send&Action=Send&Job=2&id=3",
+            "index.php?Page=Send&Action=Send&Job=2&id=abc",
+            "index.php?Page=Send&Action=Send&Job=0",
             "index.php?Page=Send&Action=Send&Job=2&Started=maybe",
             "cron/index.php?Page=Send&Action=Send&Job=2",
         ] {

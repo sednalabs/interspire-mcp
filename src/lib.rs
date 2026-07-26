@@ -25,11 +25,13 @@
 //! * Allows queue cancel/delete/pause/resume plus guarded campaign/list/user/settings edits
 //!   only through deterministic preview/apply plan ids and explicit runtime
 //!   write flags.
-//! * Allows a guarded seed-send apply tool only when send controls are
-//!   explicitly enabled and the immediate seed-readiness proof passes.
-//! * Allows a guarded production-send apply tool only when production send
-//!   controls are explicitly enabled and the strict immediate readiness proof
-//!   plus confirmation phrase pass.
+//! * Allows guarded seed-send authority evaluation only when send controls are
+//!   explicitly enabled and the immediate seed-readiness proof passes; those
+//!   flags do not establish dispatch authority.
+//! * Allows guarded production-send authority evaluation only when production
+//!   send controls are explicitly enabled and the strict immediate readiness
+//!   proof plus confirmation phrase pass; the current admin HTML adapter still
+//!   refuses dispatch because it has no authenticated atomic state binding.
 //! * Redacts credentials, cookies, raw contacts, private headers, SMTP secrets,
 //!   bounce secrets, and license values from tool output.
 //!

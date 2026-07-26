@@ -9,9 +9,11 @@
 //!
 //! * Writes are disabled by default.
 //! * Queue controls require both global guarded writes and queue controls.
-//! * Seed sends require both global guarded writes and send controls.
-//! * Production sends require global guarded writes, send controls, and
-//!   production-send controls.
+//! * Seed-send authority evaluation requires both global guarded writes and
+//!   send controls; those flags do not establish dispatch authority.
+//! * Production-send authority evaluation also requires production-send
+//!   controls; the current admin HTML adapter still refuses dispatch because
+//!   it has no authenticated atomic state binding.
 //! * Plan ids are bound to a current Interspire admin row and action route.
 //! * This module does not expose schedule, generic send, contact, suppression,
 //!   import, provider, DNS, or credential mutation helpers.
@@ -75,7 +77,7 @@ pub fn require_send_controls_enabled(config: &GuardedWriteConfig) -> Result<(), 
     }
     if !config.send_controls_enabled {
         return Err(InterspireError::Safety(
-            "send controls are disabled; set INTERSPIRE_SEND_CONTROLS=1 to allow seed send apply tools"
+            "send controls are disabled; INTERSPIRE_SEND_CONTROLS=1 is required for seed-send authority evaluation but does not establish atomic dispatch authority"
                 .to_string(),
         ));
     }
@@ -88,7 +90,7 @@ pub fn require_production_send_controls_enabled(
     require_send_controls_enabled(config)?;
     if !config.production_send_controls_enabled {
         return Err(InterspireError::Safety(
-            "production send controls are disabled; set INTERSPIRE_PRODUCTION_SEND_CONTROLS=1 to allow production send apply tools"
+            "production send controls are disabled; INTERSPIRE_PRODUCTION_SEND_CONTROLS=1 is required for production-send authority evaluation but does not establish atomic dispatch authority"
                 .to_string(),
         ));
     }

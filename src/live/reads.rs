@@ -75,6 +75,10 @@ impl LiveInterspireBackend {
                     .to_string(),
             );
         }
+        warnings.push(
+            "guarded send dispatch is unavailable: the current admin HTML adapter exposes no authenticated atomic state binding; send-control flags permit authority evaluation but do not authorize or enable dispatch"
+                .to_string(),
+        );
 
         Ok(StatusReport {
             ok: true,
@@ -97,6 +101,7 @@ impl LiveInterspireBackend {
                 .config
                 .guarded_writes
                 .production_send_controls_enabled,
+            guarded_send_dispatch_available: false,
             oci_send_ledger_configured: self
                 .config
                 .oci_send_ledger
@@ -118,8 +123,8 @@ impl LiveInterspireBackend {
                     "admin HTML fallback is limited to login plus explicitly allowlisted GET read pages".to_string(),
                     "send wizard proof is limited to an allowlisted no-send Step2 render and queue/stat invariant readback".to_string(),
                     "campaign render artifacts write private local preview files for native-browser screenshots; they do not mutate Interspire".to_string(),
-                    "seed send apply tools are disabled unless guarded write and send-control environment flags are explicitly enabled".to_string(),
-                    "production send apply tools are disabled unless guarded write, send-control, and production-send-control environment flags are explicitly enabled".to_string(),
+                    "seed-send authority evaluation is disabled unless guarded write and send-control environment flags are explicitly enabled; those flags do not establish dispatch authority".to_string(),
+                    "production-send authority evaluation is disabled unless guarded write, send-control, and production-send-control environment flags are explicitly enabled; those flags do not establish dispatch authority".to_string(),
                     "OCI send-ledger preflight is enforced before guarded send apply only when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1".to_string(),
                     "audience hygiene export writes private local artifacts only and returns aggregate metadata".to_string(),
                     "queue control apply tools are disabled unless guarded write environment flags are explicitly enabled".to_string(),
@@ -738,9 +743,11 @@ fn contact_state_evidence_source(xml_configured: bool, html_configured: bool) ->
 mod tests {
     use super::{
         combined_contact_state_outcome, contact_state_outcome, ContactStateRequest,
-        LiveInterspireBackend,
+        LiveInterspireBackend, StatusRequest,
     };
-    use crate::config::{CloudflareAccessConfig, InterspireServerConfig, XmlApiConfig};
+    use crate::config::{
+        CloudflareAccessConfig, GuardedWriteConfig, InterspireServerConfig, XmlApiConfig,
+    };
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -795,6 +802,33 @@ mod tests {
         assert_eq!(outcome.state, "not_found_on_list_uncorroborated");
         assert_eq!(outcome.found_on_list, None);
         assert_eq!(outcome.confidence, "low_absence");
+    }
+
+    #[test]
+    fn status_never_reports_send_flags_as_dispatch_readiness() {
+        let backend = LiveInterspireBackend::new(InterspireServerConfig {
+            guarded_writes: GuardedWriteConfig {
+                enabled: true,
+                send_controls_enabled: true,
+                production_send_controls_enabled: true,
+                ..GuardedWriteConfig::default()
+            },
+            ..InterspireServerConfig::default()
+        });
+
+        let report = backend
+            .status_impl(&StatusRequest {
+                include_html_probe: false,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.send_controls_enabled);
+        assert!(report.production_send_controls_enabled);
+        assert!(!report.guarded_send_dispatch_available);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no authenticated atomic state binding")));
     }
 
     #[test]
