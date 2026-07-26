@@ -1970,6 +1970,18 @@
               "integer",
               "null"
             ]
+          },
+          "stats_baseline_ids": {
+            "default": null,
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           }
         },
         "required": [

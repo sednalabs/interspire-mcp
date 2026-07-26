@@ -16,6 +16,8 @@ pub struct SendJobStatusReadbackRequest {
     #[serde(default)]
     pub expected_body_sha256: Option<String>,
     #[serde(default)]
+    pub stats_baseline_ids: Option<Vec<u64>>,
+    #[serde(default)]
     #[schemars(range(min = 1, max = 100))]
     pub max_rows: Option<usize>,
 }
@@ -27,6 +29,7 @@ pub struct SendJobFollowUpContract {
     pub list_ids: Vec<u64>,
     pub expected_queue_total: u64,
     pub body_sha256: Option<String>,
+    pub stats_baseline_ids: Vec<u64>,
     pub status_tool: String,
 }
 
@@ -44,8 +47,14 @@ impl SendJobFollowUpContract {
             list_ids,
             expected_queue_total,
             body_sha256,
+            stats_baseline_ids: Vec::new(),
             status_tool: "interspire_send_job_status_readback".to_string(),
         }
+    }
+
+    pub fn with_stats_baseline(mut self, stats_baseline_ids: Vec<u64>) -> Self {
+        self.stats_baseline_ids = stats_baseline_ids;
+        self
     }
 }
 
@@ -54,6 +63,7 @@ pub struct SendJobStatusReadbackReport {
     pub ok: bool,
     pub configured: bool,
     pub identity_verified: bool,
+    pub terminal_application_proven: bool,
     pub job_id: u64,
     pub campaign_id: Option<u64>,
     pub list_ids: Vec<u64>,
@@ -89,6 +99,8 @@ pub struct SendJobActionPlan {
 pub struct SendJobStatsState {
     pub matched_rows: usize,
     pub row_summaries: Vec<String>,
+    pub stat_id: Option<u64>,
+    pub identity_verified: bool,
     pub sent_count: Option<u64>,
     pub failed_count: Option<u64>,
     pub state: String,
@@ -189,6 +201,7 @@ impl SendJobStatusReadbackReport {
             ok: true,
             configured: true,
             identity_verified: true,
+            terminal_application_proven: false,
             job_id: 13,
             campaign_id: Some(2),
             list_ids: vec![12],
@@ -209,6 +222,8 @@ impl SendJobStatusReadbackReport {
             stats: SendJobStatsState {
                 matched_rows: 0,
                 row_summaries: Vec::new(),
+                stat_id: None,
+                identity_verified: false,
                 sent_count: None,
                 failed_count: None,
                 state: "pending".to_string(),

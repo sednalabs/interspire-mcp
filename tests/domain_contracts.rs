@@ -827,6 +827,7 @@ fn send_job_status_readback_contract_is_structured_and_redacted() {
             expected_body_sha256: Some(
                 "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             ),
+            stats_baseline_ids: None,
             max_rows: Some(25),
         })
         .unwrap_or_else(|err| panic!("{err}"));

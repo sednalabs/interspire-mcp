@@ -338,16 +338,28 @@ Schedule and Stats. `sent=true` is reserved for terminal reconciliation states,
 not for HTTP 200 or 302 alone.
 
 Queued-not-proven sends may include a `follow_up_contract` with the Interspire
-job id, campaign id, list ids, expected queue total, and the
-`interspire_send_job_status_readback` tool name. That status tool reads only
-allowlisted Schedule, newsletter Manage, and Stats pages, returns redacted row summaries and
-progress counters when Interspire exposes them, and explicitly marks direct
-queue-table, jobs-list, stats-table, and unsent-reason aggregates as unavailable
-unless a future reviewed source is added. Stats rows are historical aggregate
-context only: recipient-count equality, uniqueness, campaign-like numeric text,
-or incidental job-id text never proves current job identity after the queue
-action disappears. The tool must not fabricate processed counts or unsent
-reasons from provider silence.
+job id, campaign id, list ids, expected queue total, bounded Stats identity
+baseline, and the `interspire_send_job_status_readback` tool name. That status
+tool reads only allowlisted Schedule, newsletter Manage, Stats, and expected
+campaign edit pages. The same positive job may be normalized across one bounded
+row on each active source when the Manage row proves the intended campaign. A
+Schedule-only singleton discovered after an apply cannot create job identity
+unless popup evidence already agrees or the bounded Manage inventory supplies
+that campaign association.
+
+Historical Stats row text, recipient-count equality, dates, campaign-like
+numeric text, and incidental job-id text never prove current job identity.
+Terminal application proof requires the active job actions to be absent plus
+exactly one new positive Stats route identity relative to the complete bounded
+baseline, no removed identity, the authoritative expected recipient total, and
+a domain-separated campaign-name identity matching a fresh read of the expected
+campaign edit form. The derived identity does not return the raw name; existing
+redacted row summaries remain bounded evidence. Exact list scope and body hashes
+remain caller-bound context because these admin pages do not re-prove them.
+Ambiguous, malformed, capped, paginated, campaign-mismatched, or
+response-uncertain evidence remains nonterminal. Direct queue-table and
+unsent-reason aggregates remain unavailable; the tool must not fabricate them
+or derive outcomes from provider silence.
 
 `interspire_cron_readiness` is also read-only. It compares cron settings with
 Schedule-page cron detection text but does not request `cron.php`.

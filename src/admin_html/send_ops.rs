@@ -1,4 +1,8 @@
-use super::{admin_evidence, compact_text, parse_table_rows, AdminHtmlClient, QueueControlLink};
+use super::{
+    admin_evidence, compact_text, parse_table_rows,
+    stats_identity::{parse_stats_identity_inventory, StatsIdentityInventory},
+    AdminHtmlClient, QueueControlLink,
+};
 use crate::{
     config::OciSendLedgerConfig,
     error::InterspireError,
@@ -19,6 +23,7 @@ impl AdminHtmlClient {
         &self,
         request: &SendJobStatusReadbackRequest,
     ) -> Result<SendJobStatusReadbackReport, InterspireError> {
+        validate_send_job_status_request(request)?;
         if !self.configured() {
             return Ok(send_job_status_not_configured(request));
         }
@@ -29,10 +34,26 @@ impl AdminHtmlClient {
         let stats_html = self.get_allowed(&AdminReadPage::Stats.path())?;
         let schedule_rows = parse_table_rows(&schedule_html, max_rows)?;
         let stats_rows = parse_table_rows(&stats_html, max_rows)?;
+        let stats_identity = parse_stats_identity_inventory(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &stats_html,
+            max_rows,
+        )?;
+        let expected_stats_campaign_identity = request
+            .expected_campaign_id
+            .map(|campaign_id| self.campaign_name_identity(campaign_id))
+            .transpose()?;
         let links = self
             .complete_queue_control_inventory(max_rows, "send job status readback")?
             .links;
-        build_send_job_status_report(request, schedule_rows, stats_rows, links)
+        build_send_job_status_report_with_stats_identity(
+            request,
+            schedule_rows,
+            stats_rows,
+            stats_identity,
+            expected_stats_campaign_identity,
+            links,
+        )
     }
 
     pub fn cron_readiness(
@@ -155,6 +176,7 @@ impl AdminHtmlClient {
             expected_list_ids: request.expected_list_ids.clone(),
             expected_queue_total: request.expected_queue_total,
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: request.max_rows,
         };
         let interspire_status = self.send_job_status_readback(&status_request)?;
@@ -243,31 +265,82 @@ impl AdminHtmlClient {
     }
 }
 
+#[cfg(test)]
 fn build_send_job_status_report(
     request: &SendJobStatusReadbackRequest,
     schedule_rows: Vec<String>,
     stats_rows: Vec<String>,
     links: Vec<QueueControlLink>,
 ) -> Result<SendJobStatusReadbackReport, InterspireError> {
+    build_send_job_status_report_with_stats_identity(
+        request,
+        schedule_rows,
+        stats_rows,
+        StatsIdentityInventory { rows: Vec::new() },
+        None,
+        links,
+    )
+}
+
+fn validate_send_job_status_request(
+    request: &SendJobStatusReadbackRequest,
+) -> Result<(), InterspireError> {
+    if request.expected_job_id == 0 {
+        return Err(InterspireError::Safety(
+            "send job status requires a positive expected job identity".to_string(),
+        ));
+    }
+    if request.expected_campaign_id == Some(0) {
+        return Err(InterspireError::Safety(
+            "send job status requires a positive expected campaign identity".to_string(),
+        ));
+    }
+    let list_ids = request
+        .expected_list_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if list_ids.len() != request.expected_list_ids.len() || list_ids.contains(&0) {
+        return Err(InterspireError::Safety(
+            "send job status list context requires unique positive identities".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn build_send_job_status_report_with_stats_identity(
+    request: &SendJobStatusReadbackRequest,
+    schedule_rows: Vec<String>,
+    stats_rows: Vec<String>,
+    stats_identity: StatsIdentityInventory,
+    expected_stats_campaign_identity: Option<String>,
+    links: Vec<QueueControlLink>,
+) -> Result<SendJobStatusReadbackReport, InterspireError> {
+    validate_send_job_status_request(request)?;
     let matching_links = links
         .iter()
         .filter(|link| link.route.identifier_value == request.expected_job_id)
         .collect::<Vec<_>>();
     let matching_rows = matching_links
         .iter()
-        .map(|link| {
-            (
-                link.candidate.source,
-                link.row_ordinal,
-                link.candidate.campaign_id,
-            )
-        })
+        .map(|link| (link.candidate.source, link.row_ordinal))
         .collect::<BTreeSet<_>>();
-    if matching_rows.len() > 1 {
-        return Err(InterspireError::Safety(format!(
-            "send job {} appeared on multiple current queue rows; identity is ambiguous",
-            request.expected_job_id
-        )));
+    for source in [
+        crate::response::QueueControlSource::Schedule,
+        crate::response::QueueControlSource::CampaignManage,
+    ] {
+        if matching_rows
+            .iter()
+            .filter(|(candidate_source, _)| *candidate_source == source)
+            .count()
+            > 1
+        {
+            return Err(InterspireError::Safety(format!(
+                "send job {} appeared on multiple current {} rows; identity is ambiguous",
+                request.expected_job_id,
+                source.as_str()
+            )));
+        }
     }
     let manage_campaign_ids = matching_links
         .iter()
@@ -325,22 +398,23 @@ fn build_send_job_status_report(
         .iter()
         .map(|link| link.candidate.source)
         .collect::<BTreeSet<_>>();
-    if matching_sources.len() > 1 {
-        return Err(InterspireError::Safety(format!(
-            "send job {} exposed queue controls on conflicting Schedule and campaign Manage sources",
-            request.expected_job_id
-        )));
-    }
-    let queue_source = matching_sources
-        .iter()
-        .next()
-        .map(|source| format!("admin_html_{}", source.as_str()))
-        .unwrap_or_else(|| "admin_html_unproven".to_string());
+    let active_queue_source = match matching_sources.len() {
+        0 => "admin_html_unproven".to_string(),
+        1 => format!(
+            "admin_html_{}",
+            matching_sources
+                .iter()
+                .next()
+                .map(|source| source.as_str())
+                .unwrap_or("unproven")
+        ),
+        _ => "admin_html_schedule_manage".to_string(),
+    };
     if let (Some(expected), Some(actual)) = (request.expected_queue_total, schedule_total) {
         if expected != actual {
             return Err(InterspireError::Safety(format!(
                 "send job {} expected queue total {expected} but {} shows {actual}",
-                request.expected_job_id, queue_source
+                request.expected_job_id, active_queue_source
             )));
         }
     }
@@ -354,21 +428,50 @@ fn build_send_job_status_report(
     let stats_row_has_incidental_job_id = stats_matches
         .iter()
         .any(|row| row_mentions_id(row, request.expected_job_id));
-    // Stats rows do not carry the current queue job identity. Keep their
-    // redacted rows/count-shape as ambiguity context, but never project their
-    // counters onto the current job or stop-gate calculation.
-    let stats_sent = None;
+    let stats_baseline = validated_stats_baseline(request)?;
+    let current_stats_ids = stats_identity.ids();
+    let terminal_stats_row = stats_baseline.as_ref().and_then(|baseline| {
+        let added = stats_identity
+            .rows
+            .iter()
+            .filter(|row| !baseline.contains(&row.stat_id))
+            .collect::<Vec<_>>();
+        let removed = baseline.difference(&current_stats_ids).count();
+        match (added.as_slice(), removed) {
+            ([row], 0)
+                if matching_links.is_empty()
+                    && request.expected_campaign_id.is_some()
+                    && !request.expected_list_ids.is_empty()
+                    && expected_stats_campaign_identity
+                        .as_ref()
+                        .is_some_and(|expected| row.campaign_identity == *expected)
+                    && request
+                        .expected_queue_total
+                        .is_some_and(|expected| row.recipients == expected) =>
+            {
+                Some(*row)
+            }
+            _ => None,
+        }
+    });
+    let terminal_application_proven = terminal_stats_row.is_some();
+    let stats_sent = terminal_stats_row.map(|row| row.recipients);
     let stats_failed = None;
 
-    let total = schedule_total;
-    let processed = schedule_sent;
+    let total = schedule_total.or_else(|| terminal_stats_row.map(|row| row.recipients));
+    let processed = schedule_sent.or(stats_sent);
     let unprocessed = match (total, processed) {
         (Some(total), Some(processed)) if total >= processed => Some(total - processed),
         _ => None,
     };
-    let identity_verified = !matching_links.is_empty();
+    let identity_verified = !matching_links.is_empty() || terminal_application_proven;
     let proven_manage_campaign_id = manage_campaign_ids.iter().flatten().next().copied();
     let campaign_id = request.expected_campaign_id.or(proven_manage_campaign_id);
+    let queue_source = if terminal_application_proven {
+        "admin_html_stats_follow_up".to_string()
+    } else {
+        active_queue_source
+    };
     let mut warnings = Vec::new();
     if !identity_verified {
         warnings.push(format!(
@@ -376,13 +479,22 @@ fn build_send_job_status_report(
             request.expected_job_id
         ));
     }
+    if matching_sources.len() > 1 {
+        warnings.push(
+            "the same positive job identity was normalized across bounded Schedule and campaign Manage rows"
+                .to_string(),
+        );
+    }
     if !row_summaries.is_empty() && !identity_verified {
         warnings.push(
             "Schedule page text mentioned the expected job id, but this was treated as weak context rather than identity proof"
                 .to_string(),
         );
     }
-    if request.expected_queue_total.is_some() && schedule_total.is_none() {
+    if request.expected_queue_total.is_some()
+        && schedule_total.is_none()
+        && !terminal_application_proven
+    {
         warnings.push(
             "expected queue total was supplied by caller but not proven by the current queue-control row"
                 .to_string(),
@@ -405,7 +517,7 @@ fn build_send_job_status_report(
                 .to_string(),
         );
     }
-    if !stats_matches.is_empty() {
+    if !stats_matches.is_empty() && !terminal_application_proven {
         warnings.push(
             "Stats rows are historical aggregate context only and were not used to prove current job identity"
                 .to_string(),
@@ -429,18 +541,27 @@ fn build_send_job_status_report(
     );
 
     let follow_up_contract = match (
-        identity_verified,
+        !matching_links.is_empty(),
         request.expected_job_id,
         campaign_id,
         total,
     ) {
-        (true, job_id, Some(campaign_id), Some(total)) => Some(SendJobFollowUpContract::new(
-            job_id,
-            campaign_id,
-            request.expected_list_ids.clone(),
-            total,
-            request.expected_body_sha256.clone(),
-        )),
+        (true, job_id, Some(campaign_id), Some(total)) => Some(
+            SendJobFollowUpContract::new(
+                job_id,
+                campaign_id,
+                request.expected_list_ids.clone(),
+                total,
+                request.expected_body_sha256.clone(),
+            )
+            .with_stats_baseline(
+                stats_baseline
+                    .clone()
+                    .unwrap_or_else(|| current_stats_ids.clone())
+                    .into_iter()
+                    .collect(),
+            ),
+        ),
         _ => None,
     };
 
@@ -448,6 +569,7 @@ fn build_send_job_status_report(
         ok: identity_verified,
         configured: true,
         identity_verified,
+        terminal_application_proven,
         job_id: request.expected_job_id,
         campaign_id,
         list_ids: request.expected_list_ids.clone(),
@@ -462,11 +584,17 @@ fn build_send_job_status_report(
             state: schedule_state(schedule_sent, schedule_total),
         },
         stats: SendJobStatsState {
-            matched_rows: stats_matches.len(),
-            row_summaries: stats_matches,
+            matched_rows: terminal_stats_row.map_or(stats_matches.len(), |_| 1),
+            row_summaries: terminal_stats_row
+                .map(|row| vec![row.row_summary.clone()])
+                .unwrap_or(stats_matches),
+            stat_id: terminal_stats_row.map(|row| row.stat_id),
+            identity_verified: terminal_application_proven,
             sent_count: stats_sent,
             failed_count: stats_failed,
-            state: if stats_sent.is_some() || stats_failed.is_some() || !stats_counts.is_empty() {
+            state: if terminal_application_proven {
+                "terminal".to_string()
+            } else if stats_sent.is_some() || stats_failed.is_some() || !stats_counts.is_empty() {
                 "ambiguous".to_string()
             } else {
                 "pending".to_string()
@@ -477,10 +605,17 @@ fn build_send_job_status_report(
             total,
             processed,
             unprocessed,
-            unavailable_reason: Some(
-                "authoritative queue-table processed flags require a reviewed private table source"
-                    .to_string(),
-            ),
+            unavailable_reason: if terminal_application_proven {
+                Some(
+                    "terminal aggregate counts came from the bound Stats row; direct queue-table processed flags remain unavailable"
+                        .to_string(),
+                )
+            } else {
+                Some(
+                    "authoritative queue-table processed flags require a reviewed private table source"
+                        .to_string(),
+                )
+            },
         },
         unsent_reason_aggregates: Vec::new(),
         follow_up_contract,
@@ -500,6 +635,7 @@ fn send_job_status_not_configured(
         ok: true,
         configured: false,
         identity_verified: false,
+        terminal_application_proven: false,
         job_id: request.expected_job_id,
         campaign_id: request.expected_campaign_id,
         list_ids: request.expected_list_ids.clone(),
@@ -516,6 +652,8 @@ fn send_job_status_not_configured(
         stats: SendJobStatsState {
             matched_rows: 0,
             row_summaries: Vec::new(),
+            stat_id: None,
+            identity_verified: false,
             sent_count: None,
             failed_count: None,
             state: "not_configured".to_string(),
@@ -663,6 +801,26 @@ fn matching_stats_rows(
         .collect()
 }
 
+fn validated_stats_baseline(
+    request: &SendJobStatusReadbackRequest,
+) -> Result<Option<BTreeSet<u64>>, InterspireError> {
+    let Some(ids) = request.stats_baseline_ids.as_ref() else {
+        return Ok(None);
+    };
+    if ids.len() > 100 {
+        return Err(InterspireError::Safety(
+            "Stats baseline exceeds the bounded identity limit".to_string(),
+        ));
+    }
+    let baseline = ids.iter().copied().collect::<BTreeSet<_>>();
+    if baseline.len() != ids.len() || baseline.contains(&0) {
+        return Err(InterspireError::Safety(
+            "Stats baseline requires unique positive identities".to_string(),
+        ));
+    }
+    Ok(Some(baseline))
+}
+
 fn oci_preflight_blocks_send(oci: &OciLedgerPreflightReport) -> bool {
     !oci.verified && (oci.requested || oci.required)
 }
@@ -795,7 +953,28 @@ fn contains_cron_negative_phrase(lower_schedule_text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::stats_identity::{campaign_label_identity, StatsRowIdentity};
     use super::*;
+
+    fn stats_inventory(rows: &[(u64, u64)]) -> StatsIdentityInventory {
+        stats_inventory_for("Campaign Alpha", rows)
+    }
+
+    fn stats_inventory_for(campaign_label: &str, rows: &[(u64, u64)]) -> StatsIdentityInventory {
+        StatsIdentityInventory {
+            rows: rows
+                .iter()
+                .enumerate()
+                .map(|(index, (stat_id, recipients))| StatsRowIdentity {
+                    stat_id: *stat_id,
+                    row_ordinal: index + 1,
+                    row_summary: format!("Synthetic Stats row {stat_id} {recipients}"),
+                    campaign_identity: campaign_label_identity(campaign_label),
+                    recipients: *recipients,
+                })
+                .collect(),
+        }
+    }
 
     #[test]
     fn parses_sent_total_from_interspire_progress_text() {
@@ -969,6 +1148,7 @@ mod tests {
             expected_list_ids: vec![12],
             expected_queue_total: Some(100),
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let err = build_send_job_status_report(
@@ -982,6 +1162,42 @@ mod tests {
     }
 
     #[test]
+    fn send_job_status_requires_positive_unique_identity_context() {
+        let baseline = SendJobStatusReadbackRequest {
+            expected_job_id: 13,
+            expected_campaign_id: Some(2),
+            expected_list_ids: vec![12],
+            expected_queue_total: Some(100),
+            expected_body_sha256: None,
+            stats_baseline_ids: None,
+            max_rows: Some(25),
+        };
+
+        for request in [
+            SendJobStatusReadbackRequest {
+                expected_job_id: 0,
+                ..baseline.clone()
+            },
+            SendJobStatusReadbackRequest {
+                expected_campaign_id: Some(0),
+                ..baseline.clone()
+            },
+            SendJobStatusReadbackRequest {
+                expected_list_ids: vec![0],
+                ..baseline.clone()
+            },
+            SendJobStatusReadbackRequest {
+                expected_list_ids: vec![12, 12],
+                ..baseline.clone()
+            },
+        ] {
+            assert!(
+                build_send_job_status_report(&request, Vec::new(), Vec::new(), Vec::new()).is_err()
+            );
+        }
+    }
+
+    #[test]
     fn weak_schedule_text_does_not_verify_identity_or_follow_up_contract() {
         let request = SendJobStatusReadbackRequest {
             expected_job_id: 13,
@@ -989,6 +1205,7 @@ mod tests {
             expected_list_ids: vec![12],
             expected_queue_total: Some(100),
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let report = build_send_job_status_report(
@@ -1016,6 +1233,7 @@ mod tests {
             expected_list_ids: Vec::new(),
             expected_queue_total: None,
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let rows = vec![
@@ -1036,6 +1254,7 @@ mod tests {
             expected_body_sha256: Some(
                 "c6777082c91bcfc19f95bccba3a196fd1a25c1b5653b95d4f607930b8ce6fd4c".to_string(),
             ),
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let report = build_send_job_status_report(
@@ -1069,6 +1288,7 @@ mod tests {
             expected_list_ids: vec![27],
             expected_queue_total: Some(500),
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let stale_rows = vec![
@@ -1086,6 +1306,7 @@ mod tests {
             expected_list_ids: vec![27],
             expected_queue_total: Some(500),
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let report = build_send_job_status_report(
@@ -1114,6 +1335,7 @@ mod tests {
             expected_list_ids: vec![27],
             expected_queue_total: Some(500),
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let report = build_send_job_status_report(
@@ -1144,6 +1366,7 @@ mod tests {
             expected_list_ids: vec![27],
             expected_queue_total: Some(500),
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(1),
         };
         let report = build_send_job_status_report(
@@ -1174,6 +1397,7 @@ mod tests {
             expected_list_ids: vec![27],
             expected_queue_total: Some(500),
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let report = build_send_job_status_report(
@@ -1204,6 +1428,7 @@ mod tests {
             expected_list_ids: vec![27],
             expected_queue_total: Some(500),
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let schedule_html = r#"
@@ -1247,6 +1472,7 @@ mod tests {
             expected_list_ids: vec![3],
             expected_queue_total: Some(70),
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let manage_html = r#"
@@ -1303,6 +1529,7 @@ mod tests {
             expected_list_ids: Vec::new(),
             expected_queue_total: Some(70),
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let manage_html = r#"
@@ -1334,6 +1561,7 @@ mod tests {
             expected_list_ids: Vec::new(),
             expected_queue_total: None,
             expected_body_sha256: None,
+            stats_baseline_ids: None,
             max_rows: Some(25),
         };
         let manage_html = r#"
@@ -1358,7 +1586,146 @@ mod tests {
 
         let error = build_send_job_status_report(&request, Vec::new(), Vec::new(), links)
             .expect_err("duplicate current rows must fail closed");
-        assert!(error.to_string().contains("multiple current queue rows"));
+        assert!(error
+            .to_string()
+            .contains("multiple current campaign_manage rows"));
+    }
+
+    #[test]
+    fn same_job_is_normalized_across_schedule_and_manage_sources() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 88,
+            expected_campaign_id: Some(44),
+            expected_list_ids: vec![12],
+            expected_queue_total: Some(25),
+            expected_body_sha256: None,
+            stats_baseline_ids: Some(vec![70]),
+            max_rows: Some(25),
+        };
+        let schedule_html = r#"
+            <table><tr>
+              <td>In Progress (Sent to 5 / 25)</td>
+              <td><a href="index.php?Page=Schedule&Action=Pause&job=88">Pause</a></td>
+            </tr></table>
+        "#;
+        let manage_html = r#"
+            <table><tr>
+              <td><a href="index.php?Page=Newsletters&Action=Edit&id=44">Edit</a></td>
+              <td><a href="index.php?Page=Send&Action=PauseSend&Job=88">Pause</a></td>
+            </tr></table>
+        "#;
+        let mut links = super::super::parse_queue_control_links(
+            "https://example.test/admin/",
+            schedule_html,
+            25,
+            crate::response::QueueControlSource::Schedule,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        links.extend(
+            super::super::parse_queue_control_links(
+                "https://example.test/admin/",
+                manage_html,
+                25,
+                crate::response::QueueControlSource::CampaignManage,
+            )
+            .unwrap_or_else(|err| panic!("{err}")),
+        );
+
+        let report = build_send_job_status_report_with_stats_identity(
+            &request,
+            vec!["In Progress (Sent to 5 / 25)".to_string()],
+            Vec::new(),
+            stats_inventory(&[(70, 25)]),
+            Some(campaign_label_identity("Campaign Alpha")),
+            links,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.identity_verified);
+        assert!(!report.terminal_application_proven);
+        assert_eq!(report.queue_counters.source, "admin_html_schedule_manage");
+        assert_eq!(report.campaign_id, Some(44));
+        assert!(report.follow_up_contract.is_some());
+    }
+
+    #[test]
+    fn bounded_follow_up_proves_one_new_stats_identity() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 88,
+            expected_campaign_id: Some(44),
+            expected_list_ids: vec![12],
+            expected_queue_total: Some(25),
+            expected_body_sha256: None,
+            stats_baseline_ids: Some(vec![70]),
+            max_rows: Some(25),
+        };
+
+        let report = build_send_job_status_report_with_stats_identity(
+            &request,
+            Vec::new(),
+            Vec::new(),
+            stats_inventory(&[(70, 25), (71, 25)]),
+            Some(campaign_label_identity("Campaign Alpha")),
+            Vec::new(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.ok);
+        assert!(report.identity_verified);
+        assert!(report.terminal_application_proven);
+        assert_eq!(report.stats.stat_id, Some(71));
+        assert!(report.stats.identity_verified);
+        assert_eq!(report.stats.sent_count, Some(25));
+        assert_eq!(report.stats.failed_count, None);
+        assert_eq!(report.queue_counters.processed, Some(25));
+        assert_eq!(report.queue_counters.source, "admin_html_stats_follow_up");
+        assert!(report.follow_up_contract.is_none());
+    }
+
+    #[test]
+    fn bounded_follow_up_rejects_ambiguous_removed_and_unbound_stats_identities() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 88,
+            expected_campaign_id: Some(44),
+            expected_list_ids: vec![12],
+            expected_queue_total: Some(25),
+            expected_body_sha256: None,
+            stats_baseline_ids: Some(vec![70]),
+            max_rows: Some(25),
+        };
+        for inventory in [
+            stats_inventory(&[(70, 25), (71, 25), (72, 25)]),
+            stats_inventory(&[(71, 25)]),
+            stats_inventory(&[(70, 25), (71, 24)]),
+            stats_inventory_for("Campaign Beta", &[(70, 25), (71, 25)]),
+        ] {
+            let report = build_send_job_status_report_with_stats_identity(
+                &request,
+                Vec::new(),
+                Vec::new(),
+                inventory,
+                Some(campaign_label_identity("Campaign Alpha")),
+                Vec::new(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+            assert!(!report.terminal_application_proven);
+            assert!(!report.identity_verified);
+            assert_eq!(report.stats.stat_id, None);
+        }
+
+        let invalid_baseline = SendJobStatusReadbackRequest {
+            stats_baseline_ids: Some(vec![70, 70]),
+            ..request
+        };
+        assert!(build_send_job_status_report_with_stats_identity(
+            &invalid_baseline,
+            Vec::new(),
+            Vec::new(),
+            stats_inventory(&[(70, 25), (71, 25)]),
+            Some(campaign_label_identity("Campaign Alpha")),
+            Vec::new(),
+        )
+        .is_err());
     }
 
     #[test]

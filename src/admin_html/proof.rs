@@ -1,6 +1,11 @@
 use super::{
     admin_evidence, compact_text, ensure_authenticated_html, extract_login_csrf_token, forms,
-    parse_table_rows, redact_field_value, route_fingerprint, AdminHtmlClient,
+    parse_table_rows, redact_field_value, route_fingerprint,
+    stats_identity::{
+        campaign_label_identity, parse_stats_identity_inventory, unique_added_stats_identity,
+        StatsIdentityInventory,
+    },
+    AdminHtmlClient,
 };
 use crate::{
     error::InterspireError,
@@ -45,6 +50,8 @@ struct GuardedSendReconcileInput<'a> {
     queue_before: &'a [String],
     schedule_job_ids_before: &'a BTreeSet<u64>,
     stats_before: &'a [String],
+    stats_identity_before: &'a StatsIdentityInventory,
+    expected_stats_campaign_identity: &'a str,
     expected_recipient_count: u64,
     max_rows: usize,
 }
@@ -57,8 +64,12 @@ struct GuardedSendTerminalInput<'a> {
     queue_after: &'a [String],
     stats_before: &'a [String],
     stats_after: &'a [String],
+    stats_identity_before: &'a StatsIdentityInventory,
+    stats_identity_after: &'a StatsIdentityInventory,
+    expected_stats_campaign_identity: &'a str,
     expected_recipient_count: u64,
     job_id: Option<u64>,
+    job_active_after: Option<bool>,
     smtp_reason: Option<String>,
     popup_steps: usize,
     approved_cron_schedule: bool,
@@ -124,9 +135,25 @@ struct GuardedSendProgress {
     notes: Vec<String>,
     queue_after: Option<Vec<String>>,
     stats_after: Option<Vec<String>>,
+    stats_identity_after: Option<StatsIdentityInventory>,
+    active_job_ids_after: Option<BTreeSet<u64>>,
+    schedule_delta_candidate: Option<u64>,
 }
 
 impl AdminHtmlClient {
+    pub(super) fn campaign_name_identity(
+        &self,
+        campaign_id: u64,
+    ) -> Result<String, InterspireError> {
+        if campaign_id == 0 {
+            return Err(InterspireError::Safety(
+                "campaign identity requires a positive campaign id".to_string(),
+            ));
+        }
+        let html = self.get_allowed(&AdminReadPage::NewsletterEdit { id: campaign_id }.path())?;
+        campaign_name_identity_from_edit_html(&html)
+    }
+
     pub fn admin_session_probe(
         &self,
         include_send_start: bool,
@@ -367,8 +394,8 @@ impl AdminHtmlClient {
             &self.get_allowed(&AdminReadPage::Schedule.path())?,
             max_rows,
         )?;
-        let stats_before =
-            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let stats_before_html = self.get_allowed(&AdminReadPage::Stats.path())?;
+        let stats_before = parse_table_rows(&stats_before_html, max_rows)?;
         let resolved = self.resolve_campaign_body_html(request.campaign_id)?;
         let parts = campaign_body_parts_from_html(&resolved.html)?;
         let campaign_body = campaign_body_audit_from_parts(request.campaign_id, parts.clone())?;
@@ -1079,11 +1106,17 @@ impl AdminHtmlClient {
 
         self.login()?;
         let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
+        let expected_stats_campaign_identity = self.campaign_name_identity(request.campaign_id)?;
         let schedule_before_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
         let schedule_job_ids_before = schedule_job_ids_from_html(&schedule_before_html);
         let queue_before = parse_table_rows(&schedule_before_html, max_rows)?;
-        let stats_before =
-            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let stats_before_html = self.get_allowed(&AdminReadPage::Stats.path())?;
+        let stats_identity_before = parse_stats_identity_inventory(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &stats_before_html,
+            max_rows,
+        )?;
+        let stats_before = parse_table_rows(&stats_before_html, max_rows)?;
         let (send_wizard, final_html) = self.render_send_wizard_final_page(
             &SendWizardReadbackRequest {
                 campaign_id: request.campaign_id,
@@ -1153,6 +1186,8 @@ impl AdminHtmlClient {
             queue_before: &queue_before,
             schedule_job_ids_before: &schedule_job_ids_before,
             stats_before: &stats_before,
+            stats_identity_before: &stats_identity_before,
+            expected_stats_campaign_identity: &expected_stats_campaign_identity,
             expected_recipient_count: request.expected_recipient_count,
             max_rows,
         })?;
@@ -1277,11 +1312,17 @@ impl AdminHtmlClient {
 
         self.login()?;
         let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
+        let expected_stats_campaign_identity = self.campaign_name_identity(request.campaign_id)?;
         let schedule_before_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
         let schedule_job_ids_before = schedule_job_ids_from_html(&schedule_before_html);
         let queue_before = parse_table_rows(&schedule_before_html, max_rows)?;
-        let stats_before =
-            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let stats_before_html = self.get_allowed(&AdminReadPage::Stats.path())?;
+        let stats_identity_before = parse_stats_identity_inventory(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &stats_before_html,
+            max_rows,
+        )?;
+        let stats_before = parse_table_rows(&stats_before_html, max_rows)?;
         let (send_wizard, final_html) = self.render_send_wizard_final_page(
             &SendWizardReadbackRequest {
                 campaign_id: request.campaign_id,
@@ -1355,6 +1396,8 @@ impl AdminHtmlClient {
             queue_before: &queue_before,
             schedule_job_ids_before: &schedule_job_ids_before,
             stats_before: &stats_before,
+            stats_identity_before: &stats_identity_before,
+            expected_stats_campaign_identity: &expected_stats_campaign_identity,
             expected_recipient_count: request.expected_recipient_count,
             max_rows,
         })?;
@@ -1388,6 +1431,19 @@ impl AdminHtmlClient {
         &self,
         input: GuardedSendReconcileInput<'_>,
     ) -> Result<GuardedSendEvidence, InterspireError> {
+        self.post_guarded_send_and_reconcile_with_dispatch(input, |request| {
+            request.send().map_err(|_| ())
+        })
+    }
+
+    fn post_guarded_send_and_reconcile_with_dispatch<F, E>(
+        &self,
+        input: GuardedSendReconcileInput<'_>,
+        dispatch: F,
+    ) -> Result<GuardedSendEvidence, InterspireError>
+    where
+        F: FnOnce(RequestBuilder) -> Result<reqwest::blocking::Response, E>,
+    {
         let (send_url, send_pairs) = input.send_form.clone();
         let request = self.proof_post_with_page_context(
             send_url,
@@ -1395,14 +1451,14 @@ impl AdminHtmlClient {
             &AdminReadPage::SendStart.path(),
         )?;
         let mut progress = GuardedSendProgress::default();
-        let response = match request.send() {
+        let response = match dispatch(request) {
             Ok(response) => response,
             Err(_) => {
                 return Ok(guarded_send_evidence_from_progress(
                     &input,
                     progress,
                     Some(
-                        "the final request was dispatched but its HTTP response was unavailable; application outcome remains uncertain",
+                        "the final request was attempted but no HTTP response was available; whether it reached the application remains uncertain",
                     ),
                 ));
             }
@@ -1676,12 +1732,15 @@ impl AdminHtmlClient {
             input.schedule_job_ids_before,
             &schedule_job_ids_from_html(&schedule_after_html),
         ) {
-            ScheduleJobIdentityDelta::None => progress
+            ScheduleJobIdentityDelta::None if progress.job_evidence.job_id.is_none() => progress
                 .job_evidence
                 .add_gap("Schedule readback exposed no unique new job identity"),
-            ScheduleJobIdentityDelta::Unique(job_id) => progress
-                .job_evidence
-                .observe(Some(job_id), "Schedule identity delta"),
+            ScheduleJobIdentityDelta::None => progress
+                .notes
+                .push("Schedule readback added no second job identity".to_string()),
+            ScheduleJobIdentityDelta::Unique(job_id) => {
+                progress.schedule_delta_candidate = Some(job_id);
+            }
             ScheduleJobIdentityDelta::Ambiguous { added, removed } => {
                 progress.job_evidence.add_gap(format!(
                     "Schedule identity reconciliation was ambiguous: {added} added and {removed} removed"
@@ -1709,6 +1768,61 @@ impl AdminHtmlClient {
                 ));
             }
         };
+        progress.stats_identity_after = match parse_stats_identity_inventory(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &stats_after_html,
+            input.max_rows,
+        ) {
+            Ok(inventory) => Some(inventory),
+            Err(_) => {
+                return Ok(guarded_send_evidence_from_progress(
+                    &input,
+                    progress,
+                    Some("Stats identity readback was incomplete after request dispatch"),
+                ));
+            }
+        };
+        let queue_inventory = match self
+            .complete_queue_control_inventory(input.max_rows, "guarded send readback")
+        {
+            Ok(inventory) => inventory,
+            Err(_) => {
+                return Ok(guarded_send_evidence_from_progress(
+                        &input,
+                        progress,
+                        Some(
+                            "Schedule and campaign Manage identity readback was incomplete after request dispatch",
+                        ),
+                    ));
+            }
+        };
+        progress.active_job_ids_after = Some(
+            queue_inventory
+                .links
+                .iter()
+                .map(|link| link.route.identifier_value)
+                .collect(),
+        );
+        if let Some(job_id) = progress.schedule_delta_candidate {
+            let popup_already_bound =
+                progress.job_evidence.job_id == Some(job_id) && !progress.job_evidence.conflicted;
+            if popup_already_bound
+                || queue_job_has_exact_manage_campaign(
+                    &queue_inventory.links,
+                    job_id,
+                    input.campaign_id,
+                )
+            {
+                progress
+                    .job_evidence
+                    .observe(Some(job_id), "bound Schedule identity delta");
+            } else {
+                progress.job_evidence.add_gap(
+                    "a singleton Schedule identity delta lacked an exact campaign Manage association"
+                        .to_string(),
+                );
+            }
+        }
         if progress.job_evidence.job_id.is_none()
             && stable_stats_identity_delta(
                 input.stats_before,
@@ -2769,6 +2883,16 @@ fn guarded_send_evidence_from_progress(
         .stats_after
         .as_deref()
         .unwrap_or(input.stats_before);
+    let stats_identity_after = progress
+        .stats_identity_after
+        .as_ref()
+        .unwrap_or(input.stats_identity_before);
+    let job_active_after = progress.job_evidence.job_id.map(|job_id| {
+        progress
+            .active_job_ids_after
+            .as_ref()
+            .is_none_or(|job_ids| job_ids.contains(&job_id))
+    });
     let reconciliation = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
         campaign_id: input.campaign_id,
         list_ids: input.list_ids,
@@ -2777,8 +2901,12 @@ fn guarded_send_evidence_from_progress(
         queue_after,
         stats_before: input.stats_before,
         stats_after,
+        stats_identity_before: input.stats_identity_before,
+        stats_identity_after,
+        expected_stats_campaign_identity: input.expected_stats_campaign_identity,
         expected_recipient_count: input.expected_recipient_count,
         job_id: progress.job_evidence.job_id,
+        job_active_after,
         smtp_reason: progress.smtp_reason,
         popup_steps: progress.popup_steps,
         approved_cron_schedule: progress.approved_cron_schedule,
@@ -2791,6 +2919,17 @@ fn guarded_send_evidence_from_progress(
         redirected: progress.redirected,
         reconciliation,
     }
+}
+
+fn campaign_name_identity_from_edit_html(html: &str) -> Result<String, InterspireError> {
+    let name = first_present(&parse_form_values_exact(html)?, &["name"])
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            InterspireError::Safety(
+                "campaign edit read did not expose its durable name".to_string(),
+            )
+        })?;
+    Ok(campaign_label_identity(&name))
 }
 
 fn rows_unchanged_for_send_proof(before: &[String], after: &[String]) -> bool {
@@ -2838,6 +2977,42 @@ fn guarded_send_terminal_reconciliation(
     let stats_identity_delta = stable_stats_identity_delta(input.stats_before, input.stats_after);
     let mut proof_gaps = input.proof_gaps;
     let mut notes = input.notes;
+    let bound_stats_row = match unique_added_stats_identity(
+        input.stats_identity_before,
+        input.stats_identity_after,
+    ) {
+        Ok(Some(row))
+            if row.recipients == input.expected_recipient_count
+                && row.campaign_identity == input.expected_stats_campaign_identity =>
+        {
+            Some(row)
+        }
+        Ok(Some(row)) => {
+            if row.recipients != input.expected_recipient_count {
+                proof_gaps.push(format!(
+                    "new Stats identity {} reported {} recipients instead of the expected {}",
+                    row.stat_id, row.recipients, input.expected_recipient_count
+                ));
+            }
+            if row.campaign_identity != input.expected_stats_campaign_identity {
+                proof_gaps.push(format!(
+                    "new Stats identity {} did not match the expected campaign identity",
+                    row.stat_id
+                ));
+            }
+            None
+        }
+        Ok(None) => {
+            proof_gaps.push("no new durable Stats identity was observed".to_string());
+            None
+        }
+        Err((added, removed)) => {
+            proof_gaps.push(format!(
+                "durable Stats identity reconciliation was ambiguous: {added} added and {removed} removed"
+            ));
+            None
+        }
+    };
 
     match stats_identity_delta {
         StableStatsIdentityDelta {
@@ -2856,21 +3031,16 @@ fn guarded_send_terminal_reconciliation(
         StableStatsIdentityDelta {
             added: 0,
             removed: 0,
-        } => {
-            proof_gaps.push("no new durable Stats identity was observed".to_string());
-        }
+        } => {}
         StableStatsIdentityDelta {
             added: 1,
             removed: 0,
         } => {
-            proof_gaps.push(
-                "one new stable Stats identity was observed, but this proof surface did not expose a durable stat id bound to the intended job, campaign, and lists"
-                    .to_string(),
-            );
+            notes.push("one new stable Stats row shape was observed".to_string());
         }
         StableStatsIdentityDelta { added, removed } => {
-            proof_gaps.push(format!(
-                "Stats identity reconciliation was ambiguous: {added} added and {removed} removed"
+            notes.push(format!(
+                "Stats row-shape reconciliation changed: {added} added and {removed} removed"
             ));
         }
     }
@@ -2904,6 +3074,37 @@ fn guarded_send_terminal_reconciliation(
             );
         }
     }
+    match input.job_active_after {
+        Some(true) => proof_gaps.push(
+            "the bound job still exposed an active Schedule or campaign Manage action".to_string(),
+        ),
+        None if input.job_id.is_some() => proof_gaps
+            .push("post-send Schedule and campaign Manage absence was not proven".to_string()),
+        Some(false) | None => {}
+    }
+
+    if input.smtp_reason.is_none() && input.job_active_after == Some(false) && proof_gaps.is_empty()
+    {
+        if let (Some(job_id), Some(stats_row)) =
+            (input.job_id.filter(|job_id| *job_id > 0), bound_stats_row)
+        {
+            notes.push(
+                "terminal application processing was bound to one positive job identity and one new durable Stats identity"
+                    .to_string(),
+            );
+            return SendReconciliationReport::processed_with_bound_identity(
+                job_id,
+                stats_row.stat_id,
+                stats_row.recipients,
+                input.popup_steps,
+                input.queue_before.len(),
+                input.queue_after.len(),
+                input.stats_before.len(),
+                input.stats_after.len(),
+                notes,
+            );
+        }
+    }
 
     let status = if input.smtp_reason.is_some() {
         SendApplyStatus::TransportFailed
@@ -2927,6 +3128,7 @@ fn guarded_send_terminal_reconciliation(
                 input.expected_recipient_count,
                 input.expected_body_sha256,
             )
+            .with_stats_baseline(input.stats_identity_before.ids().into_iter().collect())
         })
     } else {
         None
@@ -3204,6 +3406,34 @@ fn schedule_job_identity_delta(
             removed,
         },
     }
+}
+
+fn queue_job_has_exact_manage_campaign(
+    links: &[super::QueueControlLink],
+    job_id: u64,
+    campaign_id: u64,
+) -> bool {
+    let matching = links
+        .iter()
+        .filter(|link| link.route.identifier_value == job_id)
+        .collect::<Vec<_>>();
+    let manage_rows = matching
+        .iter()
+        .filter(|link| link.candidate.source == crate::response::QueueControlSource::CampaignManage)
+        .map(|link| (link.row_ordinal, link.candidate.campaign_id))
+        .collect::<BTreeSet<_>>();
+    let schedule_rows = matching
+        .iter()
+        .filter(|link| link.candidate.source == crate::response::QueueControlSource::Schedule)
+        .map(|link| link.row_ordinal)
+        .collect::<BTreeSet<_>>();
+    !matching.is_empty()
+        && schedule_rows.len() <= 1
+        && manage_rows.len() == 1
+        && manage_rows
+            .iter()
+            .next()
+            .is_some_and(|(_, candidate_campaign_id)| *candidate_campaign_id == Some(campaign_id))
 }
 
 fn schedule_path_candidates(html: &str) -> Vec<String> {
@@ -3914,18 +4144,20 @@ fn sha256_hex(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::stats_identity::{StatsIdentityInventory, StatsRowIdentity};
     use super::{
         append_csrf_pair_if_missing, campaign_body_audit_from_html, campaign_body_parts_from_html,
-        campaign_body_step1_pairs, campaign_body_step2_action_path, campaign_test_send_digest,
+        campaign_body_step1_pairs, campaign_body_step2_action_path, campaign_label_identity,
+        campaign_name_identity_from_edit_html, campaign_test_send_digest,
         campaign_test_send_has_applyable_html, campaign_test_send_report, csrf_pair,
         expected_public_subject_matches, guarded_schedule_approval_url,
         guarded_send_evidence_from_progress, guarded_send_final_form_post,
         guarded_send_final_form_post_for_request, guarded_send_popup_url,
         guarded_send_terminal_reconciliation, is_guarded_send_campaign_selection_name,
         list_ids_warning, optional_nonempty_sha256, parse_send_wizard_final_page,
-        preview_send_response_success, recipient_count_marker, rows_changed_for_send_proof,
-        rows_unchanged_for_send_proof, schedule_job_identity_delta, schedule_job_ids_from_html,
-        seed_send_apply_warnings, selected_or_hidden_list_ids,
+        preview_send_response_success, queue_job_has_exact_manage_campaign, recipient_count_marker,
+        rows_changed_for_send_proof, rows_unchanged_for_send_proof, schedule_job_identity_delta,
+        schedule_job_ids_from_html, seed_send_apply_warnings, selected_or_hidden_list_ids,
         send_apply_preflight_refusal_warnings, send_step2_action_path, sha256_hex,
         stable_stats_identity_delta, stats_rows_stable_for_no_send_proof, step4_response_summary,
         transport_failure_reason, validate_single_preview_email, GuardedSendJobEvidence,
@@ -3933,6 +4165,7 @@ mod tests {
         ScheduleJobIdentityDelta, StableStatsIdentityDelta,
     };
     use crate::{
+        config::{AdminHtmlConfig, InterspireVersion},
         redact,
         response::{
             CampaignBodyAuditReport, CampaignTestSendApplyRequest, SendApplyStatus,
@@ -3941,6 +4174,33 @@ mod tests {
     };
     use std::collections::BTreeSet;
     use url::Url;
+
+    fn empty_stats_identity_inventory() -> StatsIdentityInventory {
+        StatsIdentityInventory { rows: Vec::new() }
+    }
+
+    fn stats_identity_inventory(rows: &[(u64, u64)]) -> StatsIdentityInventory {
+        stats_identity_inventory_for("Campaign Alpha", rows)
+    }
+
+    fn stats_identity_inventory_for(
+        campaign_label: &str,
+        rows: &[(u64, u64)],
+    ) -> StatsIdentityInventory {
+        StatsIdentityInventory {
+            rows: rows
+                .iter()
+                .enumerate()
+                .map(|(index, (stat_id, recipients))| StatsRowIdentity {
+                    stat_id: *stat_id,
+                    row_ordinal: index + 1,
+                    row_summary: format!("Synthetic Stats row {stat_id} {recipients}"),
+                    campaign_identity: campaign_label_identity(campaign_label),
+                    recipients: *recipients,
+                })
+                .collect(),
+        }
+    }
 
     #[test]
     fn campaign_body_audit_counts_tokens_without_returning_body() {
@@ -3966,6 +4226,21 @@ mod tests {
         assert!(report.html_sha256.is_some());
         assert!(!serialized.contains("%%UNSUBSCRIBELINK%%"));
         assert!(!serialized.contains("<html>"));
+    }
+
+    #[test]
+    fn campaign_name_identity_uses_exact_edit_field_without_returning_name() {
+        let identity = campaign_name_identity_from_edit_html(
+            r#"<form><input name="name" value="  Campaign Alpha  "></form>"#,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(identity, campaign_label_identity("campaign alpha"));
+        assert!(!identity.contains("Campaign"));
+        assert!(campaign_name_identity_from_edit_html(
+            r#"<form><input name="subject" value="Synthetic subject"></form>"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -4421,10 +4696,61 @@ mod tests {
     }
 
     #[test]
-    fn guarded_send_response_loss_returns_nonterminal_receipt_after_dispatch() {
+    fn singleton_schedule_identity_requires_exact_manage_campaign_association() {
+        let manage_html = r#"
+            <table><tr>
+              <td><a href="index.php?Page=Newsletters&Action=Edit&id=9001">Edit</a></td>
+              <td><a href="index.php?Page=Send&Action=PauseSend&Job=43">Pause</a></td>
+            </tr></table>
+        "#;
+        let links = super::super::parse_queue_control_links(
+            "https://example.test/admin/",
+            manage_html,
+            25,
+            crate::response::QueueControlSource::CampaignManage,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!queue_job_has_exact_manage_campaign(&[], 43, 9001));
+        assert!(queue_job_has_exact_manage_campaign(&links, 43, 9001));
+        assert!(!queue_job_has_exact_manage_campaign(&links, 43, 9002));
+        assert!(!queue_job_has_exact_manage_campaign(&links, 44, 9001));
+
+        let duplicate_schedule_html = r#"
+            <table>
+              <tr><td><a href="index.php?Page=Schedule&Action=Pause&job=43">Pause</a></td></tr>
+              <tr><td><a href="index.php?Page=Schedule&Action=Resume&job=43">Resume</a></td></tr>
+            </table>
+        "#;
+        let mut ambiguous = links;
+        ambiguous.extend(
+            super::super::parse_queue_control_links(
+                "https://example.test/admin/",
+                duplicate_schedule_html,
+                25,
+                crate::response::QueueControlSource::Schedule,
+            )
+            .unwrap_or_else(|err| panic!("{err}")),
+        );
+        assert!(!queue_job_has_exact_manage_campaign(&ambiguous, 43, 9001));
+    }
+
+    #[test]
+    fn guarded_send_response_loss_exercises_attempted_send_error_branch() {
         let queue = Vec::new();
         let stats = Vec::new();
+        let stats_identity = empty_stats_identity_inventory();
+        let expected_stats_campaign_identity = campaign_label_identity("Campaign Alpha");
         let schedule_job_ids = BTreeSet::new();
+        let client = super::AdminHtmlClient::new(AdminHtmlConfig {
+            version: InterspireVersion::Auto,
+            base_url: Some("https://example.test/admin/".to_string()),
+            username: Some("fixture-user".to_string()),
+            password: Some("fixture-value".to_string()),
+            cloudflare_access: crate::config::CloudflareAccessConfig::default(),
+            enrich_limit: 25,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
         let input = GuardedSendReconcileInput {
             send_form: (
                 Url::parse("https://example.test/admin/index.php?Page=Send&Action=Step4")
@@ -4437,17 +4763,20 @@ mod tests {
             queue_before: &queue,
             schedule_job_ids_before: &schedule_job_ids,
             stats_before: &stats,
+            stats_identity_before: &stats_identity,
+            expected_stats_campaign_identity: &expected_stats_campaign_identity,
             expected_recipient_count: 25,
             max_rows: 25,
         };
-        let evidence = guarded_send_evidence_from_progress(
-            &input,
-            GuardedSendProgress::default(),
-            Some(
-                "the final request was dispatched but its HTTP response was unavailable; application outcome remains uncertain",
-            ),
-        );
+        let mut attempted = false;
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(input, |_| {
+                attempted = true;
+                Err::<reqwest::blocking::Response, _>(())
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
 
+        assert!(attempted);
         assert_eq!(evidence.status_code, None);
         assert!(!evidence.redirected);
         assert_eq!(evidence.reconciliation.status, SendApplyStatus::Posted);
@@ -4457,7 +4786,7 @@ mod tests {
             .reconciliation
             .proof_gaps
             .iter()
-            .any(|gap| gap.contains("HTTP response was unavailable")));
+            .any(|gap| gap.contains("whether it reached the application remains uncertain")));
         assert!(evidence
             .reconciliation
             .notes
@@ -4469,6 +4798,8 @@ mod tests {
     fn guarded_send_uncertainty_preserves_only_a_nonconflicting_job_follow_up() {
         let queue = Vec::new();
         let stats = Vec::new();
+        let stats_identity = empty_stats_identity_inventory();
+        let expected_stats_campaign_identity = campaign_label_identity("Campaign Alpha");
         let schedule_job_ids = BTreeSet::new();
         let input = GuardedSendReconcileInput {
             send_form: (
@@ -4482,6 +4813,8 @@ mod tests {
             queue_before: &queue,
             schedule_job_ids_before: &schedule_job_ids,
             stats_before: &stats,
+            stats_identity_before: &stats_identity,
+            expected_stats_campaign_identity: &expected_stats_campaign_identity,
             expected_recipient_count: 25,
             max_rows: 25,
         };
@@ -4759,6 +5092,7 @@ mod tests {
             "Email Campaign Statistics".to_string(),
             "Campaign Alpha Renamed 'List One&#' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 4 1 View Export Print Delete".to_string(),
         ];
+        let stats_identity = stats_identity_inventory(&[(70, 25)]);
 
         let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
             campaign_id: 9001,
@@ -4768,8 +5102,12 @@ mod tests {
             queue_after: &queue,
             stats_before: &stats_before,
             stats_after: &stats_after,
+            stats_identity_before: &stats_identity,
+            stats_identity_after: &stats_identity,
+            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 999,
             job_id: Some(7001),
+            job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 2,
             approved_cron_schedule: false,
@@ -4803,6 +5141,8 @@ mod tests {
         let stats_after = vec![
             "Campaign Beta 'List Two' July 1 2026, 11:43 am July 1 2026, 11:44 am 25 0 0 View Export Print Delete".to_string(),
         ];
+        let stats_identity_before = stats_identity_inventory(&[(70, 25)]);
+        let stats_identity_after = stats_identity_inventory(&[(71, 25)]);
 
         assert_eq!(
             stable_stats_identity_delta(&stats_before, &stats_after),
@@ -4820,8 +5160,12 @@ mod tests {
             queue_after: &queue,
             stats_before: &stats_before,
             stats_after: &stats_after,
+            stats_identity_before: &stats_identity_before,
+            stats_identity_after: &stats_identity_after,
+            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 25,
             job_id: Some(7001),
+            job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
@@ -4839,7 +5183,7 @@ mod tests {
     }
 
     #[test]
-    fn guarded_send_terminal_reconciliation_rejects_unbound_added_stats_identity() {
+    fn guarded_send_terminal_reconciliation_rejects_stats_identity_while_job_is_active() {
         let queue_before = Vec::new();
         let queue_after = vec!["Campaign Alpha Waiting Action Job".to_string()];
         let stats_before = vec![
@@ -4849,6 +5193,8 @@ mod tests {
             "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
             "Campaign Gamma 'List Three' July 1 2026, 11:45 am July 1 2026, 11:46 am 25 0 0 View Export Print Delete".to_string(),
         ];
+        let stats_identity_before = stats_identity_inventory(&[(70, 25)]);
+        let stats_identity_after = stats_identity_inventory(&[(70, 25), (71, 25)]);
 
         let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
             campaign_id: 9001,
@@ -4858,8 +5204,12 @@ mod tests {
             queue_after: &queue_after,
             stats_before: &stats_before,
             stats_after: &stats_after,
+            stats_identity_before: &stats_identity_before,
+            stats_identity_after: &stats_identity_after,
+            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 25,
             job_id: Some(7001),
+            job_active_after: Some(true),
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
@@ -4875,7 +5225,90 @@ mod tests {
         assert!(report
             .proof_gaps
             .iter()
-            .any(|gap| gap.contains("did not expose a durable stat id")));
+            .any(|gap| gap.contains("still exposed an active")));
+    }
+
+    #[test]
+    fn guarded_send_terminal_reconciliation_rejects_unrelated_same_count_stats_row() {
+        let queue = Vec::new();
+        let stats_identity_before = stats_identity_inventory(&[(70, 25)]);
+        let mut stats_identity_after = stats_identity_before.clone();
+        stats_identity_after
+            .rows
+            .extend(stats_identity_inventory_for("Campaign Beta", &[(71, 25)]).rows);
+
+        let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &queue,
+            queue_after: &queue,
+            stats_before: &queue,
+            stats_after: &queue,
+            stats_identity_before: &stats_identity_before,
+            stats_identity_after: &stats_identity_after,
+            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
+            expected_recipient_count: 25,
+            job_id: Some(7001),
+            job_active_after: Some(false),
+            smtp_reason: None,
+            popup_steps: 1,
+            approved_cron_schedule: false,
+            proof_gaps: Vec::new(),
+            notes: Vec::new(),
+        });
+
+        assert_eq!(report.status, SendApplyStatus::Queued);
+        assert!(!report.terminal_application_proven());
+        assert_eq!(report.stat_id, None);
+        assert!(report
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("did not match the expected campaign identity")));
+    }
+
+    #[test]
+    fn guarded_send_terminal_reconciliation_reaches_bound_processed_state() {
+        let queue = Vec::new();
+        let stats_before = vec![
+            "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
+        ];
+        let stats_after = vec![
+            "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
+            "Campaign Beta 'List Two' July 1 2026, 11:43 am July 1 2026, 11:44 am 25 0 0 View Export Print Delete".to_string(),
+        ];
+        let stats_identity_before = stats_identity_inventory(&[(70, 25)]);
+        let stats_identity_after = stats_identity_inventory(&[(70, 25), (71, 25)]);
+
+        let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &queue,
+            queue_after: &queue,
+            stats_before: &stats_before,
+            stats_after: &stats_after,
+            stats_identity_before: &stats_identity_before,
+            stats_identity_after: &stats_identity_after,
+            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
+            expected_recipient_count: 25,
+            job_id: Some(7001),
+            job_active_after: Some(false),
+            smtp_reason: None,
+            popup_steps: 1,
+            approved_cron_schedule: false,
+            proof_gaps: Vec::new(),
+            notes: Vec::new(),
+        });
+
+        assert_eq!(report.status, SendApplyStatus::Processed);
+        assert!(report.terminal_application_proven());
+        assert_eq!(report.job_id, Some(7001));
+        assert_eq!(report.stat_id, Some(71));
+        assert_eq!(report.sent_count, Some(25));
+        assert_eq!(report.failed_count, None);
+        assert_eq!(report.unsent_count, None);
+        assert!(report.follow_up_contract.is_none());
     }
 
     #[test]
@@ -4889,8 +5322,12 @@ mod tests {
             queue_after: &rows,
             stats_before: &rows,
             stats_after: &rows,
+            stats_identity_before: &empty_stats_identity_inventory(),
+            stats_identity_after: &empty_stats_identity_inventory(),
+            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 25,
             job_id: None,
+            job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 0,
             approved_cron_schedule: false,
@@ -4905,8 +5342,12 @@ mod tests {
             queue_after: &rows,
             stats_before: &rows,
             stats_after: &rows,
+            stats_identity_before: &empty_stats_identity_inventory(),
+            stats_identity_after: &empty_stats_identity_inventory(),
+            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 25,
             job_id: Some(7001),
+            job_active_after: Some(false),
             smtp_reason: Some("synthetic transport failure".to_string()),
             popup_steps: 1,
             approved_cron_schedule: false,

@@ -10,6 +10,7 @@ mod forms;
 mod proof;
 mod scaffold;
 mod send_ops;
+mod stats_identity;
 
 use crate::{
     config::{AdminHtmlConfig, InterspireVersion, WriteExecutionMode},

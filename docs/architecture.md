@@ -61,7 +61,8 @@ request/response profile is maintained in
 | `live/support.rs` | Shared list caps, source-list filtering, and local helper utilities for the live backend. |
 | `xml_api.rs` | Interspire XML API reads and XML parsing. |
 | `admin_html.rs` | Authenticated admin HTML reads, queue-control extraction, and redacted parsing helpers. |
-| `admin_html/send_ops.rs` | Structured send-job status, cron readiness, and stop-gate decision parsing over allowlisted Schedule/newsletter Manage/Stats/Settings reads. |
+| `admin_html/send_ops.rs` | Structured send-job status, cron readiness, and stop-gate decision parsing over allowlisted Schedule/newsletter Manage/Stats/campaign-edit/Settings reads. |
+| `admin_html/stats_identity.rs` | Bounded positive Stats-row identity and aggregate-count parsing from exact read-only newsletter summary routes. |
 | `admin_html/forms.rs` | Guarded form snapshotting, allowlisted field updates, preview/apply plan binding, list-create apply, and field-scoped POST construction. |
 | `admin_html/scaffold.rs` | Campaign-copy route discovery and before/after draft detection. |
 | `admin_html/proof.rs` | No-mutation admin proof reads plus guarded final-send form capture for admin reachability, campaign body audit, render artifacts, Send wizard readback, seed-readiness gates, seed sends, and production sends. |

@@ -27,6 +27,7 @@ pub enum AdminReadPage {
     SendStart,
     Schedule,
     Stats,
+    StatsNewsletterSummary { stat_id: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +77,9 @@ impl AdminReadPage {
             Self::SendStart => "index.php?Page=Send".to_string(),
             Self::Schedule => "index.php?Page=Schedule".to_string(),
             Self::Stats => "index.php?Page=Stats".to_string(),
+            Self::StatsNewsletterSummary { stat_id } => {
+                format!("index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid={stat_id}")
+            }
         }
     }
 }
@@ -533,6 +537,51 @@ pub fn classify_allowed_admin_get(url: &Url) -> Result<AdminReadPage, Interspire
             Ok(AdminReadPage::Schedule)
         }
         (Some("Stats"), None) if only_query_keys(&pairs, &["Page"]) => Ok(AdminReadPage::Stats),
+        (Some("Stats"), Some(action)) if action.eq_ignore_ascii_case("Newsletters") => {
+            ensure_only_query_keys(
+                &pairs,
+                &[
+                    "Page",
+                    "Action",
+                    "SubAction",
+                    "id",
+                    "statid",
+                    "SortBy",
+                    "Direction",
+                    "DisplayPage",
+                    "PerPage",
+                ],
+            )?;
+            let subaction = pairs
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("SubAction"))
+                .map(|(_, value)| value.to_string());
+            if !subaction
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("Step1"))
+            {
+                return Err(InterspireError::Safety(
+                    "Stats newsletter summary route requires SubAction=Step1".to_string(),
+                ));
+            }
+            let ids = pairs
+                .iter()
+                .filter(|(key, _)| {
+                    key.eq_ignore_ascii_case("id") || key.eq_ignore_ascii_case("statid")
+                })
+                .map(|(_, value)| value.parse::<u64>().ok())
+                .collect::<Vec<_>>();
+            let stat_id = match ids.as_slice() {
+                [Some(stat_id)] if *stat_id > 0 => *stat_id,
+                _ => {
+                    return Err(InterspireError::Safety(
+                        "Stats newsletter summary route requires one positive stat identity"
+                            .to_string(),
+                    ))
+                }
+            };
+            Ok(AdminReadPage::StatsNewsletterSummary { stat_id })
+        }
         _ => Err(InterspireError::Safety(format!(
             "admin GET is not in the read allowlist: Page={page:?} Action={action:?}"
         ))),
@@ -1696,6 +1745,36 @@ mod tests {
             classify_allowed_admin_get(&url("index.php?Page=Stats")).ok(),
             Some(AdminReadPage::Stats)
         );
+        assert_eq!(
+            classify_allowed_admin_get(&url(
+                "index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=17"
+            ))
+            .ok(),
+            Some(AdminReadPage::StatsNewsletterSummary { stat_id: 17 })
+        );
+        assert_eq!(
+            classify_allowed_admin_get(&url(
+                "index.php?Page=Stats&Action=Newsletters&SubAction=Step1&id=18&SortBy=finishtime&Direction=down&DisplayPage=1"
+            ))
+            .ok(),
+            Some(AdminReadPage::StatsNewsletterSummary { stat_id: 18 })
+        );
+    }
+
+    #[test]
+    fn stats_newsletter_summary_requires_one_positive_unsmuggled_identity() {
+        for path in [
+            "index.php?Page=Stats&Action=Newsletters&SubAction=Step1",
+            "index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=0",
+            "index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=17&id=18",
+            "index.php?Page=Stats&Action=Newsletters&SubAction=Delete&statid=17",
+            "index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=17&Next=Send",
+        ] {
+            assert!(
+                classify_allowed_admin_get(&url(path)).is_err(),
+                "unexpectedly allowed {path}"
+            );
+        }
     }
 
     #[test]
