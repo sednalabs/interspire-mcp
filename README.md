@@ -225,11 +225,14 @@ report configured read capabilities, `safe_mode: true`,
 `guarded_writes_enabled: false`, and `queue_controls_enabled: false`.
 For a default runtime it should also report `form_write_controls_enabled: false`
 and `write_execution_mode: "preview_apply"`. The current adapter always reports
-`guarded_send_dispatch_available: false` and a warning that send-control flags
-permit authority evaluation but do not supply the missing authenticated atomic
-state binding or enable dispatch. If the Interspire admin or XML API is behind
-Cloudflare Access, `cloudflare_access_configured: true` confirms that the
-service-token header values were loaded without revealing those values.
+`seed_production_send_dispatch_available: false` and a warning that
+send-control flags permit seed/production authority evaluation but do not
+supply the missing authenticated atomic state binding or enable that dispatch.
+This field does not describe the separately scoped, explicitly gated
+one-recipient campaign preview/test-send route. If the Interspire admin or XML
+API is behind Cloudflare Access, `cloudflare_access_configured: true` confirms
+that the service-token header values were loaded without revealing those
+values.
 Then call `interspire_xml_auth_probe`. It uses Interspire's
 `authentication/XmlApiTest` route and performs no list, contact, queue, form,
 or send action. A `xml_auth_error` means the XML username, XML token, XML API

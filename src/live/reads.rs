@@ -76,7 +76,7 @@ impl LiveInterspireBackend {
             );
         }
         warnings.push(
-            "guarded send dispatch is unavailable: the current admin HTML adapter exposes no authenticated atomic state binding; send-control flags permit authority evaluation but do not authorize or enable dispatch"
+            "seed and production send dispatch is unavailable: the current admin HTML adapter exposes no authenticated atomic state binding; send-control flags permit seed/production authority evaluation but do not authorize or enable that dispatch"
                 .to_string(),
         );
 
@@ -101,7 +101,7 @@ impl LiveInterspireBackend {
                 .config
                 .guarded_writes
                 .production_send_controls_enabled,
-            guarded_send_dispatch_available: false,
+            seed_production_send_dispatch_available: false,
             oci_send_ledger_configured: self
                 .config
                 .oci_send_ledger
@@ -805,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn status_never_reports_send_flags_as_dispatch_readiness() {
+    fn status_never_reports_seed_production_flags_as_dispatch_readiness() {
         let backend = LiveInterspireBackend::new(InterspireServerConfig {
             guarded_writes: GuardedWriteConfig {
                 enabled: true,
@@ -824,7 +824,7 @@ mod tests {
 
         assert!(report.send_controls_enabled);
         assert!(report.production_send_controls_enabled);
-        assert!(!report.guarded_send_dispatch_available);
+        assert!(!report.seed_production_send_dispatch_available);
         assert!(report
             .warnings
             .iter()
