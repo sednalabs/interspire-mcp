@@ -398,6 +398,14 @@ fn build_send_job_status_report_with_stats_identity(
     } else {
         (None, None)
     };
+    if let (Some(sent), Some(total)) = (schedule_sent, schedule_total) {
+        if sent > total {
+            return Err(InterspireError::Safety(format!(
+                "send job {} exposed impossible diagnostic progress: sent count {sent} exceeds reported total {total}",
+                request.expected_job_id
+            )));
+        }
+    }
     let matching_sources = matching_links
         .iter()
         .map(|link| link.candidate.source)
@@ -484,6 +492,12 @@ fn build_send_job_status_report_with_stats_identity(
                 .to_string(),
         );
     }
+    if schedule_sent.is_some() || schedule_total.is_some() {
+        warnings.push(
+            "Schedule/Manage progress counts are diagnostic and nonterminal; reaching the reported total does not prove completion"
+                .to_string(),
+        );
+    }
     if stats_rows_maybe_capped && !stats_matches.is_empty() && !identity_verified {
         warnings.push(
             "Stats row uniqueness was not proven because the fetched Stats row slice reached the configured cap"
@@ -550,7 +564,7 @@ fn build_send_job_status_report_with_stats_identity(
         campaign_id,
         total,
     ) {
-        (true, job_id, Some(campaign_id), Some(total)) => Some(
+        (true, job_id, Some(campaign_id), Some(total)) if total > 0 => Some(
             SendJobFollowUpContract::new(
                 job_id,
                 campaign_id,
@@ -579,7 +593,8 @@ fn build_send_job_status_report_with_stats_identity(
             action_plans,
             sent_count: schedule_sent,
             total_count: schedule_total,
-            state: schedule_state(schedule_sent, schedule_total),
+            terminal_authority_proven: false,
+            state: diagnostic_schedule_state(schedule_sent, schedule_total),
         },
         stats: SendJobStatsState {
             matched_rows: unbound_stats_row.map_or(stats_matches.len(), |_| 1),
@@ -603,8 +618,9 @@ fn build_send_job_status_report_with_stats_identity(
             total,
             processed,
             unprocessed,
+            terminal_authority_proven: false,
             unavailable_reason: Some(
-                "authoritative terminal counters and job-to-Stats association require a reviewed application-native source"
+                "Schedule/Manage progress is diagnostic and nonterminal; authoritative terminal counters and job-to-Stats association require a reviewed application-native source"
                     .to_string(),
             ),
         },
@@ -638,6 +654,7 @@ fn send_job_status_not_configured(
             action_plans: Vec::new(),
             sent_count: None,
             total_count: None,
+            terminal_authority_proven: false,
             state: "not_configured".to_string(),
         },
         stats: SendJobStatsState {
@@ -654,6 +671,7 @@ fn send_job_status_not_configured(
             total: None,
             processed: None,
             unprocessed: None,
+            terminal_authority_proven: false,
             unavailable_reason: Some("admin HTML fallback is not configured".to_string()),
         },
         unsent_reason_aggregates: Vec::new(),
@@ -816,11 +834,15 @@ fn oci_preflight_blocks_send(oci: &OciLedgerPreflightReport) -> bool {
     !oci.verified && (oci.requested || oci.required)
 }
 
-fn schedule_state(sent: Option<u64>, total: Option<u64>) -> String {
+fn diagnostic_schedule_state(sent: Option<u64>, total: Option<u64>) -> String {
     match (sent, total) {
-        (Some(sent), Some(total)) if sent >= total && total > 0 => "complete".to_string(),
-        (Some(sent), Some(total)) if sent > 0 && sent < total => "active".to_string(),
-        (Some(0), Some(total)) if total > 0 => "queued".to_string(),
+        (Some(sent), Some(total)) if sent == total && total > 0 => {
+            "diagnostic_at_reported_total_nonterminal".to_string()
+        }
+        (Some(sent), Some(total)) if sent > 0 && sent < total => {
+            "diagnostic_in_progress".to_string()
+        }
+        (Some(0), Some(total)) if total > 0 => "diagnostic_queued".to_string(),
         _ => "unknown".to_string(),
     }
 }
@@ -1167,6 +1189,133 @@ mod tests {
     }
 
     #[test]
+    fn active_schedule_at_reported_total_remains_explicitly_nonterminal() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 13,
+            expected_campaign_id: Some(2),
+            expected_list_ids: vec![12],
+            expected_queue_total: Some(100),
+            expected_body_sha256: None,
+            stats_baseline_ids: None,
+            max_rows: Some(25),
+        };
+        let schedule_html = r#"
+            <table><tr>
+              <td>Job 13 In Progress (Sent to 100 / 100)</td>
+              <td><a href="index.php?Page=Schedule&Action=Pause&job=13">Pause</a></td>
+            </tr></table>
+        "#;
+        let links = super::super::parse_queue_control_links(
+            "https://example.test/admin/",
+            schedule_html,
+            25,
+            crate::response::QueueControlSource::Schedule,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = build_send_job_status_report(
+            &request,
+            vec!["Job 13 In Progress (Sent to 100 / 100)".to_string()],
+            Vec::new(),
+            links,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.identity_verified);
+        assert!(!report.terminal_application_proven);
+        assert_eq!(report.schedule.sent_count, Some(100));
+        assert_eq!(report.schedule.total_count, Some(100));
+        assert!(!report.schedule.terminal_authority_proven);
+        assert_eq!(
+            report.schedule.state,
+            "diagnostic_at_reported_total_nonterminal"
+        );
+        assert_eq!(report.queue_counters.processed, Some(100));
+        assert_eq!(report.queue_counters.unprocessed, Some(0));
+        assert!(!report.queue_counters.terminal_authority_proven);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("diagnostic and nonterminal")));
+    }
+
+    #[test]
+    fn active_schedule_rejects_progress_above_reported_total() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 13,
+            expected_campaign_id: Some(2),
+            expected_list_ids: vec![12],
+            expected_queue_total: Some(100),
+            expected_body_sha256: None,
+            stats_baseline_ids: None,
+            max_rows: Some(25),
+        };
+        let schedule_html = r#"
+            <table><tr>
+              <td>Job 13 In Progress (Sent to 101 / 100)</td>
+              <td><a href="index.php?Page=Schedule&Action=Pause&job=13">Pause</a></td>
+            </tr></table>
+        "#;
+        let links = super::super::parse_queue_control_links(
+            "https://example.test/admin/",
+            schedule_html,
+            25,
+            crate::response::QueueControlSource::Schedule,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let error = build_send_job_status_report(
+            &request,
+            vec!["Job 13 In Progress (Sent to 101 / 100)".to_string()],
+            Vec::new(),
+            links,
+        )
+        .expect_err("impossible active progress must fail closed");
+
+        assert!(error.to_string().contains("sent count 101 exceeds"));
+    }
+
+    #[test]
+    fn zero_total_diagnostic_row_does_not_emit_positive_follow_up_contract() {
+        let request = SendJobStatusReadbackRequest {
+            expected_job_id: 13,
+            expected_campaign_id: Some(2),
+            expected_list_ids: vec![12],
+            expected_queue_total: None,
+            expected_body_sha256: None,
+            stats_baseline_ids: None,
+            max_rows: Some(25),
+        };
+        let manage_html = r#"
+            <table><tr>
+              <td>Job 13 In Progress (Sent to 0 / 0)</td>
+              <td>
+                <a href="index.php?Page=Newsletters&Action=Edit&id=2">Edit</a>
+                <a href="index.php?Page=Send&Action=PauseSend&Job=13">Pause</a>
+              </td>
+            </tr></table>
+        "#;
+        let links = super::super::parse_queue_control_links(
+            "https://example.test/admin/",
+            manage_html,
+            25,
+            crate::response::QueueControlSource::CampaignManage,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = build_send_job_status_report(&request, Vec::new(), Vec::new(), links)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.identity_verified);
+        assert!(!report.terminal_application_proven);
+        assert_eq!(report.schedule.sent_count, Some(0));
+        assert_eq!(report.schedule.total_count, Some(0));
+        assert_eq!(report.schedule.state, "unknown");
+        assert!(!report.schedule.terminal_authority_proven);
+        assert!(report.follow_up_contract.is_none());
+    }
+
+    #[test]
     fn send_job_status_requires_positive_unique_identity_context() {
         let baseline = SendJobStatusReadbackRequest {
             expected_job_id: 13,
@@ -1240,6 +1389,7 @@ mod tests {
                 "action_plans": [],
                 "sent_count": null,
                 "total_count": null,
+                "terminal_authority_proven": false,
                 "state": "unknown"
             })
         );
@@ -1250,7 +1400,8 @@ mod tests {
                 "total": null,
                 "processed": null,
                 "unprocessed": null,
-                "unavailable_reason": "authoritative terminal counters and job-to-Stats association require a reviewed application-native source"
+                "terminal_authority_proven": false,
+                "unavailable_reason": "Schedule/Manage progress is diagnostic and nonterminal; authoritative terminal counters and job-to-Stats association require a reviewed application-native source"
             })
         );
         assert!(report

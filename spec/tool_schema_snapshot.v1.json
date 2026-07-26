@@ -1490,7 +1490,7 @@
         "readOnlyHint": false,
         "title": "Production send apply"
       },
-      "description": "Apply an explicitly acknowledged production send after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight.",
+      "description": "Apply an explicitly acknowledged production send after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. Response loss returns response_uncertain rather than posted; Schedule/Manage/Stats progress alone never proves terminal state.",
       "inputSchema": {
         "$defs": {
           "OciLedgerPreflightRequest": {
@@ -1779,7 +1779,7 @@
         "readOnlyHint": false,
         "title": "Seed send apply"
       },
-      "description": "Apply one explicitly acknowledged seed send after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight.",
+      "description": "Apply one explicitly acknowledged seed send after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. Response loss returns response_uncertain rather than posted; Schedule/Manage/Stats progress alone never proves terminal state.",
       "inputSchema": {
         "$defs": {
           "OciLedgerPreflightRequest": {
@@ -1918,7 +1918,7 @@
         "readOnlyHint": true,
         "title": "Send job status readback"
       },
-      "description": "Read structured Schedule/Manage/Stats context for one expected Interspire send job without sending, triggering cron, exporting recipients, or mutating queue state. Historical Stats counts never establish current job identity.",
+      "description": "Read bounded Schedule, newsletter Manage, and Stats context for one positive Interspire send job without sending, triggering cron, exporting recipients, or mutating queue state. Current identity requires an exact queue-control route; every participating Manage row must bind the job to one positive exact campaign. Stats identities and active-row progress are diagnostic and never prove terminal state, including progress equal to the reported total.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1931,29 +1931,34 @@
           },
           "expected_campaign_id": {
             "default": null,
+            "description": "Optional positive caller-bound campaign context. Any matching newsletter\nManage row must expose this exact campaign through its NewsletterEdit route.",
             "format": "uint64",
-            "minimum": 0,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
             ]
           },
           "expected_job_id": {
+            "description": "Exact positive send-job identity expected on an allowlisted current\nSchedule or newsletter Manage queue-control route.",
             "format": "uint64",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           },
           "expected_list_ids": {
             "default": [],
+            "description": "Unique positive caller-bound list context. The bounded admin pages do not\nre-prove list scope, so these identities never authorize terminal state.",
             "items": {
               "format": "uint64",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
-            "type": "array"
+            "type": "array",
+            "uniqueItems": true
           },
           "expected_queue_total": {
             "default": null,
+            "description": "Optional positive expected progress total. Matching Schedule/Manage\nprogress remains diagnostic and nonterminal even when it reaches this total.",
             "format": "uint64",
             "minimum": 1,
             "type": [
@@ -1983,7 +1988,8 @@
             "type": [
               "array",
               "null"
-            ]
+            ],
+            "uniqueItems": true
           }
         },
         "required": [
@@ -2019,7 +2025,7 @@
         "readOnlyHint": true,
         "title": "Send stop-gate readiness"
       },
-      "description": "Compose send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation. Read-only; queue pause requires a separate queue-control apply.",
+      "description": "Compose exact active send-job identity, diagnostic nonterminal Schedule/Manage progress, and optional OCI ledger preflight into a hold/continue/pause recommendation. Read-only; Stats/progress never prove terminal state and queue pause requires a separate queue-control apply.",
       "inputSchema": {
         "$defs": {
           "OciLedgerPreflightRequest": {
@@ -2070,29 +2076,34 @@
         "properties": {
           "expected_campaign_id": {
             "default": null,
+            "description": "Optional positive caller-bound campaign context. Any matching newsletter\nManage row must expose this exact campaign through its NewsletterEdit route.",
             "format": "uint64",
-            "minimum": 0,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
             ]
           },
           "expected_job_id": {
+            "description": "Exact positive send-job identity expected on an allowlisted current\nSchedule or newsletter Manage queue-control route.",
             "format": "uint64",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           },
           "expected_list_ids": {
             "default": [],
+            "description": "Unique positive caller-bound list context. It is not terminal authority.",
             "items": {
               "format": "uint64",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
-            "type": "array"
+            "type": "array",
+            "uniqueItems": true
           },
           "expected_queue_total": {
             "default": null,
+            "description": "Optional positive expected diagnostic progress total.",
             "format": "uint64",
             "minimum": 1,
             "type": [

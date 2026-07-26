@@ -235,6 +235,29 @@ mod tests {
     }
 
     #[test]
+    fn empty_stats_inventory_requires_structural_or_reviewed_placeholder_proof() {
+        let header_only = r#"
+            <table>
+              <tr><th>Campaign</th><th>Recipients</th><th>Actions</th></tr>
+            </table>
+        "#;
+        let inventory = parse_stats_identity_inventory(BASE, header_only, 25)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(inventory.rows.is_empty());
+
+        let unreviewed_text_placeholder = r#"
+            <table>
+              <tr><td>No newsletter statistics are available.</td></tr>
+            </table>
+        "#;
+        let error = parse_stats_identity_inventory(BASE, unreviewed_text_placeholder, 25)
+            .expect_err("unreviewed textual empty-state copy must fail closed");
+        assert!(error
+            .to_string()
+            .contains("non-header Stats row did not expose one allowlisted durable View identity"));
+    }
+
+    #[test]
     fn rejects_capped_or_paginated_stats_inventory() {
         let capped = r#"
             <table>

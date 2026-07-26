@@ -6539,6 +6539,12 @@ mod tests {
         .is_err());
         assert!(ensure_queue_control_page_identity(
             base_url,
+            "<h1>View Scheduled Email Queue</h1><p>There are no emails currently scheduled.</p>",
+            QueueControlSource::Schedule
+        )
+        .is_ok());
+        assert!(ensure_queue_control_page_identity(
+            base_url,
             "<h2>View Email Campaigns</h2><p>There are no email campaigns.</p>",
             QueueControlSource::CampaignManage
         )

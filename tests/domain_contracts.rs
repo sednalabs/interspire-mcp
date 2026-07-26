@@ -836,6 +836,13 @@ fn send_job_status_readback_contract_is_structured_and_redacted() {
     assert!(report.identity_verified);
     assert_eq!(report.queue_counters.total, Some(100));
     assert_eq!(report.queue_counters.processed, Some(63));
+    assert!(!report.schedule.terminal_authority_proven);
+    assert_eq!(report.schedule.state, "diagnostic_in_progress");
+    assert!(!report.queue_counters.terminal_authority_proven);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("diagnostic and nonterminal")));
     assert!(report.follow_up_contract.is_some());
     assert_payload_excludes_substrings(&report, &["alice@example.invalid", "grant@"]);
 }

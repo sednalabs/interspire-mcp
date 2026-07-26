@@ -2,15 +2,27 @@ use super::{
     Evidence, OciLedgerPreflightReport, OciLedgerPreflightRequest, QueueControlAction,
     QueueControlSource,
 };
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::Serialize;
 
 #[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct SendJobStatusReadbackRequest {
+    /// Exact positive send-job identity expected on an allowlisted current
+    /// Schedule or newsletter Manage queue-control route.
+    #[schemars(range(min = 1))]
     pub expected_job_id: u64,
+    /// Optional positive caller-bound campaign context. Any matching newsletter
+    /// Manage row must expose this exact campaign through its NewsletterEdit route.
     #[serde(default)]
+    #[schemars(range(min = 1))]
     pub expected_campaign_id: Option<u64>,
+    /// Unique positive caller-bound list context. The bounded admin pages do not
+    /// re-prove list scope, so these identities never authorize terminal state.
     #[serde(default)]
+    #[schemars(schema_with = "unique_positive_ids_schema")]
     pub expected_list_ids: Vec<u64>,
+    /// Optional positive expected progress total. Matching Schedule/Manage
+    /// progress remains diagnostic and nonterminal even when it reaches this total.
     #[serde(default)]
     #[schemars(range(min = 1))]
     pub expected_queue_total: Option<u64>,
@@ -19,7 +31,7 @@ pub struct SendJobStatusReadbackRequest {
     /// Diagnostic Stats identities from an earlier bounded read. Caller-supplied
     /// baselines never authorize a terminal send outcome.
     #[serde(default)]
-    #[schemars(length(max = 100), inner(range(min = 1)))]
+    #[schemars(schema_with = "optional_bounded_unique_positive_ids_schema")]
     pub stats_baseline_ids: Option<Vec<u64>>,
     #[serde(default)]
     #[schemars(range(min = 1, max = 100))]
@@ -28,13 +40,18 @@ pub struct SendJobStatusReadbackRequest {
 
 #[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct SendJobFollowUpContract {
+    #[schemars(range(min = 1))]
     pub job_id: u64,
+    #[schemars(range(min = 1))]
     pub campaign_id: u64,
+    #[schemars(schema_with = "unique_positive_ids_schema")]
     pub list_ids: Vec<u64>,
+    #[schemars(range(min = 1))]
     pub expected_queue_total: u64,
     pub body_sha256: Option<String>,
     /// Diagnostic bounded inventory carried to the next read. It does not bind
     /// a Stats row to this job and cannot authorize terminal state.
+    #[schemars(schema_with = "bounded_unique_positive_ids_schema")]
     pub stats_baseline_ids: Vec<u64>,
     pub status_tool: String,
 }
@@ -89,8 +106,15 @@ pub struct SendJobScheduleState {
     pub row_summaries: Vec<String>,
     pub available_actions: Vec<QueueControlAction>,
     pub action_plans: Vec<SendJobActionPlan>,
+    /// Diagnostic active-row progress only. This is never an authoritative
+    /// terminal sent count.
     pub sent_count: Option<u64>,
+    /// Diagnostic active-row progress total only.
     pub total_count: Option<u64>,
+    /// Always false for the current bounded admin-HTML progress source.
+    pub terminal_authority_proven: bool,
+    /// Closed diagnostic state vocabulary; reaching the reported total remains
+    /// explicitly nonterminal.
     pub state: String,
 }
 
@@ -116,8 +140,12 @@ pub struct SendJobStatsState {
 pub struct SendJobQueueCounters {
     pub source: String,
     pub total: Option<u64>,
+    /// Diagnostic Schedule/Manage progress only, never a terminal processed count.
     pub processed: Option<u64>,
     pub unprocessed: Option<u64>,
+    /// Always false unless a future reviewed application-native source proves
+    /// terminal queue authority.
+    pub terminal_authority_proven: bool,
     pub unavailable_reason: Option<String>,
 }
 
@@ -157,11 +185,20 @@ pub struct CronFieldSummary {
 
 #[derive(Debug, Clone, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct SendStopGateReadinessRequest {
+    /// Exact positive send-job identity expected on an allowlisted current
+    /// Schedule or newsletter Manage queue-control route.
+    #[schemars(range(min = 1))]
     pub expected_job_id: u64,
+    /// Optional positive caller-bound campaign context. Any matching newsletter
+    /// Manage row must expose this exact campaign through its NewsletterEdit route.
     #[serde(default)]
+    #[schemars(range(min = 1))]
     pub expected_campaign_id: Option<u64>,
+    /// Unique positive caller-bound list context. It is not terminal authority.
     #[serde(default)]
+    #[schemars(schema_with = "unique_positive_ids_schema")]
     pub expected_list_ids: Vec<u64>,
+    /// Optional positive expected diagnostic progress total.
     #[serde(default)]
     #[schemars(range(min = 1))]
     pub expected_queue_total: Option<u64>,
@@ -202,6 +239,32 @@ fn default_hard_bounce_pause_threshold() -> f64 {
     0.02
 }
 
+fn unique_positive_ids_schema(generator: &mut SchemaGenerator) -> Schema {
+    mark_unique_positive_ids(Vec::<u64>::json_schema(generator), None)
+}
+
+fn bounded_unique_positive_ids_schema(generator: &mut SchemaGenerator) -> Schema {
+    mark_unique_positive_ids(Vec::<u64>::json_schema(generator), Some(100))
+}
+
+fn optional_bounded_unique_positive_ids_schema(generator: &mut SchemaGenerator) -> Schema {
+    mark_unique_positive_ids(Option::<Vec<u64>>::json_schema(generator), Some(100))
+}
+
+fn mark_unique_positive_ids(mut schema: Schema, max_items: Option<u64>) -> Schema {
+    schema.insert("uniqueItems".to_string(), true.into());
+    if let Some(max_items) = max_items {
+        schema.insert("maxItems".to_string(), max_items.into());
+    }
+    if let Some(items) = schema
+        .get_mut("items")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        items.insert("minimum".to_string(), 1.into());
+    }
+    schema
+}
+
 impl SendJobStatusReadbackReport {
     pub fn fixture() -> Self {
         Self {
@@ -224,7 +287,8 @@ impl SendJobStatusReadbackReport {
                 }],
                 sent_count: Some(63),
                 total_count: Some(100),
-                state: "active".to_string(),
+                terminal_authority_proven: false,
+                state: "diagnostic_in_progress".to_string(),
             },
             stats: SendJobStatsState {
                 matched_rows: 0,
@@ -240,8 +304,9 @@ impl SendJobStatusReadbackReport {
                 total: Some(100),
                 processed: Some(63),
                 unprocessed: Some(37),
+                terminal_authority_proven: false,
                 unavailable_reason: Some(
-                    "direct Interspire queue table counters are not configured for this public MCP"
+                    "Schedule/Manage progress is diagnostic and nonterminal; direct Interspire queue table counters are not configured for this public MCP"
                         .to_string(),
                 ),
             },
@@ -257,6 +322,8 @@ impl SendJobStatusReadbackReport {
                 ),
             )),
             warnings: vec![
+                "Schedule/Manage progress counts are diagnostic and nonterminal; reaching the reported total does not prove completion"
+                    .to_string(),
                 "unsent reason aggregates require a reviewed private table source; none was configured"
                     .to_string(),
             ],

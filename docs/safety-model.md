@@ -346,10 +346,25 @@ job id, campaign id, list ids, positive expected queue total, bounded positive
 Stats identity baseline, and the `interspire_send_job_status_readback` tool
 name. That status tool reads only allowlisted Schedule, newsletter Manage, and
 Stats pages. The same positive job may be normalized across one bounded row on
-each active source only when every Manage row proves the intended campaign. A Schedule-only
-singleton discovered after an apply cannot create job identity unless popup
-evidence already agrees or the bounded Manage inventory supplies that campaign
-association.
+each active source only when every participating Manage row exposes one positive
+NewsletterEdit campaign identity that exactly matches the intended campaign. A
+Schedule-only singleton discovered after an apply cannot create job identity
+unless popup evidence already agrees or the bounded Manage inventory supplies
+that campaign association.
+
+Schedule/Manage active-row counters are retained only as diagnostic progress.
+Their schedule and queue-counter objects keep
+`terminal_authority_proven=false`; equal sent/total progress uses
+`diagnostic_at_reported_total_nonterminal`, not `complete`, and sent progress
+greater than the reported total fails closed. Stats identities, Stats counts,
+and these progress values never prove terminal state without a separately
+reviewed application-native job-to-Stats association.
+
+Empty inventories are also fail-closed. Known Schedule and newsletter Manage
+empty-state copy requires the expected page heading. A header-only Stats table
+is accepted as structurally empty, while an unreviewed textual placeholder is
+rejected as an unidentified non-header row until target-version evidence
+supports an explicit compatibility rule.
 
 Historical Stats row text, recipient-count equality, dates, campaign-like
 numeric text, and incidental job-id text never prove current job identity. The
