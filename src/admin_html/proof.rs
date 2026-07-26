@@ -21,14 +21,18 @@ use mcp_toolkit_observability::redaction::truncate;
 use reqwest::blocking::RequestBuilder;
 use scraper::{ElementRef, Html, Selector};
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, io::Write, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    io::Write,
+    path::Path,
+};
 use url::Url;
 
 const MAX_SEND_POPUP_STEPS: usize = 25;
 
 #[derive(Debug, Clone)]
 struct GuardedSendEvidence {
-    status_code: u16,
+    status_code: Option<u16>,
     redirected: bool,
     reconciliation: SendReconciliationReport,
 }
@@ -39,10 +43,87 @@ struct GuardedSendReconcileInput<'a> {
     list_ids: &'a [u64],
     expected_body_sha256: Option<String>,
     queue_before: &'a [String],
+    schedule_job_ids_before: &'a BTreeSet<u64>,
     stats_before: &'a [String],
     expected_recipient_count: u64,
-    seed_send: bool,
     max_rows: usize,
+}
+
+struct GuardedSendTerminalInput<'a> {
+    campaign_id: u64,
+    list_ids: &'a [u64],
+    expected_body_sha256: Option<String>,
+    queue_before: &'a [String],
+    queue_after: &'a [String],
+    stats_before: &'a [String],
+    stats_after: &'a [String],
+    expected_recipient_count: u64,
+    job_id: Option<u64>,
+    smtp_reason: Option<String>,
+    popup_steps: usize,
+    approved_cron_schedule: bool,
+    proof_gaps: Vec<String>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct GuardedSendJobEvidence {
+    job_id: Option<u64>,
+    conflicted: bool,
+    proof_gaps: Vec<String>,
+}
+
+impl GuardedSendJobEvidence {
+    fn observe(&mut self, candidate: Option<u64>, source: &str) {
+        let Some(candidate) = candidate else {
+            return;
+        };
+        if candidate == 0 {
+            self.job_id = None;
+            self.conflicted = true;
+            self.proof_gaps
+                .push(format!("{source} exposed an invalid zero job identity"));
+            return;
+        }
+        if self.conflicted {
+            return;
+        }
+        match self.job_id {
+            None => self.job_id = Some(candidate),
+            Some(current) if current == candidate => {}
+            Some(_) => {
+                self.job_id = None;
+                self.conflicted = true;
+                self.proof_gaps.push(format!(
+                    "{source} conflicted with another observed job identity"
+                ));
+            }
+        }
+    }
+
+    fn add_gap(&mut self, gap: impl Into<String>) {
+        self.proof_gaps.push(gap.into());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScheduleJobIdentityDelta {
+    None,
+    Unique(u64),
+    Ambiguous { added: usize, removed: usize },
+}
+
+#[derive(Debug, Default)]
+struct GuardedSendProgress {
+    status_code: Option<u16>,
+    redirected: bool,
+    job_evidence: GuardedSendJobEvidence,
+    smtp_reason: Option<String>,
+    popup_steps: usize,
+    approved_cron_schedule: bool,
+    notes: Vec<String>,
+    queue_after: Option<Vec<String>>,
+    stats_after: Option<Vec<String>>,
 }
 
 impl AdminHtmlClient {
@@ -998,10 +1079,9 @@ impl AdminHtmlClient {
 
         self.login()?;
         let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
-        let queue_before = parse_table_rows(
-            &self.get_allowed(&AdminReadPage::Schedule.path())?,
-            max_rows,
-        )?;
+        let schedule_before_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
+        let schedule_job_ids_before = schedule_job_ids_from_html(&schedule_before_html);
+        let queue_before = parse_table_rows(&schedule_before_html, max_rows)?;
         let stats_before =
             parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
         let (send_wizard, final_html) = self.render_send_wizard_final_page(
@@ -1071,15 +1151,12 @@ impl AdminHtmlClient {
             list_ids: &request.list_ids,
             expected_body_sha256: None,
             queue_before: &queue_before,
+            schedule_job_ids_before: &schedule_job_ids_before,
             stats_before: &stats_before,
             expected_recipient_count: request.expected_recipient_count,
-            seed_send: true,
             max_rows,
         })?;
-        let sent = matches!(
-            send_evidence.reconciliation.status,
-            SendApplyStatus::SeedProven
-        ) && send_evidence.reconciliation.job_id.is_some();
+        let sent = send_evidence.reconciliation.terminal_application_proven();
         let mut warnings = readiness.warnings.clone();
         warnings.extend(seed_send_apply_warnings(&send_evidence.reconciliation));
 
@@ -1091,7 +1168,7 @@ impl AdminHtmlClient {
             send_wizard,
             readiness.gates,
             sent,
-            Some(send_evidence.status_code),
+            send_evidence.status_code,
             send_evidence.redirected,
             queue_before.len(),
             send_evidence.reconciliation.queue_rows_after,
@@ -1200,10 +1277,9 @@ impl AdminHtmlClient {
 
         self.login()?;
         let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
-        let queue_before = parse_table_rows(
-            &self.get_allowed(&AdminReadPage::Schedule.path())?,
-            max_rows,
-        )?;
+        let schedule_before_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
+        let schedule_job_ids_before = schedule_job_ids_from_html(&schedule_before_html);
+        let queue_before = parse_table_rows(&schedule_before_html, max_rows)?;
         let stats_before =
             parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
         let (send_wizard, final_html) = self.render_send_wizard_final_page(
@@ -1277,13 +1353,12 @@ impl AdminHtmlClient {
             list_ids: &request.list_ids,
             expected_body_sha256: Some(request.expected_html_sha256.clone()),
             queue_before: &queue_before,
+            schedule_job_ids_before: &schedule_job_ids_before,
             stats_before: &stats_before,
             expected_recipient_count: request.expected_recipient_count,
-            seed_send: false,
             max_rows,
         })?;
-        let sent = send_evidence.reconciliation.status.terminal_success()
-            && send_evidence.reconciliation.job_id.is_some();
+        let sent = send_evidence.reconciliation.terminal_application_proven();
         let mut warnings = readiness.warnings.clone();
         warnings.extend(production_send_apply_warnings(
             &send_evidence.reconciliation,
@@ -1298,7 +1373,7 @@ impl AdminHtmlClient {
             send_wizard,
             readiness.gates,
             sent,
-            Some(send_evidence.status_code),
+            send_evidence.status_code,
             send_evidence.redirected,
             queue_before.len(),
             send_evidence.reconciliation.queue_rows_after,
@@ -1313,237 +1388,345 @@ impl AdminHtmlClient {
         &self,
         input: GuardedSendReconcileInput<'_>,
     ) -> Result<GuardedSendEvidence, InterspireError> {
-        let (send_url, send_pairs) = input.send_form;
-        let response = self
-            .proof_post_with_page_context(send_url, &send_pairs, &AdminReadPage::SendStart.path())?
-            .send()
-            .map_err(|err| InterspireError::Http(err.to_string()))?;
+        let (send_url, send_pairs) = input.send_form.clone();
+        let request = self.proof_post_with_page_context(
+            send_url,
+            &send_pairs,
+            &AdminReadPage::SendStart.path(),
+        )?;
+        let mut progress = GuardedSendProgress::default();
+        let response = match request.send() {
+            Ok(response) => response,
+            Err(_) => {
+                return Ok(guarded_send_evidence_from_progress(
+                    &input,
+                    progress,
+                    Some(
+                        "the final request was dispatched but its HTTP response was unavailable; application outcome remains uncertain",
+                    ),
+                ));
+            }
+        };
         let status = response.status();
-        let status_code = status.as_u16();
-        let redirected = status.is_redirection();
-        let mut popup_steps = 0usize;
-        let mut job_id = None;
-        let mut smtp_reason = None;
+        progress.status_code = Some(status.as_u16());
+        progress.redirected = status.is_redirection();
         let mut final_response_summary = None;
-        let mut popup_notes = Vec::new();
         let mut seen_popup_urls = HashSet::new();
-        let mut approved_cron_schedule = false;
-        let mut next_popup_url = response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|location| {
-                safety::ensure_allowed_guarded_send_popup(
-                    self.config.base_url.as_deref().unwrap_or_default(),
-                    location,
-                )
-                .ok()
-            });
+        let mut next_popup_url = match guarded_send_location_from_headers(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            response.headers(),
+        ) {
+            Ok(url) => url,
+            Err(_) => {
+                return Ok(guarded_send_evidence_from_progress(
+                    &input,
+                    progress,
+                    Some("the final response exposed a malformed or disallowed continuation route"),
+                ));
+            }
+        };
 
         if status.is_success() {
-            let html = response
-                .text()
-                .map_err(|err| InterspireError::Http(err.to_string()))?;
+            let html = match response.text() {
+                Ok(html) => html,
+                Err(_) => {
+                    return Ok(guarded_send_evidence_from_progress(
+                        &input,
+                        progress,
+                        Some("the final response body was unavailable after request dispatch"),
+                    ));
+                }
+            };
             if !html.trim().is_empty() {
-                ensure_authenticated_html(&html)?;
-                smtp_reason = transport_failure_reason(&html);
+                if ensure_authenticated_html(&html).is_err() {
+                    return Ok(guarded_send_evidence_from_progress(
+                        &input,
+                        progress,
+                        Some(
+                            "the final response could not be authenticated after request dispatch",
+                        ),
+                    ));
+                }
+                progress.smtp_reason = transport_failure_reason(&html);
                 final_response_summary = step4_response_summary(&html);
                 // Cron-enabled Interspire sends stop at Step4 until the same
                 // session follows the exact Schedule approval continuation.
-                if let Some(approval_url) = guarded_schedule_approval_url(
+                let approval_url = match guarded_schedule_approval_url(
                     self.config.base_url.as_deref().unwrap_or_default(),
                     &html,
-                )? {
-                    let approval_response = self
+                ) {
+                    Ok(url) => url,
+                    Err(_) => {
+                        return Ok(guarded_send_evidence_from_progress(
+                            &input,
+                            progress,
+                            Some(
+                                "the final response exposed a malformed or disallowed schedule continuation",
+                            ),
+                        ));
+                    }
+                };
+                if let Some(approval_url) = approval_url {
+                    let approval_response = match self
                         .with_access_headers(self.http.get(approval_url))
                         .send()
-                        .map_err(|err| InterspireError::Http(err.to_string()))?;
+                    {
+                        Ok(response) => response,
+                        Err(_) => {
+                            return Ok(guarded_send_evidence_from_progress(
+                                    &input,
+                                    progress,
+                                    Some(
+                                        "the schedule continuation response was unavailable after request dispatch",
+                                    ),
+                                ));
+                        }
+                    };
                     if !approval_response.status().is_success()
                         && !approval_response.status().is_redirection()
                     {
-                        return Err(InterspireError::Http(format!(
-                            "guarded schedule approval route returned HTTP {}",
-                            approval_response.status().as_u16()
-                        )));
+                        return Ok(guarded_send_evidence_from_progress(
+                            &input,
+                            progress,
+                            Some(
+                                "the schedule continuation returned a non-success response after request dispatch",
+                            ),
+                        ));
                     }
-                    approved_cron_schedule = true;
-                    popup_notes.push(
+                    progress.approved_cron_schedule = true;
+                    progress.notes.push(
                         "Cron send confirmation approved through the guarded Schedule&A=1 route"
                             .to_string(),
                     );
                     if approval_response.status().is_success() {
-                        let approval_html = approval_response
-                            .text()
-                            .map_err(|err| InterspireError::Http(err.to_string()))?;
-                        if !approval_html.trim().is_empty() {
-                            ensure_authenticated_html(&approval_html)?;
-                            job_id = job_id.or_else(|| schedule_job_id_from_html(&approval_html));
+                        let approval_html = match approval_response.text() {
+                            Ok(html) => html,
+                            Err(_) => {
+                                return Ok(guarded_send_evidence_from_progress(
+                                    &input,
+                                    progress,
+                                    Some(
+                                        "the schedule continuation body was unavailable after request dispatch",
+                                    ),
+                                ));
+                            }
+                        };
+                        if !approval_html.trim().is_empty()
+                            && ensure_authenticated_html(&approval_html).is_err()
+                        {
+                            return Ok(guarded_send_evidence_from_progress(
+                                &input,
+                                progress,
+                                Some(
+                                    "the schedule continuation could not be authenticated after request dispatch",
+                                ),
+                            ));
                         }
                     }
                 }
-                next_popup_url = next_popup_url.or(guarded_send_popup_url(
+                let body_popup_url = match guarded_send_popup_url(
                     self.config.base_url.as_deref().unwrap_or_default(),
                     &html,
-                )?);
+                ) {
+                    Ok(url) => url,
+                    Err(_) => {
+                        return Ok(guarded_send_evidence_from_progress(
+                            &input,
+                            progress,
+                            Some(
+                                "the final response exposed a malformed or disallowed popup continuation",
+                            ),
+                        ));
+                    }
+                };
+                next_popup_url = next_popup_url.or(body_popup_url);
             }
-        } else if !redirected {
-            return Err(InterspireError::Http(format!(
-                "guarded send final form returned HTTP {}",
-                status_code
-            )));
+        } else if !progress.redirected {
+            return Ok(guarded_send_evidence_from_progress(
+                &input,
+                progress,
+                Some(
+                    "the final request returned a non-success response; application outcome remains unproven",
+                ),
+            ));
         }
 
         while let Some(url) = next_popup_url.take() {
-            if popup_steps >= MAX_SEND_POPUP_STEPS {
-                popup_notes.push("send popup loop stopped at the maximum step guard".to_string());
+            if progress.popup_steps >= MAX_SEND_POPUP_STEPS {
+                progress
+                    .notes
+                    .push("send popup loop stopped at the maximum step guard".to_string());
                 break;
             }
             let url_key = url.as_str().to_string();
             if !seen_popup_urls.insert(url_key) {
-                popup_notes.push("send popup loop stopped after a repeated route".to_string());
+                progress
+                    .notes
+                    .push("send popup loop stopped after a repeated route".to_string());
                 break;
             }
-            job_id = job_id.or_else(|| send_popup_job_id(&url));
-            let response = self
-                .with_access_headers(self.http.get(url))
-                .send()
-                .map_err(|err| InterspireError::Http(err.to_string()))?;
+            progress
+                .job_evidence
+                .observe(send_popup_job_id(&url), "popup continuation");
+            let response = match self.with_access_headers(self.http.get(url)).send() {
+                Ok(response) => response,
+                Err(_) => {
+                    return Ok(guarded_send_evidence_from_progress(
+                        &input,
+                        progress,
+                        Some(
+                            "a popup continuation response was unavailable after request dispatch",
+                        ),
+                    ));
+                }
+            };
             let popup_status = response.status();
-            let popup_location = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|location| {
-                    safety::ensure_allowed_guarded_send_popup(
-                        self.config.base_url.as_deref().unwrap_or_default(),
-                        location,
-                    )
-                    .ok()
-                });
+            let popup_location = match guarded_send_location_from_headers(
+                self.config.base_url.as_deref().unwrap_or_default(),
+                response.headers(),
+            ) {
+                Ok(url) => url,
+                Err(_) => {
+                    return Ok(guarded_send_evidence_from_progress(
+                        &input,
+                        progress,
+                        Some(
+                            "a popup response exposed a malformed or disallowed continuation route",
+                        ),
+                    ));
+                }
+            };
             if !popup_status.is_success() && !popup_status.is_redirection() {
-                return Err(InterspireError::Http(format!(
-                    "send popup route returned HTTP {}",
-                    popup_status.as_u16()
-                )));
+                return Ok(guarded_send_evidence_from_progress(
+                    &input,
+                    progress,
+                    Some(
+                        "a popup continuation returned a non-success response after request dispatch",
+                    ),
+                ));
             }
-            popup_steps += 1;
+            progress.popup_steps += 1;
             if popup_status.is_redirection() {
                 next_popup_url = popup_location;
                 continue;
             }
-            let html = response
-                .text()
-                .map_err(|err| InterspireError::Http(err.to_string()))?;
+            let html = match response.text() {
+                Ok(html) => html,
+                Err(_) => {
+                    return Ok(guarded_send_evidence_from_progress(
+                        &input,
+                        progress,
+                        Some("a popup continuation body was unavailable after request dispatch"),
+                    ));
+                }
+            };
             if !html.trim().is_empty() {
-                ensure_authenticated_html(&html)?;
-                smtp_reason = smtp_reason.or_else(|| transport_failure_reason(&html));
-                next_popup_url = popup_location.or(guarded_send_popup_url(
+                if ensure_authenticated_html(&html).is_err() {
+                    return Ok(guarded_send_evidence_from_progress(
+                        &input,
+                        progress,
+                        Some(
+                            "a popup continuation could not be authenticated after request dispatch",
+                        ),
+                    ));
+                }
+                progress.smtp_reason = progress
+                    .smtp_reason
+                    .or_else(|| transport_failure_reason(&html));
+                let body_popup_url = match guarded_send_popup_url(
                     self.config.base_url.as_deref().unwrap_or_default(),
                     &html,
-                )?);
+                ) {
+                    Ok(url) => url,
+                    Err(_) => {
+                        return Ok(guarded_send_evidence_from_progress(
+                            &input,
+                            progress,
+                            Some(
+                                "a popup body exposed a malformed or disallowed continuation route",
+                            ),
+                        ));
+                    }
+                };
+                next_popup_url = popup_location.or(body_popup_url);
             }
         }
 
-        let queue_after = parse_table_rows(
-            &self.get_allowed(&AdminReadPage::Schedule.path())?,
-            input.max_rows,
-        )?;
-        let stats_after = parse_table_rows(
-            &self.get_allowed(&AdminReadPage::Stats.path())?,
-            input.max_rows,
-        )?;
-        let stats_changed = rows_changed_for_send_proof(input.stats_before, &stats_after);
-        let queued = rows_changed_for_send_proof(input.queue_before, &queue_after);
-        let sent_count = if stats_changed || popup_steps > 0 {
-            Some(input.expected_recipient_count)
-        } else {
-            None
+        let schedule_after_html = match self.get_allowed(&AdminReadPage::Schedule.path()) {
+            Ok(html) => html,
+            Err(_) => {
+                return Ok(guarded_send_evidence_from_progress(
+                    &input,
+                    progress,
+                    Some("Schedule readback was unavailable after request dispatch"),
+                ));
+            }
         };
-        let failed_count = smtp_reason.as_ref().map(|_| input.expected_recipient_count);
-        let unsent_count = if smtp_reason.is_some() {
-            Some(input.expected_recipient_count)
-        } else {
-            (stats_changed || popup_steps > 0).then_some(0)
+        progress.queue_after = match parse_table_rows(&schedule_after_html, input.max_rows) {
+            Ok(rows) => Some(rows),
+            Err(_) => {
+                return Ok(guarded_send_evidence_from_progress(
+                    &input,
+                    progress,
+                    Some("Schedule readback could not be parsed after request dispatch"),
+                ));
+            }
         };
-        let mut proof_gaps = Vec::new();
-        let status = if smtp_reason.is_some() {
-            SendApplyStatus::TransportFailed
-        } else if stats_changed && input.seed_send {
-            proof_gaps.push("provider inbox delivery still requires external readback".to_string());
-            SendApplyStatus::SeedProven
-        } else if stats_changed {
-            proof_gaps.push(
-                "provider delivery, bounces, and complaints require external monitoring"
-                    .to_string(),
-            );
-            SendApplyStatus::Processed
-        } else if queued || popup_steps > 0 || approved_cron_schedule {
-            proof_gaps.push("Stats page did not yet show a completed send row".to_string());
-            SendApplyStatus::Queued
-        } else {
-            proof_gaps.push(
-                "final send boundary posted but no popup, queue, or stats processing evidence was found"
-                    .to_string(),
-            );
-            SendApplyStatus::Posted
-        };
-        if job_id.is_none() {
-            proof_gaps
-                .push("Interspire job id was not found in redacted send-loop evidence".to_string());
-        }
-        if stats_changed {
-            popup_notes.push("Stats rows changed after guarded send loop".to_string());
-        }
-        if queued {
-            popup_notes.push("Schedule rows changed after guarded send loop".to_string());
-        }
-        if approved_cron_schedule && job_id.is_none() {
-            proof_gaps.push(
-                "Cron schedule approval was followed but the approved job id was not extracted"
-                    .to_string(),
-            );
-        }
-        if job_id.is_none() && !stats_changed {
-            if let Some(summary) = final_response_summary {
-                popup_notes.push(format!("Final Step4 response summary: {summary}"));
+        match schedule_job_identity_delta(
+            input.schedule_job_ids_before,
+            &schedule_job_ids_from_html(&schedule_after_html),
+        ) {
+            ScheduleJobIdentityDelta::None => progress
+                .job_evidence
+                .add_gap("Schedule readback exposed no unique new job identity"),
+            ScheduleJobIdentityDelta::Unique(job_id) => progress
+                .job_evidence
+                .observe(Some(job_id), "Schedule identity delta"),
+            ScheduleJobIdentityDelta::Ambiguous { added, removed } => {
+                progress.job_evidence.add_gap(format!(
+                    "Schedule identity reconciliation was ambiguous: {added} added and {removed} removed"
+                ));
             }
         }
-        let follow_up_contract = if matches!(status, SendApplyStatus::Queued) {
-            job_id.map(|job_id| {
-                SendJobFollowUpContract::new(
-                    job_id,
-                    input.campaign_id,
-                    input.list_ids.to_vec(),
-                    input.expected_recipient_count,
-                    input.expected_body_sha256,
-                )
-            })
-        } else {
-            None
-        };
 
-        Ok(GuardedSendEvidence {
-            status_code,
-            redirected,
-            reconciliation: SendReconciliationReport::new(
-                status,
-                job_id,
-                None,
-                None,
-                sent_count,
-                failed_count,
-                unsent_count,
-                smtp_reason,
-                popup_steps,
-                input.queue_before.len(),
-                queue_after.len(),
-                input.stats_before.len(),
-                stats_after.len(),
-                proof_gaps,
-                popup_notes,
+        let stats_after_html = match self.get_allowed(&AdminReadPage::Stats.path()) {
+            Ok(html) => html,
+            Err(_) => {
+                return Ok(guarded_send_evidence_from_progress(
+                    &input,
+                    progress,
+                    Some("Stats readback was unavailable after request dispatch"),
+                ));
+            }
+        };
+        progress.stats_after = match parse_table_rows(&stats_after_html, input.max_rows) {
+            Ok(rows) => Some(rows),
+            Err(_) => {
+                return Ok(guarded_send_evidence_from_progress(
+                    &input,
+                    progress,
+                    Some("Stats readback could not be parsed after request dispatch"),
+                ));
+            }
+        };
+        if progress.job_evidence.job_id.is_none()
+            && stable_stats_identity_delta(
+                input.stats_before,
+                progress
+                    .stats_after
+                    .as_deref()
+                    .unwrap_or(input.stats_before),
             )
-            .with_follow_up_contract(follow_up_contract),
-        })
+            .added
+                == 0
+        {
+            if let Some(summary) = final_response_summary {
+                progress
+                    .notes
+                    .push(format!("Final Step4 response summary: {summary}"));
+            }
+        }
+        Ok(guarded_send_evidence_from_progress(&input, progress, None))
     }
 
     fn proof_post_with_page_context(
@@ -2553,8 +2736,220 @@ fn rows_changed_for_send_proof(before: &[String], after: &[String]) -> bool {
     !rows_unchanged_for_send_proof(before, after)
 }
 
+fn guarded_send_location_from_headers(
+    base_url: &str,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Option<Url>, InterspireError> {
+    let Some(value) = headers.get(reqwest::header::LOCATION) else {
+        return Ok(None);
+    };
+    let location = value.to_str().map_err(|_| {
+        InterspireError::Safety("guarded continuation was not valid text".to_string())
+    })?;
+    safety::ensure_allowed_guarded_send_popup(base_url, location).map(Some)
+}
+
+fn guarded_send_evidence_from_progress(
+    input: &GuardedSendReconcileInput<'_>,
+    mut progress: GuardedSendProgress,
+    uncertainty_gap: Option<&str>,
+) -> GuardedSendEvidence {
+    if let Some(gap) = uncertainty_gap {
+        progress.job_evidence.add_gap(gap);
+        progress.notes.push(
+            "post-boundary uncertainty was retained as a nonterminal reconciliation receipt"
+                .to_string(),
+        );
+    }
+    let queue_after = progress
+        .queue_after
+        .as_deref()
+        .unwrap_or(input.queue_before);
+    let stats_after = progress
+        .stats_after
+        .as_deref()
+        .unwrap_or(input.stats_before);
+    let reconciliation = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
+        campaign_id: input.campaign_id,
+        list_ids: input.list_ids,
+        expected_body_sha256: input.expected_body_sha256.clone(),
+        queue_before: input.queue_before,
+        queue_after,
+        stats_before: input.stats_before,
+        stats_after,
+        expected_recipient_count: input.expected_recipient_count,
+        job_id: progress.job_evidence.job_id,
+        smtp_reason: progress.smtp_reason,
+        popup_steps: progress.popup_steps,
+        approved_cron_schedule: progress.approved_cron_schedule,
+        proof_gaps: progress.job_evidence.proof_gaps,
+        notes: progress.notes,
+    });
+
+    GuardedSendEvidence {
+        status_code: progress.status_code,
+        redirected: progress.redirected,
+        reconciliation,
+    }
+}
+
 fn rows_unchanged_for_send_proof(before: &[String], after: &[String]) -> bool {
     stable_table_rows_for_send_proof(before) == stable_table_rows_for_send_proof(after)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StableStatsIdentityDelta {
+    added: usize,
+    removed: usize,
+}
+
+fn stable_stats_identity_delta(before: &[String], after: &[String]) -> StableStatsIdentityDelta {
+    let before_counts = stable_stats_identity_counts(before);
+    let after_counts = stable_stats_identity_counts(after);
+    let mut added = 0usize;
+    let mut removed = 0usize;
+
+    for (identity, before_count) in &before_counts {
+        let after_count = after_counts.get(identity).copied().unwrap_or_default();
+        removed += before_count.saturating_sub(after_count);
+    }
+    for (identity, after_count) in &after_counts {
+        let before_count = before_counts.get(identity).copied().unwrap_or_default();
+        added += after_count.saturating_sub(before_count);
+    }
+
+    StableStatsIdentityDelta { added, removed }
+}
+
+fn stable_stats_identity_counts(rows: &[String]) -> BTreeMap<String, usize> {
+    stable_stats_row_identities_for_no_send_proof(&stable_table_rows_for_send_proof(rows))
+        .into_iter()
+        .fold(BTreeMap::new(), |mut counts, identity| {
+            *counts.entry(identity).or_default() += 1;
+            counts
+        })
+}
+
+fn guarded_send_terminal_reconciliation(
+    input: GuardedSendTerminalInput<'_>,
+) -> SendReconciliationReport {
+    let queue_changed = rows_changed_for_send_proof(input.queue_before, input.queue_after);
+    let stats_content_changed = rows_changed_for_send_proof(input.stats_before, input.stats_after);
+    let stats_identity_delta = stable_stats_identity_delta(input.stats_before, input.stats_after);
+    let mut proof_gaps = input.proof_gaps;
+    let mut notes = input.notes;
+
+    match stats_identity_delta {
+        StableStatsIdentityDelta {
+            added: 0,
+            removed: 0,
+        } if stats_content_changed => {
+            proof_gaps.push(
+                "existing Stats row text changed, but stable Stats identities were unchanged"
+                    .to_string(),
+            );
+            notes.push(
+                "mutable Stats labels, encoding, and counters are not terminal send proof"
+                    .to_string(),
+            );
+        }
+        StableStatsIdentityDelta {
+            added: 0,
+            removed: 0,
+        } => {
+            proof_gaps.push("no new durable Stats identity was observed".to_string());
+        }
+        StableStatsIdentityDelta {
+            added: 1,
+            removed: 0,
+        } => {
+            proof_gaps.push(
+                "one new stable Stats identity was observed, but this proof surface did not expose a durable stat id bound to the intended job, campaign, and lists"
+                    .to_string(),
+            );
+        }
+        StableStatsIdentityDelta { added, removed } => {
+            proof_gaps.push(format!(
+                "Stats identity reconciliation was ambiguous: {added} added and {removed} removed"
+            ));
+        }
+    }
+
+    if input.job_id.is_none() {
+        proof_gaps
+            .push("Interspire job id was not found in redacted send-loop evidence".to_string());
+    }
+    if queue_changed {
+        notes.push("Schedule rows changed after guarded send loop".to_string());
+        if input.job_id.is_none() {
+            proof_gaps
+                .push("Schedule movement was observed without a durable job identity".to_string());
+        }
+    }
+    if input.popup_steps > 0 {
+        notes.push(
+            "popup progress is execution evidence only and does not prove terminal processing"
+                .to_string(),
+        );
+    }
+    if input.approved_cron_schedule {
+        notes.push(
+            "Cron schedule approval was followed; terminal job and Stats proof remains separate"
+                .to_string(),
+        );
+        if input.job_id.is_none() {
+            proof_gaps.push(
+                "Cron schedule approval was followed but the approved job id was not extracted"
+                    .to_string(),
+            );
+        }
+    }
+
+    let status = if input.smtp_reason.is_some() {
+        SendApplyStatus::TransportFailed
+    } else if input.job_id.is_some() {
+        SendApplyStatus::Queued
+    } else {
+        SendApplyStatus::Posted
+    };
+    if matches!(status, SendApplyStatus::Posted) {
+        proof_gaps.push(
+            "final send boundary was posted without complete durable application proof".to_string(),
+        );
+    }
+
+    let follow_up_contract = if matches!(status, SendApplyStatus::Queued) {
+        input.job_id.map(|job_id| {
+            SendJobFollowUpContract::new(
+                job_id,
+                input.campaign_id,
+                input.list_ids.to_vec(),
+                input.expected_recipient_count,
+                input.expected_body_sha256,
+            )
+        })
+    } else {
+        None
+    };
+
+    SendReconciliationReport::new(
+        status,
+        input.job_id,
+        None,
+        None,
+        None,
+        None,
+        None,
+        input.smtp_reason,
+        input.popup_steps,
+        input.queue_before.len(),
+        input.queue_after.len(),
+        input.stats_before.len(),
+        input.stats_after.len(),
+        proof_gaps,
+        notes,
+    )
+    .with_follow_up_contract(follow_up_contract)
 }
 
 fn stats_rows_stable_for_no_send_proof(before: &[String], after: &[String]) -> bool {
@@ -2758,8 +3153,8 @@ fn send_popup_path_candidates(html: &str) -> Vec<String> {
     candidates
 }
 
-fn schedule_job_id_from_html(html: &str) -> Option<u64> {
-    let mut ids = Vec::new();
+fn schedule_job_ids_from_html(html: &str) -> BTreeSet<u64> {
+    let mut ids = BTreeSet::new();
     let document = Html::parse_document(html);
     if let Ok(input_selector) = Selector::parse("input") {
         for input in document.select(&input_selector) {
@@ -2773,7 +3168,7 @@ fn schedule_job_id_from_html(html: &str) -> Option<u64> {
                     .attr("value")
                     .and_then(|value| value.parse::<u64>().ok())
                 {
-                    ids.push(id);
+                    ids.insert(id);
                 }
             }
         }
@@ -2782,17 +3177,33 @@ fn schedule_job_id_from_html(html: &str) -> Option<u64> {
         for link in document.select(&link_selector) {
             if let Some(href) = link.value().attr("href") {
                 if let Some(id) = schedule_job_id_from_path(href) {
-                    ids.push(id);
+                    ids.insert(id);
                 }
             }
         }
     }
     for candidate in schedule_path_candidates(html) {
         if let Some(id) = schedule_job_id_from_path(&candidate) {
-            ids.push(id);
+            ids.insert(id);
         }
     }
-    ids.into_iter().max()
+    ids
+}
+
+fn schedule_job_identity_delta(
+    before: &BTreeSet<u64>,
+    after: &BTreeSet<u64>,
+) -> ScheduleJobIdentityDelta {
+    let added = after.difference(before).copied().collect::<Vec<_>>();
+    let removed = before.difference(after).count();
+    match (added.as_slice(), removed) {
+        ([], 0) => ScheduleJobIdentityDelta::None,
+        ([job_id], 0) => ScheduleJobIdentityDelta::Unique(*job_id),
+        _ => ScheduleJobIdentityDelta::Ambiguous {
+            added: added.len(),
+            removed,
+        },
+    }
 }
 
 fn schedule_path_candidates(html: &str) -> Vec<String> {
@@ -2900,10 +3311,10 @@ fn send_apply_warnings(
 ) -> Vec<String> {
     let mut warnings = match reconciliation.status {
         SendApplyStatus::Posted => vec![format!(
-            "{label} final form was posted but remains posted-unproven; no Interspire job, popup, queue, or stats processing proof was found"
+            "{label} final boundary was posted, but durable application identity and terminal state were not proven; observed execution or readback signals remain nonterminal"
         )],
         SendApplyStatus::Queued => vec![format!(
-            "{label} reached the guarded Interspire send loop but remains unproven until job id plus queue/stats processing evidence is present"
+            "{label} has a durable job identity, but a bound terminal Stats identity remains unproven; use the returned follow-up contract for exact readback"
         )],
         SendApplyStatus::TransportFailed => vec![format!(
             "{label} reached the guarded Interspire send loop but Interspire reported a transport failure"
@@ -2920,9 +3331,9 @@ fn send_apply_warnings(
             "{label} was refused before the Interspire final send boundary"
         )],
     };
-    if reconciliation.status.terminal_success() && reconciliation.job_id.is_none() {
+    if reconciliation.status.terminal_success() && !reconciliation.terminal_application_proven() {
         warnings.push(format!(
-            "{label} is not marked sent because the Interspire job id was not proven"
+            "{label} is not marked sent because durable job and Stats identities were not both proven"
         ));
     }
     warnings
@@ -3508,14 +3919,18 @@ mod tests {
         campaign_body_step1_pairs, campaign_body_step2_action_path, campaign_test_send_digest,
         campaign_test_send_has_applyable_html, campaign_test_send_report, csrf_pair,
         expected_public_subject_matches, guarded_schedule_approval_url,
-        guarded_send_final_form_post, guarded_send_final_form_post_for_request,
-        guarded_send_popup_url, is_guarded_send_campaign_selection_name, list_ids_warning,
-        optional_nonempty_sha256, parse_send_wizard_final_page, preview_send_response_success,
-        recipient_count_marker, rows_changed_for_send_proof, rows_unchanged_for_send_proof,
-        schedule_job_id_from_html, seed_send_apply_warnings, selected_or_hidden_list_ids,
+        guarded_send_evidence_from_progress, guarded_send_final_form_post,
+        guarded_send_final_form_post_for_request, guarded_send_popup_url,
+        guarded_send_terminal_reconciliation, is_guarded_send_campaign_selection_name,
+        list_ids_warning, optional_nonempty_sha256, parse_send_wizard_final_page,
+        preview_send_response_success, recipient_count_marker, rows_changed_for_send_proof,
+        rows_unchanged_for_send_proof, schedule_job_identity_delta, schedule_job_ids_from_html,
+        seed_send_apply_warnings, selected_or_hidden_list_ids,
         send_apply_preflight_refusal_warnings, send_step2_action_path, sha256_hex,
-        stats_rows_stable_for_no_send_proof, step4_response_summary, transport_failure_reason,
-        validate_single_preview_email,
+        stable_stats_identity_delta, stats_rows_stable_for_no_send_proof, step4_response_summary,
+        transport_failure_reason, validate_single_preview_email, GuardedSendJobEvidence,
+        GuardedSendProgress, GuardedSendReconcileInput, GuardedSendTerminalInput,
+        ScheduleJobIdentityDelta, StableStatsIdentityDelta,
     };
     use crate::{
         redact,
@@ -3524,6 +3939,8 @@ mod tests {
             SendReconciliationReport,
         },
     };
+    use std::collections::BTreeSet;
+    use url::Url;
 
     #[test]
     fn campaign_body_audit_counts_tokens_without_returning_body() {
@@ -3934,8 +4351,14 @@ mod tests {
     }
 
     #[test]
-    fn schedule_job_id_from_html_extracts_latest_schedule_job() {
-        let html = r#"
+    fn schedule_job_identity_delta_requires_one_exact_new_identity() {
+        let before_html = r#"
+            <tr>
+              <td><input type="checkbox" name="jobs[]" value="42"></td>
+              <td><a href="index.php?Page=Schedule&amp;Action=Approve&amp;job=42">Approve</a></td>
+            </tr>
+        "#;
+        let after_html = r#"
             <tr>
               <td><input type="checkbox" name="jobs[]" value="42"></td>
               <td><a href="index.php?Page=Schedule&amp;Action=Approve&amp;job=42">Approve</a></td>
@@ -3947,7 +4370,146 @@ mod tests {
             <a href="index.php?Page=Newsletters&Action=View&id=99">View</a>
         "#;
 
-        assert_eq!(schedule_job_id_from_html(html), Some(43));
+        assert_eq!(
+            schedule_job_identity_delta(
+                &schedule_job_ids_from_html(before_html),
+                &schedule_job_ids_from_html(after_html),
+            ),
+            ScheduleJobIdentityDelta::Unique(43)
+        );
+    }
+
+    #[test]
+    fn schedule_job_identity_delta_rejects_no_change_removal_and_multiple_additions() {
+        let before = [41_u64, 42].into_iter().collect();
+        let unchanged = [41_u64, 42].into_iter().collect();
+        let removed = [42_u64].into_iter().collect();
+        let multiple_added = [41_u64, 42, 43, 44].into_iter().collect();
+
+        assert_eq!(
+            schedule_job_identity_delta(&before, &unchanged),
+            ScheduleJobIdentityDelta::None
+        );
+        assert_eq!(
+            schedule_job_identity_delta(&before, &removed),
+            ScheduleJobIdentityDelta::Ambiguous {
+                added: 0,
+                removed: 1,
+            }
+        );
+        assert_eq!(
+            schedule_job_identity_delta(&before, &multiple_added),
+            ScheduleJobIdentityDelta::Ambiguous {
+                added: 2,
+                removed: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn guarded_send_job_evidence_rejects_conflicting_schedule_and_popup_identities() {
+        let mut evidence = GuardedSendJobEvidence::default();
+        evidence.observe(Some(43), "popup continuation");
+        evidence.observe(Some(44), "Schedule identity delta");
+
+        assert_eq!(evidence.job_id, None);
+        assert!(evidence.conflicted);
+        assert!(evidence
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("conflicted")));
+    }
+
+    #[test]
+    fn guarded_send_response_loss_returns_nonterminal_receipt_after_dispatch() {
+        let queue = Vec::new();
+        let stats = Vec::new();
+        let schedule_job_ids = BTreeSet::new();
+        let input = GuardedSendReconcileInput {
+            send_form: (
+                Url::parse("https://example.test/admin/index.php?Page=Send&Action=Step4")
+                    .expect("synthetic send URL"),
+                Vec::new(),
+            ),
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &queue,
+            schedule_job_ids_before: &schedule_job_ids,
+            stats_before: &stats,
+            expected_recipient_count: 25,
+            max_rows: 25,
+        };
+        let evidence = guarded_send_evidence_from_progress(
+            &input,
+            GuardedSendProgress::default(),
+            Some(
+                "the final request was dispatched but its HTTP response was unavailable; application outcome remains uncertain",
+            ),
+        );
+
+        assert_eq!(evidence.status_code, None);
+        assert!(!evidence.redirected);
+        assert_eq!(evidence.reconciliation.status, SendApplyStatus::Posted);
+        assert!(!evidence.reconciliation.terminal_application_proven());
+        assert_eq!(evidence.reconciliation.sent_count, None);
+        assert!(evidence
+            .reconciliation
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("HTTP response was unavailable")));
+        assert!(evidence
+            .reconciliation
+            .notes
+            .iter()
+            .any(|note| note.contains("nonterminal reconciliation receipt")));
+    }
+
+    #[test]
+    fn guarded_send_uncertainty_preserves_only_a_nonconflicting_job_follow_up() {
+        let queue = Vec::new();
+        let stats = Vec::new();
+        let schedule_job_ids = BTreeSet::new();
+        let input = GuardedSendReconcileInput {
+            send_form: (
+                Url::parse("https://example.test/admin/index.php?Page=Send&Action=Step4")
+                    .expect("synthetic send URL"),
+                Vec::new(),
+            ),
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &queue,
+            schedule_job_ids_before: &schedule_job_ids,
+            stats_before: &stats,
+            expected_recipient_count: 25,
+            max_rows: 25,
+        };
+        let mut progress = GuardedSendProgress {
+            status_code: Some(200),
+            popup_steps: 1,
+            ..GuardedSendProgress::default()
+        };
+        progress
+            .job_evidence
+            .observe(Some(43), "popup continuation");
+
+        let evidence = guarded_send_evidence_from_progress(
+            &input,
+            progress,
+            Some("Stats readback was unavailable after request dispatch"),
+        );
+
+        assert_eq!(evidence.reconciliation.status, SendApplyStatus::Queued);
+        assert_eq!(evidence.reconciliation.job_id, Some(43));
+        assert!(evidence.reconciliation.follow_up_contract.is_some());
+        assert_eq!(evidence.reconciliation.sent_count, None);
+        assert!(!evidence.reconciliation.terminal_application_proven());
+        assert!(evidence
+            .reconciliation
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("Stats readback was unavailable")));
     }
 
     #[test]
@@ -4150,6 +4712,218 @@ mod tests {
     }
 
     #[test]
+    fn stable_stats_identity_delta_is_order_independent_and_duplicate_aware() {
+        let first = "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0";
+        let second = "Campaign Beta 'List Two' July 1 2026, 11:43 am July 1 2026, 11:44 am 25 0 0";
+        let before = vec![first.to_string(), first.to_string(), second.to_string()];
+        let reordered = vec![second.to_string(), first.to_string(), first.to_string()];
+        let duplicate_removed = vec![second.to_string(), first.to_string()];
+        let duplicate_added = vec![
+            second.to_string(),
+            first.to_string(),
+            first.to_string(),
+            first.to_string(),
+        ];
+
+        assert_eq!(
+            stable_stats_identity_delta(&before, &reordered),
+            StableStatsIdentityDelta {
+                added: 0,
+                removed: 0,
+            }
+        );
+        assert_eq!(
+            stable_stats_identity_delta(&before, &duplicate_removed),
+            StableStatsIdentityDelta {
+                added: 0,
+                removed: 1,
+            }
+        );
+        assert_eq!(
+            stable_stats_identity_delta(&before, &duplicate_added),
+            StableStatsIdentityDelta {
+                added: 1,
+                removed: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn guarded_send_terminal_reconciliation_rejects_mutable_stats_text_and_popup_job() {
+        let queue = Vec::new();
+        let stats_before = vec![
+            "Email Campaign Statistics".to_string(),
+            "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
+        ];
+        let stats_after = vec![
+            "Email Campaign Statistics".to_string(),
+            "Campaign Alpha Renamed 'List One&#' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 4 1 View Export Print Delete".to_string(),
+        ];
+
+        let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: Some("synthetic-body-sha256".to_string()),
+            queue_before: &queue,
+            queue_after: &queue,
+            stats_before: &stats_before,
+            stats_after: &stats_after,
+            expected_recipient_count: 999,
+            job_id: Some(7001),
+            smtp_reason: None,
+            popup_steps: 2,
+            approved_cron_schedule: false,
+            proof_gaps: Vec::new(),
+            notes: vec!["send popup loop stopped after a repeated route".to_string()],
+        });
+
+        assert_eq!(report.status, SendApplyStatus::Queued);
+        assert!(!report.terminal_application_proven());
+        assert_eq!(report.stat_id, None);
+        assert_eq!(report.sent_count, None);
+        assert_eq!(report.failed_count, None);
+        assert_eq!(report.unsent_count, None);
+        assert!(report.follow_up_contract.is_some());
+        assert!(report
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("stable Stats identities were unchanged")));
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("repeated route")));
+    }
+
+    #[test]
+    fn guarded_send_terminal_reconciliation_rejects_same_count_identity_replacement() {
+        let queue = Vec::new();
+        let stats_before = vec![
+            "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
+        ];
+        let stats_after = vec![
+            "Campaign Beta 'List Two' July 1 2026, 11:43 am July 1 2026, 11:44 am 25 0 0 View Export Print Delete".to_string(),
+        ];
+
+        assert_eq!(
+            stable_stats_identity_delta(&stats_before, &stats_after),
+            StableStatsIdentityDelta {
+                added: 1,
+                removed: 1
+            }
+        );
+
+        let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &queue,
+            queue_after: &queue,
+            stats_before: &stats_before,
+            stats_after: &stats_after,
+            expected_recipient_count: 25,
+            job_id: Some(7001),
+            smtp_reason: None,
+            popup_steps: 1,
+            approved_cron_schedule: false,
+            proof_gaps: Vec::new(),
+            notes: Vec::new(),
+        });
+
+        assert_eq!(report.status, SendApplyStatus::Queued);
+        assert!(!report.terminal_application_proven());
+        assert_eq!(report.sent_count, None);
+        assert!(report
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("1 added and 1 removed")));
+    }
+
+    #[test]
+    fn guarded_send_terminal_reconciliation_rejects_unbound_added_stats_identity() {
+        let queue_before = Vec::new();
+        let queue_after = vec!["Campaign Alpha Waiting Action Job".to_string()];
+        let stats_before = vec![
+            "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
+        ];
+        let stats_after = vec![
+            "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
+            "Campaign Gamma 'List Three' July 1 2026, 11:45 am July 1 2026, 11:46 am 25 0 0 View Export Print Delete".to_string(),
+        ];
+
+        let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &queue_before,
+            queue_after: &queue_after,
+            stats_before: &stats_before,
+            stats_after: &stats_after,
+            expected_recipient_count: 25,
+            job_id: Some(7001),
+            smtp_reason: None,
+            popup_steps: 1,
+            approved_cron_schedule: false,
+            proof_gaps: Vec::new(),
+            notes: Vec::new(),
+        });
+
+        assert_eq!(report.status, SendApplyStatus::Queued);
+        assert!(!report.terminal_application_proven());
+        assert_eq!(report.stat_id, None);
+        assert_eq!(report.sent_count, None);
+        assert!(report.follow_up_contract.is_some());
+        assert!(report
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("did not expose a durable stat id")));
+    }
+
+    #[test]
+    fn guarded_send_terminal_reconciliation_preserves_posted_and_transport_controls() {
+        let rows = Vec::new();
+        let posted = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &rows,
+            queue_after: &rows,
+            stats_before: &rows,
+            stats_after: &rows,
+            expected_recipient_count: 25,
+            job_id: None,
+            smtp_reason: None,
+            popup_steps: 0,
+            approved_cron_schedule: false,
+            proof_gaps: Vec::new(),
+            notes: Vec::new(),
+        });
+        let transport_failed = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &rows,
+            queue_after: &rows,
+            stats_before: &rows,
+            stats_after: &rows,
+            expected_recipient_count: 25,
+            job_id: Some(7001),
+            smtp_reason: Some("synthetic transport failure".to_string()),
+            popup_steps: 1,
+            approved_cron_schedule: false,
+            proof_gaps: Vec::new(),
+            notes: Vec::new(),
+        });
+
+        assert_eq!(posted.status, SendApplyStatus::Posted);
+        assert!(posted.follow_up_contract.is_none());
+        assert_eq!(transport_failed.status, SendApplyStatus::TransportFailed);
+        assert_eq!(transport_failed.sent_count, None);
+        assert_eq!(transport_failed.failed_count, None);
+        assert_eq!(transport_failed.unsent_count, None);
+        assert!(!transport_failed.terminal_application_proven());
+    }
+
+    #[test]
     fn production_preflight_refusal_ignores_non_blocking_readiness_warnings() {
         let warnings = send_apply_preflight_refusal_warnings(
             "production",
@@ -4239,10 +5013,41 @@ mod tests {
 
         assert!(warnings
             .iter()
-            .any(|warning| warning.contains("posted-unproven")));
+            .any(|warning| warning.contains("durable application identity")));
         assert!(!warnings
             .iter()
             .any(|warning| warning.contains("recipient render still require")));
+    }
+
+    #[test]
+    fn seed_send_apply_warnings_name_the_missing_bound_stats_identity_for_queued_state() {
+        let reconciliation = SendReconciliationReport::new(
+            SendApplyStatus::Queued,
+            Some(41),
+            None,
+            None,
+            Some(25),
+            Some(0),
+            Some(0),
+            None,
+            2,
+            1,
+            2,
+            1,
+            1,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let warnings = seed_send_apply_warnings(&reconciliation);
+
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("bound terminal Stats identity")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("follow-up contract")));
+        assert_eq!(reconciliation.sent_count, None);
     }
 
     #[test]
