@@ -15,9 +15,10 @@ use crate::{
         CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest, OciLedgerPreflightReport,
         ProductionSendApplyReport, ProductionSendApplyRequest, RenderArtifact, SeedReadinessGate,
         SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport,
-        SeedSendApplyRequest, SendApplyStatus, SendJobFollowUpContract, SendReconciliationReport,
-        SendUncertaintyIdentityState, SendUncertaintyRecoveryContract, SendWizardReadbackReport,
-        SendWizardReadbackRequest, MAX_SEED_SEND_RECIPIENTS, PRODUCTION_SEND_CONFIRMATION_PHRASE,
+        SeedSendApplyRequest, SendApplyStatus, SendBaselineCaptureStage, SendJobFollowUpContract,
+        SendReconciliationReport, SendUncertaintyIdentityState, SendUncertaintyRecoveryContract,
+        SendWizardReadbackReport, SendWizardReadbackRequest, MAX_SEED_SEND_RECIPIENTS,
+        PRODUCTION_SEND_CONFIRMATION_PHRASE,
     },
     safety::{self, AdminReadPage},
 };
@@ -41,17 +42,51 @@ struct GuardedSendEvidence {
     reconciliation: SendReconciliationReport,
 }
 
+struct GuardedSendRequestInput<'a> {
+    send_form: (Url, Vec<(String, String)>),
+    campaign_id: u64,
+    list_ids: &'a [u64],
+    expected_body_sha256: Option<String>,
+    expected_recipient_count: u64,
+    max_rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuardedSendBaselineContext {
+    campaign_id: u64,
+    list_ids: Vec<u64>,
+    expected_body_sha256: Option<String>,
+    expected_recipient_count: u64,
+    max_rows: usize,
+    capture_stage: SendBaselineCaptureStage,
+}
+
 struct GuardedSendReconcileInput<'a> {
     send_form: (Url, Vec<(String, String)>),
     campaign_id: u64,
     list_ids: &'a [u64],
     expected_body_sha256: Option<String>,
-    queue_before: &'a [String],
-    schedule_job_ids_before: &'a BTreeSet<u64>,
-    stats_before: &'a [String],
-    stats_identity_before: &'a StatsIdentityInventory,
     expected_recipient_count: u64,
     max_rows: usize,
+    baseline_context: GuardedSendBaselineContext,
+    queue_before: Vec<String>,
+    schedule_job_ids_before: BTreeSet<u64>,
+    manage_job_ids_before: BTreeSet<u64>,
+    campaign_job_ids_before: BTreeSet<u64>,
+    queue_job_ids_before: BTreeSet<u64>,
+    stats_before: Vec<String>,
+    stats_identity_before: StatsIdentityInventory,
+    baseline_identity_stable: bool,
+}
+
+struct GuardedSendBaselineSnapshot {
+    queue_before: Vec<String>,
+    schedule_job_ids: BTreeSet<u64>,
+    manage_job_ids: BTreeSet<u64>,
+    campaign_job_ids: BTreeSet<u64>,
+    queue_job_ids: BTreeSet<u64>,
+    stats_before: Vec<String>,
+    stats_identity: StatsIdentityInventory,
 }
 
 struct GuardedSendTerminalInput<'a> {
@@ -63,10 +98,15 @@ struct GuardedSendTerminalInput<'a> {
     stats_before: &'a [String],
     stats_after: &'a [String],
     schedule_job_ids_before: &'a BTreeSet<u64>,
+    manage_job_ids_before: &'a BTreeSet<u64>,
+    campaign_job_ids_before: &'a BTreeSet<u64>,
     stats_identity_before: &'a StatsIdentityInventory,
     stats_identity_after: &'a StatsIdentityInventory,
     expected_recipient_count: u64,
     baseline_max_rows: usize,
+    baseline_context_verified: bool,
+    baseline_identity_stable: bool,
+    baseline_capture_stage: SendBaselineCaptureStage,
     job_id: Option<u64>,
     job_active_after: Option<bool>,
     smtp_reason: Option<String>,
@@ -120,7 +160,7 @@ impl GuardedSendJobEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScheduleJobIdentityDelta {
+enum QueueJobIdentityDelta {
     None,
     Unique(u64),
     Ambiguous { added: usize, removed: usize },
@@ -1098,16 +1138,6 @@ impl AdminHtmlClient {
 
         self.login()?;
         let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
-        let schedule_before_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
-        let schedule_job_ids_before = schedule_job_ids_from_html(&schedule_before_html);
-        let queue_before = parse_table_rows(&schedule_before_html, max_rows)?;
-        let stats_before_html = self.get_allowed(&AdminReadPage::Stats.path())?;
-        let stats_identity_before = parse_stats_identity_inventory(
-            self.config.base_url.as_deref().unwrap_or_default(),
-            &stats_before_html,
-            max_rows,
-        )?;
-        let stats_before = parse_table_rows(&stats_before_html, max_rows)?;
         let (send_wizard, final_html) = self.render_send_wizard_final_page(
             &SendWizardReadbackRequest {
                 campaign_id: request.campaign_id,
@@ -1117,6 +1147,10 @@ impl AdminHtmlClient {
             },
             max_rows,
         )?;
+        let wizard_queue_rows_before = send_wizard.queue_rows_before;
+        let wizard_queue_rows_after = send_wizard.queue_rows_after;
+        let wizard_stats_rows_before = send_wizard.stats_rows_before;
+        let wizard_stats_rows_after = send_wizard.stats_rows_after;
         if !send_wizard.ok {
             let mut warnings = readiness.warnings.clone();
             warnings.extend(send_wizard.warnings.clone());
@@ -1132,10 +1166,10 @@ impl AdminHtmlClient {
                 false,
                 None,
                 false,
-                queue_before.len(),
-                queue_before.len(),
-                stats_before.len(),
-                stats_before.len(),
+                wizard_queue_rows_before,
+                wizard_queue_rows_after,
+                wizard_stats_rows_before,
+                wizard_stats_rows_after,
                 None,
                 warnings,
             ));
@@ -1155,16 +1189,16 @@ impl AdminHtmlClient {
                 false,
                 None,
                 false,
-                queue_before.len(),
-                queue_before.len(),
-                stats_before.len(),
-                stats_before.len(),
+                wizard_queue_rows_before,
+                wizard_queue_rows_after,
+                wizard_stats_rows_before,
+                wizard_stats_rows_after,
                 None,
                 warnings,
             ));
         }
 
-        let send_evidence = self.post_guarded_send_and_reconcile(GuardedSendReconcileInput {
+        let send_evidence = self.post_guarded_send_and_reconcile(GuardedSendRequestInput {
             send_form: guarded_send_final_form_post_for_request(
                 self.config.base_url.as_deref().unwrap_or_default(),
                 &final_html,
@@ -1174,14 +1208,14 @@ impl AdminHtmlClient {
             campaign_id: request.campaign_id,
             list_ids: &request.list_ids,
             expected_body_sha256: None,
-            queue_before: &queue_before,
-            schedule_job_ids_before: &schedule_job_ids_before,
-            stats_before: &stats_before,
-            stats_identity_before: &stats_identity_before,
             expected_recipient_count: request.expected_recipient_count,
             max_rows,
         })?;
         let sent = send_evidence.reconciliation.terminal_application_proven();
+        let queue_rows_before = send_evidence.reconciliation.queue_rows_before;
+        let queue_rows_after = send_evidence.reconciliation.queue_rows_after;
+        let stats_rows_before = send_evidence.reconciliation.stats_rows_before;
+        let stats_rows_after = send_evidence.reconciliation.stats_rows_after;
         let mut warnings = readiness.warnings.clone();
         warnings.extend(seed_send_apply_warnings(&send_evidence.reconciliation));
 
@@ -1195,10 +1229,10 @@ impl AdminHtmlClient {
             sent,
             send_evidence.status_code,
             send_evidence.redirected,
-            queue_before.len(),
-            send_evidence.reconciliation.queue_rows_after,
-            stats_before.len(),
-            send_evidence.reconciliation.stats_rows_after,
+            queue_rows_before,
+            queue_rows_after,
+            stats_rows_before,
+            stats_rows_after,
             Some(send_evidence.reconciliation),
             warnings,
         ))
@@ -1302,16 +1336,6 @@ impl AdminHtmlClient {
 
         self.login()?;
         let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
-        let schedule_before_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
-        let schedule_job_ids_before = schedule_job_ids_from_html(&schedule_before_html);
-        let queue_before = parse_table_rows(&schedule_before_html, max_rows)?;
-        let stats_before_html = self.get_allowed(&AdminReadPage::Stats.path())?;
-        let stats_identity_before = parse_stats_identity_inventory(
-            self.config.base_url.as_deref().unwrap_or_default(),
-            &stats_before_html,
-            max_rows,
-        )?;
-        let stats_before = parse_table_rows(&stats_before_html, max_rows)?;
         let (send_wizard, final_html) = self.render_send_wizard_final_page(
             &SendWizardReadbackRequest {
                 campaign_id: request.campaign_id,
@@ -1321,6 +1345,10 @@ impl AdminHtmlClient {
             },
             max_rows,
         )?;
+        let wizard_queue_rows_before = send_wizard.queue_rows_before;
+        let wizard_queue_rows_after = send_wizard.queue_rows_after;
+        let wizard_stats_rows_before = send_wizard.stats_rows_before;
+        let wizard_stats_rows_after = send_wizard.stats_rows_after;
         if !send_wizard.ok {
             let mut warnings = readiness.warnings.clone();
             warnings.extend(send_wizard.warnings.clone());
@@ -1338,10 +1366,10 @@ impl AdminHtmlClient {
                 false,
                 None,
                 false,
-                queue_before.len(),
-                queue_before.len(),
-                stats_before.len(),
-                stats_before.len(),
+                wizard_queue_rows_before,
+                wizard_queue_rows_after,
+                wizard_stats_rows_before,
+                wizard_stats_rows_after,
                 None,
                 warnings,
             ));
@@ -1363,16 +1391,16 @@ impl AdminHtmlClient {
                 false,
                 None,
                 false,
-                queue_before.len(),
-                queue_before.len(),
-                stats_before.len(),
-                stats_before.len(),
+                wizard_queue_rows_before,
+                wizard_queue_rows_after,
+                wizard_stats_rows_before,
+                wizard_stats_rows_after,
                 None,
                 warnings,
             ));
         }
 
-        let send_evidence = self.post_guarded_send_and_reconcile(GuardedSendReconcileInput {
+        let send_evidence = self.post_guarded_send_and_reconcile(GuardedSendRequestInput {
             send_form: guarded_send_final_form_post_for_request(
                 self.config.base_url.as_deref().unwrap_or_default(),
                 &final_html,
@@ -1382,14 +1410,14 @@ impl AdminHtmlClient {
             campaign_id: request.campaign_id,
             list_ids: &request.list_ids,
             expected_body_sha256: Some(request.expected_html_sha256.clone()),
-            queue_before: &queue_before,
-            schedule_job_ids_before: &schedule_job_ids_before,
-            stats_before: &stats_before,
-            stats_identity_before: &stats_identity_before,
             expected_recipient_count: request.expected_recipient_count,
             max_rows,
         })?;
         let sent = send_evidence.reconciliation.terminal_application_proven();
+        let queue_rows_before = send_evidence.reconciliation.queue_rows_before;
+        let queue_rows_after = send_evidence.reconciliation.queue_rows_after;
+        let stats_rows_before = send_evidence.reconciliation.stats_rows_before;
+        let stats_rows_after = send_evidence.reconciliation.stats_rows_after;
         let mut warnings = readiness.warnings.clone();
         warnings.extend(production_send_apply_warnings(
             &send_evidence.reconciliation,
@@ -1406,10 +1434,10 @@ impl AdminHtmlClient {
             sent,
             send_evidence.status_code,
             send_evidence.redirected,
-            queue_before.len(),
-            send_evidence.reconciliation.queue_rows_after,
-            stats_before.len(),
-            send_evidence.reconciliation.stats_rows_after,
+            queue_rows_before,
+            queue_rows_after,
+            stats_rows_before,
+            stats_rows_after,
             Some(send_evidence.reconciliation),
             warnings,
         ))
@@ -1417,7 +1445,7 @@ impl AdminHtmlClient {
 
     fn post_guarded_send_and_reconcile(
         &self,
-        input: GuardedSendReconcileInput<'_>,
+        input: GuardedSendRequestInput<'_>,
     ) -> Result<GuardedSendEvidence, InterspireError> {
         self.post_guarded_send_and_reconcile_with_dispatch(input, |request| {
             request.send().map_err(|_| ())
@@ -1426,12 +1454,133 @@ impl AdminHtmlClient {
 
     fn post_guarded_send_and_reconcile_with_dispatch<F, E>(
         &self,
+        request_input: GuardedSendRequestInput<'_>,
+        dispatch: F,
+    ) -> Result<GuardedSendEvidence, InterspireError>
+    where
+        F: FnOnce(RequestBuilder) -> Result<reqwest::blocking::Response, E>,
+    {
+        let input = self.capture_guarded_send_baseline(request_input)?;
+        self.post_guarded_send_from_baseline_with_dispatch(input, dispatch)
+    }
+
+    fn capture_guarded_send_baseline<'a>(
+        &self,
+        request: GuardedSendRequestInput<'a>,
+    ) -> Result<GuardedSendReconcileInput<'a>, InterspireError> {
+        let candidate = self.capture_guarded_send_baseline_snapshot(
+            request.campaign_id,
+            request.max_rows,
+            "guarded send final pre-dispatch candidate baseline",
+            false,
+        )?;
+        let confirmed = self.capture_guarded_send_baseline_snapshot(
+            request.campaign_id,
+            request.max_rows,
+            "guarded send final pre-dispatch confirmation baseline",
+            true,
+        )?;
+        if candidate.schedule_job_ids != confirmed.schedule_job_ids
+            || candidate.manage_job_ids != confirmed.manage_job_ids
+            || candidate.campaign_job_ids != confirmed.campaign_job_ids
+            || candidate.stats_identity.ids() != confirmed.stats_identity.ids()
+        {
+            return Err(InterspireError::Safety(
+                "guarded send final pre-dispatch baseline identities changed during bounded capture; no final request was dispatched"
+                    .to_string(),
+            ));
+        }
+        let baseline_context = GuardedSendBaselineContext {
+            campaign_id: request.campaign_id,
+            list_ids: request.list_ids.to_vec(),
+            expected_body_sha256: request.expected_body_sha256.clone(),
+            expected_recipient_count: request.expected_recipient_count,
+            max_rows: request.max_rows,
+            capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
+        };
+        let GuardedSendRequestInput {
+            send_form,
+            campaign_id,
+            list_ids,
+            expected_body_sha256,
+            expected_recipient_count,
+            max_rows,
+        } = request;
+        let input = GuardedSendReconcileInput {
+            send_form,
+            campaign_id,
+            list_ids,
+            expected_body_sha256,
+            expected_recipient_count,
+            max_rows,
+            baseline_context,
+            queue_before: confirmed.queue_before,
+            schedule_job_ids_before: confirmed.schedule_job_ids,
+            manage_job_ids_before: confirmed.manage_job_ids,
+            campaign_job_ids_before: confirmed.campaign_job_ids,
+            queue_job_ids_before: confirmed.queue_job_ids,
+            stats_before: confirmed.stats_before,
+            stats_identity_before: confirmed.stats_identity,
+            baseline_identity_stable: true,
+        };
+        validate_guarded_send_baseline_context(&input)?;
+        Ok(input)
+    }
+
+    fn capture_guarded_send_baseline_snapshot(
+        &self,
+        campaign_id: u64,
+        max_rows: usize,
+        operation: &str,
+        stats_first: bool,
+    ) -> Result<GuardedSendBaselineSnapshot, InterspireError> {
+        let (queue_inventory, stats_html) = if stats_first {
+            let stats_html = self.get_allowed(&AdminReadPage::Stats.path())?;
+            let queue_inventory = self.complete_queue_control_inventory(max_rows, operation)?;
+            (queue_inventory, stats_html)
+        } else {
+            let queue_inventory = self.complete_queue_control_inventory(max_rows, operation)?;
+            let stats_html = self.get_allowed(&AdminReadPage::Stats.path())?;
+            (queue_inventory, stats_html)
+        };
+        let queue_before = parse_table_rows(&queue_inventory.schedule_html, max_rows)?;
+        let schedule_job_ids = queue_job_ids_for_source(
+            &queue_inventory.links,
+            crate::response::QueueControlSource::Schedule,
+        );
+        let manage_job_ids = queue_job_ids_for_source(
+            &queue_inventory.links,
+            crate::response::QueueControlSource::CampaignManage,
+        );
+        let campaign_job_ids =
+            queue_manage_job_ids_for_campaign(&queue_inventory.links, campaign_id);
+        let queue_job_ids = schedule_job_ids.union(&manage_job_ids).copied().collect();
+        let stats_identity = parse_stats_identity_inventory(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &stats_html,
+            max_rows,
+        )?;
+        let stats_before = parse_table_rows(&stats_html, max_rows)?;
+        Ok(GuardedSendBaselineSnapshot {
+            queue_before,
+            schedule_job_ids,
+            manage_job_ids,
+            campaign_job_ids,
+            queue_job_ids,
+            stats_before,
+            stats_identity,
+        })
+    }
+
+    fn post_guarded_send_from_baseline_with_dispatch<F, E>(
+        &self,
         input: GuardedSendReconcileInput<'_>,
         dispatch: F,
     ) -> Result<GuardedSendEvidence, InterspireError>
     where
         F: FnOnce(RequestBuilder) -> Result<reqwest::blocking::Response, E>,
     {
+        validate_guarded_send_baseline_context(&input)?;
         let (send_url, send_pairs) = input.send_form.clone();
         let request = self.proof_post_with_page_context(
             send_url,
@@ -1439,6 +1588,10 @@ impl AdminHtmlClient {
             &AdminReadPage::SendStart.path(),
         )?;
         let mut progress = GuardedSendProgress::default();
+        progress.notes.push(
+            "complete authenticated Schedule, Manage, and Stats baselines were stable across two bounded captures at the final pre-dispatch stage"
+                .to_string(),
+        );
         let response = match dispatch(request) {
             Ok(response) => response,
             Err(_) => {
@@ -1707,46 +1860,61 @@ impl AdminHtmlClient {
         mut progress: GuardedSendProgress,
         final_response_summary: Option<String>,
     ) -> GuardedSendEvidence {
-        let schedule_after_html = match self.get_allowed(&AdminReadPage::Schedule.path()) {
-            Ok(html) => html,
+        let queue_inventory = match self
+            .complete_queue_control_inventory(input.max_rows, "guarded send readback")
+        {
+            Ok(inventory) => inventory,
             Err(_) => {
                 return guarded_send_evidence_from_progress(
                     input,
                     progress,
-                    Some("Schedule readback was unavailable after request dispatch"),
+                    Some(
+                        "Schedule and campaign Manage identity readback was incomplete after request dispatch",
+                    ),
                 );
             }
         };
-        progress.queue_after = match parse_table_rows(&schedule_after_html, input.max_rows) {
-            Ok(rows) => Some(rows),
-            Err(_) => {
-                return guarded_send_evidence_from_progress(
-                    input,
-                    progress,
-                    Some("Schedule readback could not be parsed after request dispatch"),
-                );
-            }
-        };
-        match schedule_job_identity_delta(
-            input.schedule_job_ids_before,
-            &schedule_job_ids_from_html(&schedule_after_html),
-        ) {
-            ScheduleJobIdentityDelta::None if progress.job_evidence.job_id.is_none() => progress
+        progress.queue_after =
+            match parse_table_rows(&queue_inventory.schedule_html, input.max_rows) {
+                Ok(rows) => Some(rows),
+                Err(_) => {
+                    return guarded_send_evidence_from_progress(
+                        input,
+                        progress,
+                        Some("Schedule readback could not be parsed after request dispatch"),
+                    );
+                }
+            };
+        let schedule_job_ids_after = queue_job_ids_for_source(
+            &queue_inventory.links,
+            crate::response::QueueControlSource::Schedule,
+        );
+        let manage_job_ids_after = queue_job_ids_for_source(
+            &queue_inventory.links,
+            crate::response::QueueControlSource::CampaignManage,
+        );
+        let queue_job_ids_after = schedule_job_ids_after
+            .union(&manage_job_ids_after)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        match queue_job_identity_delta(&input.queue_job_ids_before, &queue_job_ids_after) {
+            QueueJobIdentityDelta::None if progress.job_evidence.job_id.is_none() => progress
                 .job_evidence
-                .add_gap("Schedule readback exposed no unique new job identity"),
-            ScheduleJobIdentityDelta::None => progress
+                .add_gap("bounded Schedule/Manage readback exposed no unique new job identity"),
+            QueueJobIdentityDelta::None => progress
                 .notes
-                .push("Schedule readback added no second job identity".to_string()),
-            ScheduleJobIdentityDelta::Unique(job_id) => {
+                .push("bounded Schedule/Manage readback added no second job identity".to_string()),
+            QueueJobIdentityDelta::Unique(job_id) => {
                 progress.schedule_delta_candidate = Some(job_id);
             }
-            ScheduleJobIdentityDelta::Ambiguous { added, removed } => {
+            QueueJobIdentityDelta::Ambiguous { added, removed } => {
                 progress.job_identity_ambiguous = true;
                 progress.job_evidence.add_gap(format!(
-                    "Schedule identity reconciliation was ambiguous: {added} added and {removed} removed"
+                    "bounded Schedule/Manage identity reconciliation was ambiguous: {added} added and {removed} removed"
                 ));
             }
         }
+        progress.active_job_ids_after = Some(queue_job_ids_after);
 
         let stats_after_html = match self.get_allowed(&AdminReadPage::Stats.path()) {
             Ok(html) => html,
@@ -1782,27 +1950,6 @@ impl AdminHtmlClient {
                 );
             }
         };
-        let queue_inventory = match self
-            .complete_queue_control_inventory(input.max_rows, "guarded send readback")
-        {
-            Ok(inventory) => inventory,
-            Err(_) => {
-                return guarded_send_evidence_from_progress(
-                        input,
-                        progress,
-                        Some(
-                            "Schedule and campaign Manage identity readback was incomplete after request dispatch",
-                        ),
-                    );
-            }
-        };
-        progress.active_job_ids_after = Some(
-            queue_inventory
-                .links
-                .iter()
-                .map(|link| link.route.identifier_value)
-                .collect(),
-        );
         if let Some(job_id) = progress.schedule_delta_candidate {
             let popup_already_bound =
                 progress.job_evidence.job_id == Some(job_id) && !progress.job_evidence.conflicted;
@@ -1826,11 +1973,11 @@ impl AdminHtmlClient {
         }
         if progress.job_evidence.job_id.is_none()
             && stable_stats_identity_delta(
-                input.stats_before,
+                &input.stats_before,
                 progress
                     .stats_after
                     .as_deref()
-                    .unwrap_or(input.stats_before),
+                    .unwrap_or(input.stats_before.as_slice()),
             )
             .added
                 == 0
@@ -2890,15 +3037,15 @@ fn guarded_send_evidence_from_progress(
     let queue_after = progress
         .queue_after
         .as_deref()
-        .unwrap_or(input.queue_before);
+        .unwrap_or(input.queue_before.as_slice());
     let stats_after = progress
         .stats_after
         .as_deref()
-        .unwrap_or(input.stats_before);
+        .unwrap_or(input.stats_before.as_slice());
     let stats_identity_after = progress
         .stats_identity_after
         .as_ref()
-        .unwrap_or(input.stats_identity_before);
+        .unwrap_or(&input.stats_identity_before);
     let job_active_after = progress.job_evidence.job_id.map(|job_id| {
         progress
             .active_job_ids_after
@@ -2911,15 +3058,20 @@ fn guarded_send_evidence_from_progress(
         campaign_id: input.campaign_id,
         list_ids: input.list_ids,
         expected_body_sha256: input.expected_body_sha256.clone(),
-        queue_before: input.queue_before,
+        queue_before: &input.queue_before,
         queue_after,
-        stats_before: input.stats_before,
+        stats_before: &input.stats_before,
         stats_after,
-        schedule_job_ids_before: input.schedule_job_ids_before,
-        stats_identity_before: input.stats_identity_before,
+        schedule_job_ids_before: &input.schedule_job_ids_before,
+        manage_job_ids_before: &input.manage_job_ids_before,
+        campaign_job_ids_before: &input.campaign_job_ids_before,
+        stats_identity_before: &input.stats_identity_before,
         stats_identity_after,
         expected_recipient_count: input.expected_recipient_count,
         baseline_max_rows: input.max_rows,
+        baseline_context_verified: validate_guarded_send_baseline_context(input).is_ok(),
+        baseline_identity_stable: input.baseline_identity_stable,
+        baseline_capture_stage: input.baseline_context.capture_stage,
         job_id: progress.job_evidence.job_id,
         job_active_after,
         smtp_reason: progress.smtp_reason,
@@ -3138,8 +3290,14 @@ fn guarded_send_terminal_reconciliation(
             input.expected_recipient_count,
             input.expected_body_sha256.clone(),
             input.schedule_job_ids_before.iter().copied().collect(),
+            input.manage_job_ids_before.iter().copied().collect(),
+            input.campaign_job_ids_before.iter().copied().collect(),
             input.stats_identity_before.ids().into_iter().collect(),
             input.baseline_max_rows,
+            input.baseline_capture_stage,
+            input.baseline_context_verified,
+            input.baseline_identity_stable,
+            true,
             input.reconciliation_readback_complete,
             identity_state,
             input.job_id,
@@ -3375,57 +3533,65 @@ fn send_popup_path_candidates(html: &str) -> Vec<String> {
     candidates
 }
 
-fn schedule_job_ids_from_html(html: &str) -> BTreeSet<u64> {
-    let mut ids = BTreeSet::new();
-    let document = Html::parse_document(html);
-    if let Ok(input_selector) = Selector::parse("input") {
-        for input in document.select(&input_selector) {
-            if input
-                .value()
-                .attr("name")
-                .is_some_and(|name| name.eq_ignore_ascii_case("jobs[]"))
-            {
-                if let Some(id) = input
-                    .value()
-                    .attr("value")
-                    .and_then(|value| value.parse::<u64>().ok())
-                {
-                    ids.insert(id);
-                }
-            }
-        }
-    }
-    if let Ok(link_selector) = Selector::parse("a") {
-        for link in document.select(&link_selector) {
-            if let Some(href) = link.value().attr("href") {
-                if let Some(id) = schedule_job_id_from_path(href) {
-                    ids.insert(id);
-                }
-            }
-        }
-    }
-    for candidate in schedule_path_candidates(html) {
-        if let Some(id) = schedule_job_id_from_path(&candidate) {
-            ids.insert(id);
-        }
-    }
-    ids
-}
-
-fn schedule_job_identity_delta(
+fn queue_job_identity_delta(
     before: &BTreeSet<u64>,
     after: &BTreeSet<u64>,
-) -> ScheduleJobIdentityDelta {
+) -> QueueJobIdentityDelta {
     let added = after.difference(before).copied().collect::<Vec<_>>();
     let removed = before.difference(after).count();
     match (added.as_slice(), removed) {
-        ([], 0) => ScheduleJobIdentityDelta::None,
-        ([job_id], 0) => ScheduleJobIdentityDelta::Unique(*job_id),
-        _ => ScheduleJobIdentityDelta::Ambiguous {
+        ([], 0) => QueueJobIdentityDelta::None,
+        ([job_id], 0) => QueueJobIdentityDelta::Unique(*job_id),
+        _ => QueueJobIdentityDelta::Ambiguous {
             added: added.len(),
             removed,
         },
     }
+}
+
+fn queue_job_ids_for_source(
+    links: &[super::QueueControlLink],
+    source: crate::response::QueueControlSource,
+) -> BTreeSet<u64> {
+    links
+        .iter()
+        .filter(|link| link.candidate.source == source)
+        .map(|link| link.route.identifier_value)
+        .collect()
+}
+
+fn queue_manage_job_ids_for_campaign(
+    links: &[super::QueueControlLink],
+    campaign_id: u64,
+) -> BTreeSet<u64> {
+    links
+        .iter()
+        .filter(|link| {
+            link.candidate.source == crate::response::QueueControlSource::CampaignManage
+                && link.candidate.campaign_id == Some(campaign_id)
+        })
+        .map(|link| link.route.identifier_value)
+        .collect()
+}
+
+fn validate_guarded_send_baseline_context(
+    input: &GuardedSendReconcileInput<'_>,
+) -> Result<(), InterspireError> {
+    let expected = GuardedSendBaselineContext {
+        campaign_id: input.campaign_id,
+        list_ids: input.list_ids.to_vec(),
+        expected_body_sha256: input.expected_body_sha256.clone(),
+        expected_recipient_count: input.expected_recipient_count,
+        max_rows: input.max_rows,
+        capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
+    };
+    if input.baseline_context != expected || !input.baseline_identity_stable {
+        return Err(InterspireError::Safety(
+            "guarded send final pre-dispatch baseline context or freshness did not match the exact request; no final request was dispatched"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn queue_job_has_exact_manage_campaign(
@@ -3454,44 +3620,6 @@ fn queue_job_has_exact_manage_campaign(
             .iter()
             .next()
             .is_some_and(|(_, candidate_campaign_id)| *candidate_campaign_id == Some(campaign_id))
-}
-
-fn schedule_path_candidates(html: &str) -> Vec<String> {
-    let mut candidates = Vec::new();
-    let lower = html.to_ascii_lowercase();
-    let mut offset = 0usize;
-    while let Some(relative) = lower[offset..].find("index.php?page=schedule") {
-        let start = offset + relative;
-        let raw_tail = &html[start..];
-        let end = raw_tail
-            .find(|ch: char| matches!(ch, '"' | '\'' | '<' | '>' | ')' | ';') || ch.is_whitespace())
-            .unwrap_or(raw_tail.len());
-        candidates.push(raw_tail[..end].replace("&amp;", "&"));
-        offset = start + end.max(1);
-    }
-    candidates
-}
-
-fn schedule_job_id_from_path(path: &str) -> Option<u64> {
-    let base = Url::parse("https://example.test/admin/").ok()?;
-    let url = base.join(&path.replace("&amp;", "&")).ok()?;
-    let page = url
-        .query_pairs()
-        .find(|(key, _)| key.eq_ignore_ascii_case("Page"))
-        .map(|(_, value)| value.to_string())?;
-    if !page.eq_ignore_ascii_case("Schedule") {
-        return None;
-    }
-    for key in ["job", "Job", "jobid", "JobID"] {
-        if let Some(value) = url
-            .query_pairs()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
-            .and_then(|(_, value)| value.as_ref().parse::<u64>().ok())
-        {
-            return Some(value);
-        }
-    }
-    None
 }
 
 fn send_popup_job_id(url: &Url) -> Option<u64> {
@@ -4192,22 +4320,22 @@ mod tests {
         guarded_send_popup_url, guarded_send_terminal_reconciliation,
         is_guarded_send_campaign_selection_name, list_ids_warning, optional_nonempty_sha256,
         parse_send_wizard_final_page, preview_send_response_success,
-        queue_job_has_exact_manage_campaign, recipient_count_marker, rows_changed_for_send_proof,
-        rows_unchanged_for_send_proof, schedule_job_identity_delta, schedule_job_ids_from_html,
-        seed_send_apply_warnings, selected_or_hidden_list_ids,
-        send_apply_preflight_refusal_warnings, send_step2_action_path, sha256_hex,
-        stable_stats_identity_delta, stats_rows_stable_for_no_send_proof, step4_response_summary,
-        transport_failure_reason, validate_single_preview_email, GuardedSendJobEvidence,
-        GuardedSendProgress, GuardedSendReconcileInput, GuardedSendTerminalInput,
-        ScheduleJobIdentityDelta, StableStatsIdentityDelta,
+        queue_job_has_exact_manage_campaign, queue_job_identity_delta, recipient_count_marker,
+        rows_changed_for_send_proof, rows_unchanged_for_send_proof, seed_send_apply_warnings,
+        selected_or_hidden_list_ids, send_apply_preflight_refusal_warnings, send_step2_action_path,
+        sha256_hex, stable_stats_identity_delta, stats_rows_stable_for_no_send_proof,
+        step4_response_summary, transport_failure_reason, validate_single_preview_email,
+        GuardedSendBaselineContext, GuardedSendJobEvidence, GuardedSendProgress,
+        GuardedSendReconcileInput, GuardedSendRequestInput, GuardedSendTerminalInput,
+        QueueJobIdentityDelta, StableStatsIdentityDelta,
     };
     use crate::{
         config::{AdminHtmlConfig, InterspireVersion},
         redact,
         response::{
             CampaignBodyAuditReport, CampaignTestSendApplyRequest, SendApplyStatus,
-            SendReconciliationReport, SendUncertaintyDecision, SendUncertaintyIdentityState,
-            SendUncertaintyNextAction,
+            SendBaselineCaptureStage, SendReconciliationReport, SendUncertaintyDecision,
+            SendUncertaintyIdentityState, SendUncertaintyNextAction,
         },
     };
     use std::{
@@ -4253,17 +4381,24 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ResponseLossReadbackFixture {
         ExactJob,
         NoNewJob,
         AmbiguousJobs,
-        Capped,
+        PostDispatchCappedStats,
+        SameCampaignGapJob,
+        ScheduleOverCap,
+        ScheduleExactlyAtCap,
+        ManageExactlyAtCap,
+        StatsPagination,
+        BaselineFreshnessMismatch,
     }
 
     struct ResponseLossReadbackServer {
         base_url: String,
         requests: Arc<Mutex<Vec<String>>>,
+        dispatched: Arc<AtomicBool>,
         stop: Arc<AtomicBool>,
         handle: Option<thread::JoinHandle<()>>,
     }
@@ -4274,6 +4409,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|err| panic!("response-loss request lock poisoned: {err}"))
                 .clone()
+        }
+
+        fn mark_dispatched(&self) {
+            self.dispatched.store(true, Ordering::Release);
         }
     }
 
@@ -4301,10 +4440,15 @@ mod tests {
             .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let thread_requests = Arc::clone(&requests);
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let thread_dispatched = Arc::clone(&dispatched);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(5);
+            let mut schedule_reads = 0usize;
+            let mut manage_reads = 0usize;
+            let mut stats_reads = 0usize;
             while !thread_stop.load(Ordering::Acquire) && Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -4322,7 +4466,25 @@ mod tests {
                                 panic!("response-loss request lock poisoned: {err}")
                             })
                             .push(request.clone());
-                        write_response_loss_readback(&mut stream, &request, mode);
+                        let (route_read, route_ordinal) = if request.contains("Page=Schedule") {
+                            schedule_reads += 1;
+                            ("schedule", schedule_reads)
+                        } else if request.contains("Page=Stats") {
+                            stats_reads += 1;
+                            ("stats", stats_reads)
+                        } else if request.contains("Page=Newsletters&Action=Manage") {
+                            manage_reads += 1;
+                            ("manage", manage_reads)
+                        } else {
+                            ("unexpected", 0)
+                        };
+                        write_response_loss_readback(
+                            &mut stream,
+                            route_read,
+                            route_ordinal,
+                            mode,
+                            thread_dispatched.load(Ordering::Acquire),
+                        );
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
@@ -4334,6 +4496,7 @@ mod tests {
         ResponseLossReadbackServer {
             base_url: format!("http://{address}/admin/"),
             requests,
+            dispatched,
             stop,
             handle: Some(handle),
         }
@@ -4341,17 +4504,19 @@ mod tests {
 
     fn write_response_loss_readback(
         stream: &mut std::net::TcpStream,
-        request: &str,
+        route: &str,
+        route_ordinal: usize,
         mode: ResponseLossReadbackFixture,
+        dispatched: bool,
     ) {
-        let body = if request.contains("Page=Schedule") {
-            response_loss_schedule_html(mode)
-        } else if request.contains("Page=Stats") {
-            response_loss_stats_html(mode)
-        } else if request.contains("Page=Newsletters&Action=Manage") {
-            response_loss_manage_html(mode)
+        let body = if route == "schedule" {
+            response_loss_schedule_html(mode, dispatched, route_ordinal)
+        } else if route == "stats" {
+            response_loss_stats_html(mode, dispatched)
+        } else if route == "manage" {
+            response_loss_manage_html(mode, dispatched, route_ordinal)
         } else {
-            "<html><body>unexpected synthetic read-only request</body></html>"
+            "<html><body>unexpected synthetic read-only request</body></html>".to_string()
         };
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -4363,76 +4528,105 @@ mod tests {
             .unwrap_or_else(|err| panic!("fixture response write failed: {err}"));
     }
 
-    fn response_loss_schedule_html(mode: ResponseLossReadbackFixture) -> &'static str {
-        match mode {
-            ResponseLossReadbackFixture::ExactJob => {
-                r#"<html><body><h1>View Scheduled Email Queue</h1><table>
-                    <tr><th>Campaign</th><th>Actions</th></tr>
-                    <tr><td>Synthetic active job</td><td><a href="index.php?Page=Schedule&Action=Pause&job=43">Pause</a></td></tr>
-                  </table></body></html>"#
-            }
-            ResponseLossReadbackFixture::AmbiguousJobs => {
-                r#"<html><body><h1>View Scheduled Email Queue</h1><table>
-                    <tr><th>Campaign</th><th>Actions</th></tr>
-                    <tr><td>Synthetic active job one</td><td><a href="index.php?Page=Schedule&Action=Pause&job=43">Pause</a></td></tr>
-                    <tr><td>Synthetic active job two</td><td><a href="index.php?Page=Schedule&Action=Pause&job=44">Pause</a></td></tr>
-                  </table></body></html>"#
-            }
-            ResponseLossReadbackFixture::NoNewJob | ResponseLossReadbackFixture::Capped => {
-                "<html><body><h1>View Scheduled Email Queue</h1><p>There are no emails currently scheduled.</p></body></html>"
-            }
-        }
+    fn response_loss_schedule_html(
+        mode: ResponseLossReadbackFixture,
+        dispatched: bool,
+        read_ordinal: usize,
+    ) -> String {
+        let jobs = match mode {
+            ResponseLossReadbackFixture::ExactJob if dispatched => vec![43],
+            ResponseLossReadbackFixture::AmbiguousJobs if dispatched => vec![43, 44],
+            ResponseLossReadbackFixture::SameCampaignGapJob => vec![43],
+            ResponseLossReadbackFixture::ScheduleOverCap => vec![41, 42, 43],
+            ResponseLossReadbackFixture::ScheduleExactlyAtCap => vec![41, 42],
+            ResponseLossReadbackFixture::BaselineFreshnessMismatch if read_ordinal == 1 => vec![43],
+            ResponseLossReadbackFixture::BaselineFreshnessMismatch => vec![44],
+            _ => Vec::new(),
+        };
+        queue_schedule_html(&jobs)
     }
 
-    fn response_loss_manage_html(mode: ResponseLossReadbackFixture) -> &'static str {
-        match mode {
-            ResponseLossReadbackFixture::ExactJob => {
-                r#"<html><body><h1>View Email Campaigns</h1><table>
-                    <tr><th>Campaign</th><th>Actions</th></tr>
-                    <tr><td>Synthetic campaign</td><td>
-                      <a href="index.php?Page=Newsletters&Action=Edit&id=9001">Edit</a>
-                      <a href="index.php?Page=Send&Action=PauseSend&Job=43">Pause</a>
-                    </td></tr>
-                  </table></body></html>"#
-            }
-            ResponseLossReadbackFixture::NoNewJob
-            | ResponseLossReadbackFixture::AmbiguousJobs
-            | ResponseLossReadbackFixture::Capped => {
-                "<html><body><h1>View Email Campaigns</h1><p>There are no email campaigns.</p></body></html>"
-            }
-        }
+    fn response_loss_manage_html(
+        mode: ResponseLossReadbackFixture,
+        dispatched: bool,
+        read_ordinal: usize,
+    ) -> String {
+        let jobs = match mode {
+            ResponseLossReadbackFixture::ExactJob if dispatched => vec![43],
+            ResponseLossReadbackFixture::SameCampaignGapJob => vec![43],
+            ResponseLossReadbackFixture::ManageExactlyAtCap => vec![41, 42],
+            ResponseLossReadbackFixture::BaselineFreshnessMismatch if read_ordinal == 1 => vec![43],
+            ResponseLossReadbackFixture::BaselineFreshnessMismatch => vec![44],
+            _ => Vec::new(),
+        };
+        queue_manage_html(&jobs)
     }
 
-    fn response_loss_stats_html(mode: ResponseLossReadbackFixture) -> &'static str {
-        match mode {
-            ResponseLossReadbackFixture::Capped => {
-                r#"<html><body><h1>Email Campaign Statistics</h1><table>
-                    <tr><th>Campaign</th><th>Counts</th><th>Actions</th></tr>
-                    <tr><td>Baseline Campaign</td><td>25 0 0</td><td><a href="index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=70">View</a></td></tr>
-                    <tr><td>Synthetic Campaign Two</td><td>25 0 0</td><td><a href="index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=71">View</a></td></tr>
-                    <tr><td>Synthetic Campaign Three</td><td>25 0 0</td><td><a href="index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=72">View</a></td></tr>
-                  </table></body></html>"#
-            }
-            ResponseLossReadbackFixture::ExactJob
-            | ResponseLossReadbackFixture::NoNewJob
-            | ResponseLossReadbackFixture::AmbiguousJobs => {
-                r#"<html><body><h1>Email Campaign Statistics</h1><table>
-                    <tr><th>Campaign</th><th>Counts</th><th>Actions</th></tr>
-                    <tr><td>Baseline Campaign</td><td>25 0 0</td><td><a href="index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=70">View</a></td></tr>
-                  </table></body></html>"#
-            }
-        }
+    fn response_loss_stats_html(mode: ResponseLossReadbackFixture, dispatched: bool) -> String {
+        let ids = if mode == ResponseLossReadbackFixture::PostDispatchCappedStats && dispatched {
+            vec![70, 71, 72]
+        } else {
+            vec![70]
+        };
+        let pagination = mode == ResponseLossReadbackFixture::StatsPagination;
+        stats_html(&ids, pagination)
     }
 
-    fn response_loss_input<'a>(
-        base_url: &str,
-        queue_before: &'a [String],
-        schedule_job_ids_before: &'a BTreeSet<u64>,
-        stats_before: &'a [String],
-        stats_identity_before: &'a StatsIdentityInventory,
-        max_rows: usize,
-    ) -> GuardedSendReconcileInput<'a> {
-        GuardedSendReconcileInput {
+    fn queue_schedule_html(job_ids: &[u64]) -> String {
+        if job_ids.is_empty() {
+            return "<html><body><h1>View Scheduled Email Queue</h1><p>There are no emails currently scheduled.</p></body></html>".to_string();
+        }
+        let rows = job_ids
+            .iter()
+            .map(|job_id| {
+                format!(
+                    r#"<tr><td>Synthetic active job {job_id}</td><td><a href="index.php?Page=Schedule&Action=Pause&job={job_id}">Pause</a></td></tr>"#
+                )
+            })
+            .collect::<String>();
+        format!(
+            "<html><body><h1>View Scheduled Email Queue</h1><table><tr><th>Campaign</th><th>Actions</th></tr>{rows}</table></body></html>"
+        )
+    }
+
+    fn queue_manage_html(job_ids: &[u64]) -> String {
+        if job_ids.is_empty() {
+            return "<html><body><h1>View Email Campaigns</h1><p>There are no email campaigns.</p></body></html>".to_string();
+        }
+        let rows = job_ids
+            .iter()
+            .map(|job_id| {
+                format!(
+                    r#"<tr><td>Synthetic campaign {job_id}</td><td><a href="index.php?Page=Newsletters&Action=Edit&id=9001">Edit</a><a href="index.php?Page=Send&Action=PauseSend&Job={job_id}">Pause</a></td></tr>"#
+                )
+            })
+            .collect::<String>();
+        format!(
+            "<html><body><h1>View Email Campaigns</h1><table><tr><th>Campaign</th><th>Actions</th></tr>{rows}</table></body></html>"
+        )
+    }
+
+    fn stats_html(stat_ids: &[u64], pagination: bool) -> String {
+        let rows = stat_ids
+            .iter()
+            .map(|stat_id| {
+                format!(
+                    r#"<tr><td>Synthetic Campaign {stat_id}</td><td>25 0 0</td><td><a href="index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid={stat_id}">View</a></td></tr>"#
+                )
+            })
+            .collect::<String>();
+        let pagination = if pagination {
+            r#"<a class="pagination nextpage" href="index.php?Page=Stats&DisplayPage=2">Next</a>"#
+        } else {
+            ""
+        };
+        format!(
+            "<html><body><h1>Email Campaign Statistics</h1><table><tr><th>Campaign</th><th>Counts</th><th>Actions</th></tr>{rows}</table>{pagination}</body></html>"
+        )
+    }
+
+    fn response_loss_input(base_url: &str, max_rows: usize) -> GuardedSendRequestInput<'static> {
+        GuardedSendRequestInput {
             send_form: (
                 Url::parse(&format!("{base_url}index.php?Page=Send&Action=Step4"))
                     .expect("synthetic send URL"),
@@ -4441,10 +4635,6 @@ mod tests {
             campaign_id: 9001,
             list_ids: RESPONSE_LOSS_LIST_IDS,
             expected_body_sha256: Some("synthetic-body-sha256".to_string()),
-            queue_before,
-            schedule_job_ids_before,
-            stats_before,
-            stats_identity_before,
             expected_recipient_count: 25,
             max_rows,
         }
@@ -4871,55 +5061,37 @@ mod tests {
     }
 
     #[test]
-    fn schedule_job_identity_delta_requires_one_exact_new_identity() {
-        let before_html = r#"
-            <tr>
-              <td><input type="checkbox" name="jobs[]" value="42"></td>
-              <td><a href="index.php?Page=Schedule&amp;Action=Approve&amp;job=42">Approve</a></td>
-            </tr>
-        "#;
-        let after_html = r#"
-            <tr>
-              <td><input type="checkbox" name="jobs[]" value="42"></td>
-              <td><a href="index.php?Page=Schedule&amp;Action=Approve&amp;job=42">Approve</a></td>
-            </tr>
-            <tr>
-              <td><input type="checkbox" name="jobs[]" value="43"></td>
-              <td><a href="index.php?Page=Schedule&Action=Pause&job=43">Pause</a></td>
-            </tr>
-            <a href="index.php?Page=Newsletters&Action=View&id=99">View</a>
-        "#;
+    fn queue_job_identity_delta_requires_one_exact_new_identity() {
+        let before = [42_u64].into_iter().collect();
+        let after = [42_u64, 43].into_iter().collect();
 
         assert_eq!(
-            schedule_job_identity_delta(
-                &schedule_job_ids_from_html(before_html),
-                &schedule_job_ids_from_html(after_html),
-            ),
-            ScheduleJobIdentityDelta::Unique(43)
+            queue_job_identity_delta(&before, &after),
+            QueueJobIdentityDelta::Unique(43)
         );
     }
 
     #[test]
-    fn schedule_job_identity_delta_rejects_no_change_removal_and_multiple_additions() {
+    fn queue_job_identity_delta_rejects_no_change_removal_and_multiple_additions() {
         let before = [41_u64, 42].into_iter().collect();
         let unchanged = [41_u64, 42].into_iter().collect();
         let removed = [42_u64].into_iter().collect();
         let multiple_added = [41_u64, 42, 43, 44].into_iter().collect();
 
         assert_eq!(
-            schedule_job_identity_delta(&before, &unchanged),
-            ScheduleJobIdentityDelta::None
+            queue_job_identity_delta(&before, &unchanged),
+            QueueJobIdentityDelta::None
         );
         assert_eq!(
-            schedule_job_identity_delta(&before, &removed),
-            ScheduleJobIdentityDelta::Ambiguous {
+            queue_job_identity_delta(&before, &removed),
+            QueueJobIdentityDelta::Ambiguous {
                 added: 0,
                 removed: 1,
             }
         );
         assert_eq!(
-            schedule_job_identity_delta(&before, &multiple_added),
-            ScheduleJobIdentityDelta::Ambiguous {
+            queue_job_identity_delta(&before, &multiple_added),
+            QueueJobIdentityDelta::Ambiguous {
                 added: 2,
                 removed: 0,
             }
@@ -4983,25 +5155,17 @@ mod tests {
     #[test]
     fn guarded_send_response_loss_reconciles_reached_request_without_retry_authority() {
         let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::ExactJob);
-        let queue = Vec::new();
-        let stats = vec!["Baseline Campaign 25 0 0 View".to_string()];
-        let stats_identity = stats_identity_inventory(&[(70, 25)]);
-        let schedule_job_ids = BTreeSet::new();
         let client = response_loss_client(&server.base_url);
-        let input = response_loss_input(
-            &server.base_url,
-            &queue,
-            &schedule_job_ids,
-            &stats,
-            &stats_identity,
-            25,
-        );
         let mut attempted = false;
         let evidence = client
-            .post_guarded_send_and_reconcile_with_dispatch(input, |_| {
-                attempted = true;
-                Err::<reqwest::blocking::Response, _>(())
-            })
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 25),
+                |_| {
+                    server.mark_dispatched();
+                    attempted = true;
+                    Err::<reqwest::blocking::Response, _>(())
+                },
+            )
             .unwrap_or_else(|err| panic!("{err}"));
 
         assert!(attempted);
@@ -5026,8 +5190,18 @@ mod tests {
         assert!(!recovery.terminal_success_authorized);
         assert!(recovery.baselines_authenticated);
         assert!(recovery.baselines_captured_before_dispatch);
+        assert_eq!(
+            recovery.baseline_capture_stage,
+            SendBaselineCaptureStage::FinalPreDispatch
+        );
+        assert!(recovery.baseline_context_verified);
+        assert!(recovery.baseline_identity_stable);
+        assert!(recovery.baseline_inventory_complete);
         assert!(recovery.reconciliation_attempted_in_same_invocation);
         assert!(recovery.readback_complete);
+        assert_eq!(recovery.schedule_job_ids_before, Vec::<u64>::new());
+        assert_eq!(recovery.manage_job_ids_before, Vec::<u64>::new());
+        assert_eq!(recovery.campaign_job_ids_before, Vec::<u64>::new());
         assert_eq!(
             recovery.identity_state,
             SendUncertaintyIdentityState::ExactJob
@@ -5071,15 +5245,37 @@ mod tests {
         assert!(evidence_note.contains("request was attempted"));
         assert!(!evidence_note.contains("posted"));
         let requests = server.requests();
-        assert!(requests
-            .iter()
-            .any(|request| request.contains("Page=Schedule")));
-        assert!(requests
-            .iter()
-            .any(|request| request.contains("Page=Stats")));
-        assert!(requests
-            .iter()
-            .any(|request| request.contains("Page=Newsletters&Action=Manage")));
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("Page=Schedule"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("Page=Stats"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("Page=Newsletters&Action=Manage"))
+                .count(),
+            3
+        );
+        assert_eq!(requests.len(), 9);
+        assert!(requests[0].contains("Page=Schedule"));
+        assert!(requests[1].contains("Page=Newsletters&Action=Manage"));
+        assert!(requests[2].contains("Page=Stats"));
+        assert!(requests[3].contains("Page=Stats"));
+        assert!(requests[4].contains("Page=Schedule"));
+        assert!(requests[5].contains("Page=Newsletters&Action=Manage"));
+        assert!(requests[6].contains("Page=Schedule"));
+        assert!(requests[7].contains("Page=Newsletters&Action=Manage"));
+        assert!(requests[8].contains("Page=Stats"));
         assert!(requests.iter().all(|request| request.starts_with("GET ")));
         assert!(requests
             .iter()
@@ -5087,24 +5283,51 @@ mod tests {
     }
 
     #[test]
-    fn guarded_send_response_loss_with_no_new_identity_holds_without_retry() {
-        let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::NoNewJob);
-        let queue = Vec::new();
-        let stats = vec!["Baseline Campaign 25 0 0 View".to_string()];
-        let stats_identity = stats_identity_inventory(&[(70, 25)]);
-        let schedule_job_ids = BTreeSet::new();
+    fn same_campaign_job_inserted_before_final_dispatch_is_captured_not_misidentified() {
+        let server =
+            spawn_response_loss_readback_server(ResponseLossReadbackFixture::SameCampaignGapJob);
         let client = response_loss_client(&server.base_url);
         let evidence = client
             .post_guarded_send_and_reconcile_with_dispatch(
-                response_loss_input(
-                    &server.base_url,
-                    &queue,
-                    &schedule_job_ids,
-                    &stats,
-                    &stats_identity,
-                    25,
-                ),
-                |_| Err::<reqwest::blocking::Response, _>(()),
+                response_loss_input(&server.base_url, 25),
+                |_| {
+                    server.mark_dispatched();
+                    Err::<reqwest::blocking::Response, _>(())
+                },
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(evidence.reconciliation.job_id, None);
+        let recovery = evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .as_ref()
+            .expect("response uncertainty recovery contract");
+        assert_eq!(
+            recovery.identity_state,
+            SendUncertaintyIdentityState::NoNewJob
+        );
+        assert_eq!(recovery.schedule_job_ids_before, vec![43]);
+        assert_eq!(recovery.manage_job_ids_before, vec![43]);
+        assert_eq!(recovery.campaign_job_ids_before, vec![43]);
+        assert_eq!(recovery.observed_job_id, None);
+        assert!(recovery.status_follow_up.is_none());
+        assert!(!recovery.retry_authorized);
+        assert!(!recovery.mutation_authorized);
+        assert!(!recovery.terminal_success_authorized);
+    }
+
+    #[test]
+    fn guarded_send_response_loss_with_one_under_cap_holds_without_retry() {
+        let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::NoNewJob);
+        let client = response_loss_client(&server.base_url);
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 3),
+                |_| {
+                    server.mark_dispatched();
+                    Err::<reqwest::blocking::Response, _>(())
+                },
             )
             .unwrap_or_else(|err| panic!("{err}"));
 
@@ -5120,6 +5343,7 @@ mod tests {
             .as_ref()
             .expect("response uncertainty recovery contract");
         assert!(recovery.readback_complete);
+        assert_eq!(recovery.baseline_max_rows, 3);
         assert_eq!(
             recovery.identity_state,
             SendUncertaintyIdentityState::NoNewJob
@@ -5138,22 +5362,14 @@ mod tests {
     fn guarded_send_response_loss_with_ambiguous_jobs_holds_without_selection() {
         let server =
             spawn_response_loss_readback_server(ResponseLossReadbackFixture::AmbiguousJobs);
-        let queue = Vec::new();
-        let stats = vec!["Baseline Campaign 25 0 0 View".to_string()];
-        let stats_identity = stats_identity_inventory(&[(70, 25)]);
-        let schedule_job_ids = BTreeSet::new();
         let client = response_loss_client(&server.base_url);
         let evidence = client
             .post_guarded_send_and_reconcile_with_dispatch(
-                response_loss_input(
-                    &server.base_url,
-                    &queue,
-                    &schedule_job_ids,
-                    &stats,
-                    &stats_identity,
-                    25,
-                ),
-                |_| Err::<reqwest::blocking::Response, _>(()),
+                response_loss_input(&server.base_url, 25),
+                |_| {
+                    server.mark_dispatched();
+                    Err::<reqwest::blocking::Response, _>(())
+                },
             )
             .unwrap_or_else(|err| panic!("{err}"));
 
@@ -5183,24 +5399,18 @@ mod tests {
     }
 
     #[test]
-    fn guarded_send_response_loss_with_capped_readback_marks_recovery_incomplete() {
-        let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::Capped);
-        let queue = Vec::new();
-        let stats = vec!["Baseline Campaign 25 0 0 View".to_string()];
-        let stats_identity = stats_identity_inventory(&[(70, 25)]);
-        let schedule_job_ids = BTreeSet::new();
+    fn guarded_send_response_loss_with_capped_post_readback_marks_recovery_incomplete() {
+        let server = spawn_response_loss_readback_server(
+            ResponseLossReadbackFixture::PostDispatchCappedStats,
+        );
         let client = response_loss_client(&server.base_url);
         let evidence = client
             .post_guarded_send_and_reconcile_with_dispatch(
-                response_loss_input(
-                    &server.base_url,
-                    &queue,
-                    &schedule_job_ids,
-                    &stats,
-                    &stats_identity,
-                    3,
-                ),
-                |_| Err::<reqwest::blocking::Response, _>(()),
+                response_loss_input(&server.base_url, 3),
+                |_| {
+                    server.mark_dispatched();
+                    Err::<reqwest::blocking::Response, _>(())
+                },
             )
             .unwrap_or_else(|err| panic!("{err}"));
 
@@ -5230,11 +5440,97 @@ mod tests {
     }
 
     #[test]
+    fn final_pre_dispatch_baseline_rejects_caps_and_pagination_without_dispatch() {
+        for (mode, expected) in [
+            (
+                ResponseLossReadbackFixture::ScheduleOverCap,
+                "reached the configured row cap",
+            ),
+            (
+                ResponseLossReadbackFixture::ScheduleExactlyAtCap,
+                "reached the configured row cap",
+            ),
+            (
+                ResponseLossReadbackFixture::ManageExactlyAtCap,
+                "reached the configured row cap",
+            ),
+            (
+                ResponseLossReadbackFixture::StatsPagination,
+                "exposed pagination",
+            ),
+        ] {
+            let server = spawn_response_loss_readback_server(mode);
+            let client = response_loss_client(&server.base_url);
+            let mut attempted = false;
+            let error = client
+                .post_guarded_send_and_reconcile_with_dispatch(
+                    response_loss_input(&server.base_url, 3),
+                    |_| {
+                        attempted = true;
+                        Err::<reqwest::blocking::Response, _>(())
+                    },
+                )
+                .expect_err("incomplete pre-dispatch baseline must fail closed");
+
+            assert!(!attempted, "{mode:?} reached the dispatch closure");
+            assert!(
+                error.to_string().contains(expected),
+                "{mode:?} returned unexpected error: {error}"
+            );
+            assert!(server
+                .requests()
+                .iter()
+                .all(|request| request.starts_with("GET ")));
+        }
+    }
+
+    #[test]
+    fn final_pre_dispatch_baseline_rejects_identity_movement_without_dispatch() {
+        let server = spawn_response_loss_readback_server(
+            ResponseLossReadbackFixture::BaselineFreshnessMismatch,
+        );
+        let client = response_loss_client(&server.base_url);
+        let mut attempted = false;
+        let error = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 25),
+                |_| {
+                    attempted = true;
+                    Err::<reqwest::blocking::Response, _>(())
+                },
+            )
+            .expect_err("moving baseline must fail closed");
+
+        assert!(!attempted);
+        assert!(error
+            .to_string()
+            .contains("baseline identities changed during bounded capture"));
+    }
+
+    #[test]
+    fn final_pre_dispatch_baseline_context_mismatch_cannot_reach_dispatch() {
+        let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::NoNewJob);
+        let client = response_loss_client(&server.base_url);
+        let mut input = client
+            .capture_guarded_send_baseline(response_loss_input(&server.base_url, 25))
+            .unwrap_or_else(|err| panic!("{err}"));
+        input.baseline_context.campaign_id = 9002;
+        let mut attempted = false;
+        let error = client
+            .post_guarded_send_from_baseline_with_dispatch(input, |_| {
+                attempted = true;
+                Err::<reqwest::blocking::Response, _>(())
+            })
+            .expect_err("mismatched context must fail closed");
+
+        assert!(!attempted);
+        assert!(error
+            .to_string()
+            .contains("baseline context or freshness did not match the exact request"));
+    }
+
+    #[test]
     fn guarded_send_uncertainty_preserves_only_a_nonconflicting_job_follow_up() {
-        let queue = Vec::new();
-        let stats = Vec::new();
-        let stats_identity = empty_stats_identity_inventory();
-        let schedule_job_ids = BTreeSet::new();
         let input = GuardedSendReconcileInput {
             send_form: (
                 Url::parse("https://example.test/admin/index.php?Page=Send&Action=Step4")
@@ -5244,12 +5540,24 @@ mod tests {
             campaign_id: 9001,
             list_ids: &[8001],
             expected_body_sha256: None,
-            queue_before: &queue,
-            schedule_job_ids_before: &schedule_job_ids,
-            stats_before: &stats,
-            stats_identity_before: &stats_identity,
             expected_recipient_count: 25,
             max_rows: 25,
+            baseline_context: GuardedSendBaselineContext {
+                campaign_id: 9001,
+                list_ids: vec![8001],
+                expected_body_sha256: None,
+                expected_recipient_count: 25,
+                max_rows: 25,
+                capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
+            },
+            queue_before: Vec::new(),
+            schedule_job_ids_before: BTreeSet::new(),
+            manage_job_ids_before: BTreeSet::new(),
+            campaign_job_ids_before: BTreeSet::new(),
+            queue_job_ids_before: BTreeSet::new(),
+            stats_before: Vec::new(),
+            stats_identity_before: empty_stats_identity_inventory(),
+            baseline_identity_stable: true,
         };
         let mut progress = GuardedSendProgress {
             status_code: Some(200),
@@ -5536,10 +5844,15 @@ mod tests {
             stats_before: &stats_before,
             stats_after: &stats_after,
             schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &stats_identity,
             stats_identity_after: &stats_identity,
             expected_recipient_count: 999,
             baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: Some(7001),
             job_active_after: Some(false),
             smtp_reason: None,
@@ -5598,10 +5911,15 @@ mod tests {
             stats_before: &stats_before,
             stats_after: &stats_after,
             schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
             expected_recipient_count: 25,
             baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: Some(7001),
             job_active_after: Some(false),
             smtp_reason: None,
@@ -5646,10 +5964,15 @@ mod tests {
             stats_before: &stats_before,
             stats_after: &stats_after,
             schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
             expected_recipient_count: 25,
             baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: Some(7001),
             job_active_after: Some(true),
             smtp_reason: None,
@@ -5691,10 +6014,15 @@ mod tests {
             stats_before: &queue,
             stats_after: &queue,
             schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
             expected_recipient_count: 25,
             baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: Some(7001),
             job_active_after: Some(false),
             smtp_reason: None,
@@ -5738,10 +6066,15 @@ mod tests {
             stats_before: &stats_before,
             stats_after: &stats_after,
             schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
             expected_recipient_count: 25,
             baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: Some(7001),
             job_active_after: Some(false),
             smtp_reason: None,
@@ -5780,10 +6113,15 @@ mod tests {
             stats_before: &rows,
             stats_after: &rows,
             schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &empty_stats_identity_inventory(),
             stats_identity_after: &empty_stats_identity_inventory(),
             expected_recipient_count: 25,
             baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: None,
             job_active_after: Some(false),
             smtp_reason: None,
@@ -5804,10 +6142,15 @@ mod tests {
             stats_before: &rows,
             stats_after: &rows,
             schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &empty_stats_identity_inventory(),
             stats_identity_after: &empty_stats_identity_inventory(),
             expected_recipient_count: 25,
             baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: Some(7001),
             job_active_after: Some(false),
             smtp_reason: Some("synthetic transport failure".to_string()),

@@ -98,6 +98,7 @@ struct QueueControlLink {
 struct QueueControlInventory {
     links: Vec<QueueControlLink>,
     complete: bool,
+    schedule_html: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1318,6 +1319,7 @@ impl AdminHtmlClient {
             links,
             complete: queue_control_page_is_complete(&schedule_html, max_rows)?
                 && queue_control_page_is_complete(&manage_html, max_rows)?,
+            schedule_html,
         })
     }
 

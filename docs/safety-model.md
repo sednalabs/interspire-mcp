@@ -276,11 +276,14 @@ guarded writes:
   production audience metadata.
 - `interspire_seed_send_apply` repeats those gates immediately before posting
   the final send form and is bounded to an acknowledged seed-recipient count
-  of 1-20.
+  of 1-20. After all wizard and Step2 work, its guarded dispatch path captures
+  and confirms complete bounded Schedule, newsletter Manage, and Stats
+  baselines immediately before building the final request.
 - `interspire_production_send_apply` repeats those gates immediately before
   posting the final send form and additionally requires production send runtime
   enablement plus exact expected recipient count, From, Reply-To, subject, HTML
-  SHA-256, and the required confirmation phrase.
+  SHA-256, and the required confirmation phrase. It uses the same final
+  pre-dispatch baseline capture and confirmation boundary.
 - When `INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1`, both guarded send apply tools
   also require `oci_ledger_preflight` to match the expected campaign/batch row
   count in the configured private OCI send ledger before the final send form is
@@ -336,15 +339,20 @@ request was attempted but no HTTP response proved whether the application
 received it; it must never be described as posted and must never authorize a
 retry or resend. On that error branch, the same invocation attempts only
 bounded authenticated Schedule, newsletter Manage, and Stats readback against
-the identity baselines captured earlier in that invocation before dispatch. The returned
+the confirmed identities captured by the guarded dispatch path immediately
+before dispatch. Two complete bounded snapshots must preserve Schedule,
+newsletter Manage, exact target-campaign Manage, and Stats identities. A cap,
+pagination signal, identity movement, or exact campaign/list/count/body context
+mismatch stops before request construction. The returned
 `uncertainty_recovery_contract` is closed to `hold_do_not_retry`;
 `retry_authorized`, `mutation_authorized`, and
 `terminal_success_authorized` remain false.
 
 The recovery contract carries the exact intended campaign/list/count/body
-context, bounded pre-dispatch Schedule and Stats identities, same-invocation
-capture/readback proof, readback completeness, and a closed identity state. A
-complete readback with one positive exact Manage-bound job may nest read-only
+context, bounded final pre-dispatch Schedule, Manage, target-campaign Manage,
+and Stats identities, same-invocation capture stage and stability proof,
+readback completeness, and a closed identity state. A complete readback with
+one positive exact Manage-bound job may nest read-only
 `interspire_send_job_status_readback` context. No new job, ambiguous or unbound
 jobs, and failed, partial, paginated, or capped readback keep the hold and expose
 no automatic job follow-up. Absence is not non-receipt proof, and ambiguity

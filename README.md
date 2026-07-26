@@ -470,7 +470,11 @@ Then pass `output_dir` as a subdirectory under that root, or set
 
 The MCP exposes two explicit send tools. They are not generic admin POST tools;
 both re-run the campaign body audit and Send wizard proof immediately before
-posting the final send form captured from the live Interspire page.
+posting the final send form captured from the live Interspire page. After all
+wizard and Step2 work, the guarded dispatch path itself captures two complete,
+authenticated, bounded Schedule, newsletter Manage, and Stats snapshots. Their
+Schedule/Manage job identities, exact target-campaign Manage identities, and
+Stats identities must remain stable before the final request can be built.
 
 `interspire_seed_send_apply` is bounded to small seed sends. It requires:
 
@@ -526,8 +530,10 @@ request loses its HTTP response, the result is instead `response_uncertain`:
 the request was attempted, but the MCP does not claim that the boundary was
 posted or received by the application. The same invocation then attempts only
 bounded authenticated Schedule, newsletter Manage, and Stats readback against
-the baselines captured earlier in that invocation before dispatch. It never
-retries the send request.
+the confirmed baseline captured in the guarded dispatch path immediately before
+dispatch. A cap, pagination signal, campaign/list/count/body context mismatch,
+or identity change between the two bounded baseline snapshots fails closed
+before dispatch. The MCP never retries the send request.
 The tools then follow the allowlisted Interspire popup send loop, reread
 Schedule, Manage, and Stats, and classify the
 result as `response_uncertain`, `posted`, `queued`, `processed`,
@@ -547,11 +553,12 @@ context, not terminal authority.
 Instead it returns an `uncertainty_recovery_contract` whose sole decision is
 `hold_do_not_retry`. Its `retry_authorized`, `mutation_authorized`, and
 `terminal_success_authorized` fields are always false. The contract carries the
-authenticated same-invocation pre-dispatch Schedule and Stats identity
-baselines, their row bound, the exact intended campaign/list/count/body context,
-the completeness and identity state of the immediate readback, and explicit
-read-only next-action guidance. Only a complete readback with one exactly
-Manage-bound positive job may include nested
+authenticated same-invocation final pre-dispatch Schedule, newsletter Manage,
+exact target-campaign Manage, and Stats identity baselines; their row bound; the
+exact intended campaign/list/count/body context; the baseline stage, stability,
+and completeness proofs; the identity state of the immediate readback; and
+explicit read-only next-action guidance. Only a complete readback with one
+exactly Manage-bound positive job may include nested
 `interspire_send_job_status_readback` context. No identity, ambiguous or
 unbound identity, and incomplete or capped readback remain a hold with no
 automatic job selection. None of these states authorizes resend, retry, or

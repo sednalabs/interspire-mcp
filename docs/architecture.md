@@ -206,8 +206,12 @@ block the proof; there is no import apply handler in this public build.
 
 Guarded send apply tools deliberately sit outside the no-mutation proof family.
 They re-run the same campaign-body and Send wizard proof immediately, capture
-the live final send form, and post only through the guarded final-send route
-classifier. Seed sends require a bounded recipient count. Production sends also
+the live final send form, then require two stable complete bounded
+Schedule/Manage/Stats identity snapshots inside the guarded dispatch path
+before constructing the final POST. The second snapshot is the response-loss
+baseline; any cap, pagination, exact request-context mismatch, or identity
+movement fails closed before dispatch. Seed sends require a bounded recipient
+count. Production sends also
 require the production runtime gate, exact expected count, From, Reply-To,
 subject, HTML SHA-256, and confirmation phrase.
 When OCI ledger enforcement is enabled, both send apply paths first verify the
