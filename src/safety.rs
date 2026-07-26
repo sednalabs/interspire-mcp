@@ -2039,8 +2039,7 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(
-            guarded_send_popup_job_id(&consistent_aliases)
-                .unwrap_or_else(|err| panic!("{err}")),
+            guarded_send_popup_job_id(&consistent_aliases).unwrap_or_else(|err| panic!("{err}")),
             2
         );
 
