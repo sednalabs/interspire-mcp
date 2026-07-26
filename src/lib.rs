@@ -25,11 +25,13 @@
 //! * Allows queue cancel/delete/pause/resume plus guarded campaign/list/user/settings edits
 //!   only through deterministic preview/apply plan ids and explicit runtime
 //!   write flags.
-//! * Allows a guarded seed-send apply tool only when send controls are
-//!   explicitly enabled and the immediate seed-readiness proof passes.
-//! * Allows a guarded production-send apply tool only when production send
-//!   controls are explicitly enabled and the strict immediate readiness proof
-//!   plus confirmation phrase pass.
+//! * Allows guarded seed-send authority evaluation only when send controls are
+//!   explicitly enabled and the immediate seed-readiness proof passes; those
+//!   flags do not establish dispatch authority.
+//! * Allows guarded production-send authority evaluation only when production
+//!   send controls are explicitly enabled and the strict immediate readiness
+//!   proof plus confirmation phrase pass; the current admin HTML adapter still
+//!   refuses dispatch because it has no authenticated atomic state binding.
 //! * Redacts credentials, cookies, raw contacts, private headers, SMTP secrets,
 //!   bounce secrets, and license values from tool output.
 //!
@@ -437,7 +439,7 @@ impl InterspireMcpServer {
                     .with_group("read")
                     .with_read_only(true)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Read structured Schedule/Manage/Stats context for one expected Interspire send job without exporting recipients.",
+                        "Read one positive send-job identity from bounded Schedule and newsletter Manage routes; Manage campaign binding is exact, while Stats and progress remain diagnostic and nonterminal.",
                         ["interspire", "send", "job", "status", "readback"],
                     )),
                 ToolCapability::new("interspire_cron_readiness")
@@ -451,7 +453,7 @@ impl InterspireMcpServer {
                     .with_group("read")
                     .with_risk_posture(GuardedActionPosture::no_mutation_proof())
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Compose send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation without sending.",
+                        "Compose exact active-job identity, diagnostic nonterminal progress, and optional OCI ledger evidence into a hold/continue/pause recommendation without sending.",
                         ["interspire", "send", "stop", "gate", "readiness"],
                     )),
                 ToolCapability::new("interspire_campaign_readback")
@@ -534,7 +536,7 @@ impl InterspireMcpServer {
                     .with_group("guarded-send")
                     .with_read_only(false)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Apply one explicitly acknowledged seed send after immediate readiness proof and optional OCI ledger preflight.",
+                        "Evaluate one explicitly acknowledged seed-send request against fresh live authority. The current admin HTML surface refuses before dispatch because it exposes no atomic state binding; queue-only readback never creates request/job identity.",
                         [
                             "interspire",
                             "seed",
@@ -548,7 +550,7 @@ impl InterspireMcpServer {
                     .with_group("guarded-send")
                     .with_read_only(false)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Apply an explicitly acknowledged production send after strict immediate readiness proof and optional OCI ledger preflight.",
+                        "Evaluate one explicitly acknowledged production-send request against strict fresh live authority. The current admin HTML surface refuses before dispatch because it exposes no atomic state binding; queue-only readback never creates request/job identity.",
                         [
                             "interspire",
                             "production",
@@ -1092,7 +1094,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Read structured Schedule/Manage/Stats context for one expected Interspire send job without sending, triggering cron, exporting recipients, or mutating queue state. Historical Stats counts never establish current job identity."
+        description = "Read bounded Schedule, newsletter Manage, and Stats context for one positive Interspire send job without sending, triggering cron, exporting recipients, or mutating queue state. Current identity requires an exact queue-control route; every participating Manage row must bind the job to one positive exact campaign. Stats identities and active-row progress are diagnostic and never prove terminal state, including progress equal to the reported total."
     )]
     fn interspire_send_job_status_readback(
         &self,
@@ -1112,7 +1114,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Compose send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation. Read-only; queue pause requires a separate queue-control apply."
+        description = "Compose exact active send-job identity, diagnostic nonterminal Schedule/Manage progress, and optional OCI ledger preflight into a hold/continue/pause recommendation. Read-only; Stats/progress never prove terminal state and queue pause requires a separate queue-control apply."
     )]
     fn interspire_send_stop_gate_readiness(
         &self,
@@ -1208,7 +1210,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Apply one explicitly acknowledged seed send after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight."
+        description = "Evaluate one explicitly acknowledged seed-send request after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. The current admin HTML surface exposes no authenticated atomic state version or lock over the exact live campaign, body, sender, reply-to, bounce address, selected lists, recipient count, final-form token, and submitted pairs, so this tool refuses before constructing or dispatching the final request. A future reviewed native-bound dispatch must retain response_uncertain hold/do-not-retry behavior, and queue-only readback must never create exact request/job identity."
     )]
     fn interspire_seed_send_apply(
         &self,
@@ -1218,7 +1220,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Apply an explicitly acknowledged production send after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight."
+        description = "Evaluate one explicitly acknowledged production-send request after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. The current admin HTML surface exposes no authenticated atomic state version or lock over the exact live campaign, body, sender, reply-to, bounce address, selected lists, recipient count, final-form token, and submitted pairs, so this tool refuses before constructing or dispatching the final request. A future reviewed native-bound dispatch must retain response_uncertain hold/do-not-retry behavior, and queue-only readback must never create exact request/job identity."
     )]
     fn interspire_production_send_apply(
         &self,
@@ -1472,7 +1474,7 @@ impl InterspireMcpServer {
 impl ServerHandler for InterspireMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Safe Interspire Email Marketer evidence tools. Mutations are disabled by default and limited to guarded queue cancel/delete/pause/resume, campaign/list/user/settings/template apply plans, private render artifacts, and separately gated seed or production send apply tools.")
+            .with_instructions("Safe Interspire Email Marketer evidence tools. Mutations are disabled by default and limited to guarded queue cancel/delete/pause/resume, campaign/list/user/settings/template apply plans, private render artifacts, and separately gated seed or production authority evaluation. The current admin HTML adapter refuses seed and production dispatch before final request construction because it has no authenticated atomic state binding.")
     }
 
     fn list_tools(

@@ -18,8 +18,11 @@ This repository contains a public Rust MCP server for Interspire Email Marketer
 - Current public write scope is intentionally narrow: guarded queue
   cancel/delete, guarded campaign/list/user/settings edits, guarded list
   creation, guarded campaign copy, semantic EDM template edits, private
-  render-artifact generation, bounded seed sends, and strictly gated production
-  sends. CSV import preflight is read-only and aggregate-only.
+  render-artifact generation, and one-recipient native preview sends. The seed
+  and production send tools retain guarded evaluation contracts, but the
+  current admin HTML adapter must refuse before final request construction or
+  dispatch because it has no authenticated atomic state binding. CSV import
+  preflight is read-only and aggregate-only.
 - Sensitive reads are exceptional read-only tools, not ordinary readback.
   Preserve the toolkit sensitive-read posture, runtime gate, per-call
   acknowledgement, exact field list, and Interspire-owned allowlists.

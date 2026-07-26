@@ -30,8 +30,9 @@ before newsletter work goes wrong:
   creating a seed list, while clearly marking what that preview does not prove?
 - Can we prepare a private OCI send-ledger file from a sanitized manifest before
   a guarded send, without contacting the provider or exposing raw recipients?
-- Can we apply a seed or production send only after fresh proof, exact expected
-  values, runtime send gates, and explicit acknowledgement?
+- Can we evaluate a seed or production request against fresh live authority and
+  refuse before dispatch when the upstream surface cannot bind that authority
+  atomically?
 - When server setup requires a saved admin value, can we query one exact
   approved field without turning normal readbacks into secret dumps?
 
@@ -39,10 +40,12 @@ The server is read-only by default. Its write-class capabilities are limited to
 guarded queue cancel/delete/pause/resume, guarded campaign/list/user/settings/template
 edits, guarded list creation, guarded campaign copy, private render artifacts,
 aggregate-only import preflight, private OCI send-ledger preparation, and
-separately gated seed or production send apply tools. All apply paths stay
-disabled unless the runtime explicitly
-enables guarded writes and the matching control flags. Import preflight is a
-read tool and never imports contacts.
+separately gated seed or production send evaluation tools. The current admin
+HTML adapter cannot bind campaign, audience, and final-form state atomically, so
+those two tools refuse before final request construction or dispatch even when
+their runtime gates are enabled. Other apply paths stay disabled unless the
+runtime explicitly enables guarded writes and the matching control flags.
+Import preflight is a read tool and never imports contacts.
 The narrow sensitive-read tool is also disabled by default and requires both a
 runtime gate and per-call acknowledgement before it can return unredacted setup
 values.
@@ -113,7 +116,7 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_queue_stats_readback` | Read | Read scheduled queue and stats rows without triggering cron. |
 | `interspire_queue_control_preview` | Read preview | Build source-bound plan IDs for cancel/delete/pause/resume actions found on Schedule or exact immediate-job actions on newsletter Manage. |
 | `interspire_queue_control_apply` | Guarded apply | Apply one acknowledged, previously previewed queue plan when write gates are enabled, then prove the transition from fresh Schedule and Manage reads. |
-| `interspire_send_job_status_readback` | Read | Read structured Schedule/Manage/Stats context for one expected send job. Current identity requires an exact queue-control route; historical Stats counts never establish job identity. |
+| `interspire_send_job_status_readback` | Read | Read bounded Schedule/Manage/Stats context for one positive send job, an optional positive campaign/expected total, and unique positive list identities. Active identity requires exact queue-control routes; every participating Manage row must prove one positive exact campaign association. Stats identities, caller baselines, and active-row progress are diagnostic only because the bounded admin surface exposes no application-native job-to-Stats association; they never authorize terminal state. |
 | `interspire_cron_readiness` | Read | Compare Interspire cron settings with Schedule-page cron detection without triggering `cron.php`. |
 | `interspire_send_stop_gate_readiness` | No-mutation proof | Combine send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation; any pause still requires separate queue-control apply. |
 | `interspire_campaign_readback` | Read | Read campaign manage rows with structured campaign ids/action flags, or one campaign edit-page summary. |
@@ -127,8 +130,8 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_oci_send_ledger_prepare_apply` | Guarded local apply | Write sanitized private OCI send-ledger rows from an acknowledged preview plan, then rerun OCI ledger preflight. This does not contact OCI or perform an Interspire send. |
 | `interspire_send_wizard_readback` | No-mutation proof | Render the Send wizard through the no-send proof boundary and verify queue/no-new-stats invariants, including Interspire 8 wizard shapes that echo recipient count rather than selected list ids. |
 | `interspire_seed_readiness_gate` | No-mutation proof | Combine campaign body audit and Send wizard readback into seed-readiness gates. |
-| `interspire_seed_send_apply` | Guarded send | Apply one explicitly acknowledged bounded seed send after immediate readiness proof and send-control runtime gates. |
-| `interspire_production_send_apply` | Guarded send | Apply an explicitly acknowledged production send after strict readiness proof, exact expected count/sender/subject/hash, and production-send runtime gates. |
+| `interspire_seed_send_apply` | Guarded-send evaluation | Evaluate one explicitly acknowledged bounded seed request against fresh live authority. The current admin HTML surface has no atomic state binding, so the tool refuses before final request construction or dispatch. |
+| `interspire_production_send_apply` | Guarded-send evaluation | Evaluate one explicitly acknowledged production request against strict fresh live authority. The current admin HTML surface has no atomic state binding, so the tool refuses before final request construction or dispatch. |
 | `interspire_campaign_template_update_preview` | Read preview | Preview semantic EDM template edits such as subject, HTML body, text body, and tracking flags. |
 | `interspire_campaign_template_update_apply` | Guarded apply | Apply one previously previewed semantic EDM template edit. |
 | `interspire_campaign_template_artifact_update_preview` | Read preview | Preview applying a fixed private render artifact to a draft campaign without returning raw HTML. |
@@ -221,9 +224,15 @@ First smoke test: call `interspire_status`. A healthy default posture should
 report configured read capabilities, `safe_mode: true`,
 `guarded_writes_enabled: false`, and `queue_controls_enabled: false`.
 For a default runtime it should also report `form_write_controls_enabled: false`
-and `write_execution_mode: "preview_apply"`. If the Interspire admin or XML API
-is behind Cloudflare Access, `cloudflare_access_configured: true` confirms that
-the service-token header values were loaded without revealing those values.
+and `write_execution_mode: "preview_apply"`. The current adapter always reports
+`seed_production_send_dispatch_available: false` and a warning that
+send-control flags permit seed/production authority evaluation but do not
+supply the missing authenticated atomic state binding or enable that dispatch.
+This field does not describe the separately scoped, explicitly gated
+one-recipient campaign preview/test-send route. If the Interspire admin or XML
+API is behind Cloudflare Access, `cloudflare_access_configured: true` confirms
+that the service-token header values were loaded without revealing those
+values.
 Then call `interspire_xml_auth_probe`. It uses Interspire's
 `authentication/XmlApiTest` route and performs no list, contact, queue, form,
 or send action. A `xml_auth_error` means the XML username, XML token, XML API
@@ -468,11 +477,38 @@ Then pass `output_dir` as a subdirectory under that root, or set
 
 ### Guarded Send Apply
 
-The MCP exposes two explicit send tools. They are not generic admin POST tools;
-both re-run the campaign body audit and Send wizard proof immediately before
-posting the final send form captured from the live Interspire page.
+The MCP retains two explicit guarded-send evaluation tools. They are not
+generic admin POST tools. On the current admin HTML adapter they do not have
+dispatch authority, even when every caller-supplied gate passes.
 
-`interspire_seed_send_apply` is bounded to small seed sends. It requires:
+Before making that refusal, each tool reads fresh authenticated live state and
+compares three complete authority snapshots. Each snapshot contains:
+
+- the selected campaign id plus exact private subject, HTML, and text identities;
+- exact private sender-name, sender-address, Reply-To, and bounce identities,
+  while the report remains redacted;
+- the exact selected list-id set and rendered recipient count;
+- every parsed final-wizard option;
+- the allowlisted final form action, one form token, and a domain-separated
+  digest over the exact ordered provider-derived submission pairs.
+
+The final form must itself expose the exact campaign and list ids. Recipient
+count or session-held state cannot substitute for omitted list controls, and
+the adapter never rewrites stale or missing form values from caller input.
+Missing, malformed, duplicate, contradictory, capped, paginated, or moving
+authority refuses before final request construction.
+
+The current Interspire admin HTML surface exposes CSRF protection but no
+authenticated application-native state version or lock binding campaign body,
+audience, count, and form state through the final POST. Equal snapshots
+therefore cannot exclude a change after the confirmed read and before
+dispatch. The tools fail closed at that boundary and return
+`final_atomic_send_authority=false`; they do not construct or send the final
+request. A reviewed native atomic binding is required before this dispatch
+branch can become operational.
+
+`interspire_seed_send_apply` still validates the following inputs before the
+closed authority boundary:
 
 - `INTERSPIRE_GUARDED_WRITES=1`
 - `INTERSPIRE_SEND_CONTROLS=1`
@@ -487,18 +523,11 @@ posting the final send form captured from the live Interspire page.
   more than 5 minutes in the future are ignored and reported through
   `stale_rows_ignored`.
 
-`interspire_oci_send_ledger_prepare_preview` and
-`interspire_oci_send_ledger_prepare_apply` can prepare those private ledger
-rows before a guarded send request. Preview reads a private JSONL manifest from
-the configured ledger directory and returns a plan id without writing. Apply
-requires `INTERSPIRE_GUARDED_WRITES=1`, `INTERSPIRE_SEND_CONTROLS=1`, the exact
-plan id, and `acknowledge_ledger_write=true`, then writes only sanitized ledger
-rows with an apply-time UTC `submitted_at` and reruns the same preflight gate.
-If exact matching rows already exist but are stale or lack a valid timestamp,
-apply appends fresh timestamped rows instead of claiming idempotence. The
-prepare tools do not contact OCI and do not perform an Interspire send.
+The OCI ledger preparation tools remain no-send preparation surfaces. Passing
+their preflight does not supply the missing Interspire atomic state binding and
+does not authorize dispatch.
 
-`interspire_production_send_apply` is the full-send boundary. It requires:
+`interspire_production_send_apply` still validates:
 
 - `INTERSPIRE_GUARDED_WRITES=1`
 - `INTERSPIRE_SEND_CONTROLS=1`
@@ -508,30 +537,40 @@ prepare tools do not contact OCI and do not perform an Interspire send.
 - exact expected recipient count, From email, Reply-To email, subject, and
   campaign HTML SHA-256
 - when `INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1`, a verified
-  `oci_ledger_preflight` object, with `campaign_id` equal to the Interspire
-  campaign id, before the final Interspire send form is posted.
+  `oci_ledger_preflight` object with the exact campaign id.
 
-Both tools return redacted aggregate evidence plus a post-send reconciliation
-object. HTTP success from the final form post is reported only as `posted`.
-When Interspire 8.x renders the final Step4 page without echoing selected
-campaign/list controls, the send tools bind the final POST to the already
-proven request campaign id and list ids rather than trusting stale form values.
-No-send readiness warnings are preserved in the apply receipt, but warnings
-that did not fail blocker gates are not fatal by themselves. Apply refuses
-before the final send boundary only for failed readiness blockers, expected
-subject or body-hash mismatches, unsafe final-form proof, missing runtime gates,
-or ledger failure. Failed post-send reconciliation is reported as a post-boundary
-non-success state, not as proof that no send boundary was attempted.
-The tools then follow the allowlisted Interspire popup send loop, reread
-Schedule and Stats, and classify the result as `posted`, `queued`, `processed`,
-`transport_failed`, `delivered_unverified`, or `seed_proven`. The legacy
-`sent` boolean is true only when reconciliation reaches a terminal success
-state and an Interspire job id was proven. A final form HTTP 200 without a job
-id plus queue/stats movement remains non-successful `posted-unproven` evidence.
-When Interspire creates a job but completion is not yet proven, the
-reconciliation object can include a `follow_up_contract` containing the job id,
-campaign id, list ids, expected queue total, and status tool name for
-`interspire_send_job_status_readback`.
+The native-bound reconciliation seam remains fail-closed for future work and
+for synthetic regression proof. If a reviewed atomic binding later permits a
+dispatch, only a positive job id carried by that invocation's native response
+or popup continuation can bind job context. Every identity alias present on a
+popup continuation must parse as the same positive job id; conflicting,
+non-numeric, or zero aliases refuse the route. Schedule/Manage singleton
+differences, campaign association, Stats changes, labels, counts, timing, and
+row order remain diagnostic and never create request/job identity.
+
+Request-response loss remains `response_uncertain` with the sole decision
+`hold_do_not_retry`. It never exposes an observed exact job or nested ordinary
+job-status follow-up from queue differencing. Its identity state is limited to
+`no_new_job`, `ambiguous_or_unbound`, or `readback_incomplete`;
+`retry_authorized`, `mutation_authorized`, and
+`terminal_success_authorized` are always false. The MCP never retries or
+resends.
+
+Current Schedule/Manage progress fields are also explicitly diagnostic:
+`terminal_authority_proven` remains false and state values use a
+`diagnostic_*` vocabulary. A reported `100 / 100` remains
+`diagnostic_at_reported_total_nonterminal`; it is not completion proof, while
+reported sent progress greater than the total fails closed as impossible.
+Every participating newsletter Manage row must bind the positive job to one
+positive exact NewsletterEdit campaign identity. Stats counts, identity
+deltas, labels, row order, and progress equality never substitute for that
+binding or for application-native terminal proof.
+
+Known Schedule and newsletter Manage empty-state copy is accepted only with
+the expected page heading. A structurally empty header-only Stats table is
+accepted as an empty inventory; an unreviewed textual Stats placeholder fails
+closed as an unidentified non-header row until target-version evidence supports
+an explicit compatibility rule.
 Production sending should still be paired with provider-side monitoring and an
 Ops work item reference.
 

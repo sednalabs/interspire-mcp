@@ -10,6 +10,7 @@ mod forms;
 mod proof;
 mod scaffold;
 mod send_ops;
+mod stats_identity;
 
 use crate::{
     config::{AdminHtmlConfig, InterspireVersion, WriteExecutionMode},
@@ -97,6 +98,7 @@ struct QueueControlLink {
 struct QueueControlInventory {
     links: Vec<QueueControlLink>,
     complete: bool,
+    schedule_html: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1317,6 +1319,7 @@ impl AdminHtmlClient {
             links,
             complete: queue_control_page_is_complete(&schedule_html, max_rows)?
                 && queue_control_page_is_complete(&manage_html, max_rows)?,
+            schedule_html,
         })
     }
 
@@ -2367,10 +2370,7 @@ fn extract_manage_campaign_id(
             .collect::<Vec<_>>();
         candidate.set_query(None);
         candidate.query_pairs_mut().extend_pairs(retained_pairs);
-        let Ok(url) = safety::ensure_allowed_admin_get(base_url, candidate.as_str()) else {
-            continue;
-        };
-        let pairs = url.query_pairs().collect::<Vec<_>>();
+        let pairs = candidate.query_pairs().collect::<Vec<_>>();
         let is_newsletter_edit = pairs.iter().any(|(key, value)| {
             key.eq_ignore_ascii_case("Page") && value.eq_ignore_ascii_case("Newsletters")
         }) && pairs.iter().any(|(key, value)| {
@@ -2379,14 +2379,22 @@ fn extract_manage_campaign_id(
         if !is_newsletter_edit {
             continue;
         }
-        if let Some(id) = pairs
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case("id"))
-            .and_then(|(_, value)| value.parse::<u64>().ok())
-        {
-            if !ids.contains(&id) {
-                ids.push(id);
+        let url = safety::ensure_allowed_admin_get(base_url, candidate.as_str()).map_err(|_| {
+            InterspireError::Safety(
+                "campaign Manage row exposed an invalid newsletter edit identity".to_string(),
+            )
+        })?;
+        let id = match safety::classify_allowed_admin_get(&url)? {
+            AdminReadPage::NewsletterEdit { id } if id > 0 => id,
+            _ => {
+                return Err(InterspireError::Safety(
+                    "campaign Manage row did not expose a positive newsletter edit identity"
+                        .to_string(),
+                ))
             }
+        };
+        if !ids.contains(&id) {
+            ids.push(id);
         }
     }
     match ids.as_slice() {
@@ -2798,6 +2806,7 @@ fn queue_control_page_has_pagination(document: &Html) -> Result<bool, Interspire
                         key.to_ascii_lowercase().as_str(),
                         "p" | "pagenumber"
                             | "currentpage"
+                            | "displaypage"
                             | "start"
                             | "startrow"
                             | "offset"
@@ -5965,6 +5974,34 @@ mod tests {
     }
 
     #[test]
+    fn manage_campaign_identity_rejects_non_positive_edit_identity() {
+        for campaign_id in ["0", "test"] {
+            let html = format!(
+                r#"
+                    <table><tr>
+                      <td>Campaign Alpha</td>
+                      <td>
+                        <a href="index.php?Page=Newsletters&Action=Edit&id={campaign_id}">Edit</a>
+                        <a href="index.php?Page=Send&Action=PauseSend&Job=88">Pause</a>
+                      </td>
+                    </tr></table>
+                "#
+            );
+            let error = parse_queue_control_links(
+                "https://example.test/admin/",
+                &html,
+                25,
+                QueueControlSource::CampaignManage,
+            )
+            .expect_err("non-positive Manage campaign identity must fail closed");
+
+            assert!(error
+                .to_string()
+                .contains("invalid newsletter edit identity"));
+        }
+    }
+
+    #[test]
     fn queue_control_plan_id_ignores_active_progress_text() {
         let first_html = r#"
             <table>
@@ -6502,6 +6539,12 @@ mod tests {
             QueueControlSource::CampaignManage
         )
         .is_err());
+        assert!(ensure_queue_control_page_identity(
+            base_url,
+            "<h1>View Scheduled Email Queue</h1><p>There are no emails currently scheduled.</p>",
+            QueueControlSource::Schedule
+        )
+        .is_ok());
         assert!(ensure_queue_control_page_identity(
             base_url,
             "<h2>View Email Campaigns</h2><p>There are no email campaigns.</p>",

@@ -1,6 +1,10 @@
 use super::{
     admin_evidence, compact_text, ensure_authenticated_html, extract_login_csrf_token, forms,
-    parse_table_rows, redact_field_value, route_fingerprint, AdminHtmlClient,
+    parse_table_rows, redact_field_value, route_fingerprint,
+    stats_identity::{
+        parse_stats_identity_inventory, unique_added_stats_identity, StatsIdentityInventory,
+    },
+    AdminHtmlClient,
 };
 use crate::{
     error::InterspireError,
@@ -11,7 +15,8 @@ use crate::{
         CampaignTestSendPreviewReport, CampaignTestSendPreviewRequest, OciLedgerPreflightReport,
         ProductionSendApplyReport, ProductionSendApplyRequest, RenderArtifact, SeedReadinessGate,
         SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport,
-        SeedSendApplyRequest, SendApplyStatus, SendJobFollowUpContract, SendReconciliationReport,
+        SeedSendApplyRequest, SendApplyStatus, SendBaselineCaptureStage, SendJobFollowUpContract,
+        SendReconciliationReport, SendUncertaintyIdentityState, SendUncertaintyRecoveryContract,
         SendWizardReadbackReport, SendWizardReadbackRequest, MAX_SEED_SEND_RECIPIENTS,
         PRODUCTION_SEND_CONFIRMATION_PHRASE,
     },
@@ -37,16 +42,123 @@ struct GuardedSendEvidence {
     reconciliation: SendReconciliationReport,
 }
 
-struct GuardedSendReconcileInput<'a> {
+struct GuardedSendRequestInput<'a> {
     send_form: (Url, Vec<(String, String)>),
+    atomic_authority_binding: GuardedSendAtomicAuthorityBinding,
     campaign_id: u64,
     list_ids: &'a [u64],
     expected_body_sha256: Option<String>,
-    queue_before: &'a [String],
-    schedule_job_ids_before: &'a BTreeSet<u64>,
-    stats_before: &'a [String],
     expected_recipient_count: u64,
     max_rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuardedSendBaselineContext {
+    campaign_id: u64,
+    list_ids: Vec<u64>,
+    expected_body_sha256: Option<String>,
+    expected_recipient_count: u64,
+    max_rows: usize,
+    authority_submission_sha256: String,
+    authority_state_version: String,
+    capture_stage: SendBaselineCaptureStage,
+}
+
+struct GuardedSendReconcileInput<'a> {
+    send_form: (Url, Vec<(String, String)>),
+    atomic_authority_binding: GuardedSendAtomicAuthorityBinding,
+    campaign_id: u64,
+    list_ids: &'a [u64],
+    expected_body_sha256: Option<String>,
+    expected_recipient_count: u64,
+    max_rows: usize,
+    baseline_context: GuardedSendBaselineContext,
+    queue_before: Vec<String>,
+    schedule_job_ids_before: BTreeSet<u64>,
+    manage_job_ids_before: BTreeSet<u64>,
+    campaign_job_ids_before: BTreeSet<u64>,
+    queue_job_ids_before: BTreeSet<u64>,
+    stats_before: Vec<String>,
+    stats_identity_before: StatsIdentityInventory,
+    baseline_identity_stable: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct GuardedSendAtomicAuthorityBinding {
+    submission_sha256: String,
+    state_version: String,
+}
+
+impl GuardedSendAtomicAuthorityBinding {
+    fn validates(&self, send_form: &(Url, Vec<(String, String)>)) -> bool {
+        !self.state_version.trim().is_empty()
+            && self.submission_sha256 == guarded_send_submission_sha256(send_form)
+    }
+
+    #[cfg(test)]
+    fn synthetic(send_form: &(Url, Vec<(String, String)>)) -> Self {
+        Self {
+            submission_sha256: guarded_send_submission_sha256(send_form),
+            state_version: "synthetic-atomic-state-version".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct GuardedSendAuthorityIdentity {
+    campaign_id: u64,
+    subject_sha256: Option<String>,
+    html_sha256: Option<String>,
+    text_sha256: Option<String>,
+    from_name_sha256: Option<String>,
+    from_email_sha256: Option<String>,
+    reply_to_email_sha256: Option<String>,
+    bounce_email_sha256: Option<String>,
+    selected_list_ids: Vec<u64>,
+    recipient_count: Option<u64>,
+    send_immediately_checked: Option<bool>,
+    notify_owner_checked: Option<bool>,
+    track_opens_checked: Option<bool>,
+    track_links_checked: Option<bool>,
+    multipart_checked: Option<bool>,
+    embed_images_checked: Option<bool>,
+    final_form_action_fingerprint: Option<String>,
+    final_form_token_sha256: String,
+    submission_sha256: String,
+}
+
+struct GuardedSendAuthoritySnapshot {
+    campaign_body: CampaignBodyAuditReport,
+    send_wizard: SendWizardReadbackReport,
+    send_form: (Url, Vec<(String, String)>),
+    identity: GuardedSendAuthorityIdentity,
+    atomic_binding: Option<GuardedSendAtomicAuthorityBinding>,
+}
+
+struct GuardedSendAuthorityExpectation<'a> {
+    campaign_id: u64,
+    list_ids: &'a [u64],
+    expected_recipient_count: u64,
+    expected_subject: Option<&'a str>,
+    expected_html_sha256: Option<&'a str>,
+    expected_from_email: Option<&'a str>,
+    expected_reply_to_email: Option<&'a str>,
+}
+
+struct GuardedSendAuthorityReview {
+    confirmed: GuardedSendAuthoritySnapshot,
+    atomic_binding: Option<GuardedSendAtomicAuthorityBinding>,
+    refusal_reason: Option<String>,
+}
+
+struct GuardedSendBaselineSnapshot {
+    queue_before: Vec<String>,
+    schedule_job_ids: BTreeSet<u64>,
+    manage_job_ids: BTreeSet<u64>,
+    campaign_job_ids: BTreeSet<u64>,
+    queue_job_ids: BTreeSet<u64>,
+    stats_before: Vec<String>,
+    stats_identity: StatsIdentityInventory,
 }
 
 struct GuardedSendTerminalInput<'a> {
@@ -57,11 +169,24 @@ struct GuardedSendTerminalInput<'a> {
     queue_after: &'a [String],
     stats_before: &'a [String],
     stats_after: &'a [String],
+    schedule_job_ids_before: &'a BTreeSet<u64>,
+    manage_job_ids_before: &'a BTreeSet<u64>,
+    campaign_job_ids_before: &'a BTreeSet<u64>,
+    stats_identity_before: &'a StatsIdentityInventory,
+    stats_identity_after: &'a StatsIdentityInventory,
     expected_recipient_count: u64,
+    baseline_max_rows: usize,
+    baseline_context_verified: bool,
+    baseline_identity_stable: bool,
+    baseline_capture_stage: SendBaselineCaptureStage,
     job_id: Option<u64>,
+    job_active_after: Option<bool>,
     smtp_reason: Option<String>,
     popup_steps: usize,
     approved_cron_schedule: bool,
+    response_uncertain: bool,
+    reconciliation_readback_complete: bool,
+    job_identity_ambiguous: bool,
     proof_gaps: Vec<String>,
     notes: Vec<String>,
 }
@@ -107,7 +232,7 @@ impl GuardedSendJobEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScheduleJobIdentityDelta {
+enum QueueJobIdentityDelta {
     None,
     Unique(u64),
     Ambiguous { added: usize, removed: usize },
@@ -121,9 +246,14 @@ struct GuardedSendProgress {
     smtp_reason: Option<String>,
     popup_steps: usize,
     approved_cron_schedule: bool,
+    response_uncertain: bool,
     notes: Vec<String>,
     queue_after: Option<Vec<String>>,
     stats_after: Option<Vec<String>>,
+    stats_identity_after: Option<StatsIdentityInventory>,
+    active_job_ids_after: Option<BTreeSet<u64>>,
+    reconciliation_readback_complete: bool,
+    job_identity_ambiguous: bool,
 }
 
 impl AdminHtmlClient {
@@ -189,9 +319,29 @@ impl AdminHtmlClient {
             return Err(InterspireError::AdminHtmlNotConfigured);
         }
         self.login()?;
+        self.campaign_body_audit_authenticated(campaign_id)
+    }
 
+    fn campaign_body_audit_authenticated(
+        &self,
+        campaign_id: u64,
+    ) -> Result<CampaignBodyAuditReport, InterspireError> {
+        self.campaign_body_authority_authenticated(campaign_id)
+            .map(|(report, _)| report)
+    }
+
+    fn campaign_body_authority_authenticated(
+        &self,
+        campaign_id: u64,
+    ) -> Result<(CampaignBodyAuditReport, Option<String>), InterspireError> {
         let resolved = self.resolve_campaign_body_html(campaign_id)?;
-        let mut report = campaign_body_audit_from_html(campaign_id, &resolved.html)?;
+        let parts = campaign_body_parts_from_html(&resolved.html)?;
+        let subject_sha256 = parts
+            .subject
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(sha256_hex);
+        let mut report = campaign_body_audit_from_parts(campaign_id, parts)?;
         if report.name.is_none() {
             report.name = resolved
                 .step1_name
@@ -204,13 +354,13 @@ impl AdminHtmlClient {
             );
         }
         if !resolved.used_step2 {
-            return Ok(report);
+            return Ok((report, subject_sha256));
         }
         report.evidence.notes.push(
             "allowlisted Newsletter edit Step1 POST rendered Interspire 8 Step2 body page; Complete/save form was not posted"
                 .to_string(),
         );
-        Ok(report)
+        Ok((report, subject_sha256))
     }
 
     pub fn campaign_render_artifact(
@@ -367,8 +517,8 @@ impl AdminHtmlClient {
             &self.get_allowed(&AdminReadPage::Schedule.path())?,
             max_rows,
         )?;
-        let stats_before =
-            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
+        let stats_before_html = self.get_allowed(&AdminReadPage::Stats.path())?;
+        let stats_before = parse_table_rows(&stats_before_html, max_rows)?;
         let resolved = self.resolve_campaign_body_html(request.campaign_id)?;
         let parts = campaign_body_parts_from_html(&resolved.html)?;
         let campaign_body = campaign_body_audit_from_parts(request.campaign_id, parts.clone())?;
@@ -1079,101 +1229,115 @@ impl AdminHtmlClient {
 
         self.login()?;
         let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
-        let schedule_before_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
-        let schedule_job_ids_before = schedule_job_ids_from_html(&schedule_before_html);
-        let queue_before = parse_table_rows(&schedule_before_html, max_rows)?;
-        let stats_before =
-            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
-        let (send_wizard, final_html) = self.render_send_wizard_final_page(
-            &SendWizardReadbackRequest {
+        let authority = self.review_guarded_send_live_authority(
+            &GuardedSendAuthorityExpectation {
                 campaign_id: request.campaign_id,
-                list_ids: request.list_ids.clone(),
-                expected_recipient_count: Some(request.expected_recipient_count),
-                max_queue_rows: request.max_queue_rows,
+                list_ids: &request.list_ids,
+                expected_recipient_count: request.expected_recipient_count,
+                expected_subject: request.expected_subject.as_deref(),
+                expected_html_sha256: request.expected_html_sha256.as_deref(),
+                expected_from_email: request.expected_from_email.as_deref(),
+                expected_reply_to_email: request.expected_reply_to_email.as_deref(),
             },
             max_rows,
         )?;
-        if !send_wizard.ok {
-            let mut warnings = readiness.warnings.clone();
-            warnings.extend(send_wizard.warnings.clone());
-            warnings
-                .push("seed send refused because the final send wizard proof failed".to_string());
+        let GuardedSendAuthorityReview {
+            confirmed,
+            atomic_binding,
+            refusal_reason,
+        } = authority;
+        let GuardedSendAuthoritySnapshot {
+            campaign_body,
+            send_wizard,
+            send_form,
+            identity,
+            ..
+        } = confirmed;
+        let mut gates = readiness.gates;
+        let mut warnings = readiness.warnings;
+        warnings.extend(send_wizard.warnings.clone());
+        if let Some(reason) = refusal_reason {
+            let queue_rows_before = send_wizard.queue_rows_before;
+            let queue_rows_after = send_wizard.queue_rows_after;
+            let stats_rows_before = send_wizard.stats_rows_before;
+            let stats_rows_after = send_wizard.stats_rows_after;
+            gates.push(gate(
+                "final_atomic_send_authority",
+                false,
+                "blocker",
+                "the current admin HTML surface did not prove one atomic live authority product through dispatch"
+                    .to_string(),
+            ));
+            warnings.push(reason);
             return Ok(self.seed_send_report_from_parts(
                 request,
                 guarded_writes_enabled,
                 send_controls_enabled,
-                readiness.campaign_body,
+                campaign_body,
                 send_wizard,
-                readiness.gates,
+                gates,
                 false,
                 None,
                 false,
-                queue_before.len(),
-                queue_before.len(),
-                stats_before.len(),
-                stats_before.len(),
+                queue_rows_before,
+                queue_rows_after,
+                stats_rows_before,
+                stats_rows_after,
                 None,
                 warnings,
             ));
         }
-        if matches!(send_wizard.send_immediately_checked, Some(false)) {
-            let mut warnings = readiness.warnings.clone();
-            warnings.push(
-                "seed send refused because final form did not select immediate send".to_string(),
-            );
-            return Ok(self.seed_send_report_from_parts(
-                request,
-                guarded_writes_enabled,
-                send_controls_enabled,
-                readiness.campaign_body,
-                send_wizard,
-                readiness.gates,
-                false,
-                None,
-                false,
-                queue_before.len(),
-                queue_before.len(),
-                stats_before.len(),
-                stats_before.len(),
-                None,
-                warnings,
-            ));
-        }
+        let atomic_authority_binding = atomic_binding.ok_or_else(|| {
+            InterspireError::Safety(
+                "guarded seed send reached no atomic live authority binding; no final request was constructed or dispatched"
+                    .to_string(),
+            )
+        })?;
+        gates.push(gate(
+            "final_atomic_send_authority",
+            true,
+            "blocker",
+            "one application-native atomic live authority binding covered the exact final submission"
+                .to_string(),
+        ));
+        let live_campaign_id = identity.campaign_id;
+        let live_list_ids = identity.selected_list_ids;
+        let live_recipient_count = identity.recipient_count.ok_or_else(|| {
+            InterspireError::Safety(
+                "guarded seed send lost live recipient-count authority before dispatch".to_string(),
+            )
+        })?;
 
-        let send_evidence = self.post_guarded_send_and_reconcile(GuardedSendReconcileInput {
-            send_form: guarded_send_final_form_post_for_request(
-                self.config.base_url.as_deref().unwrap_or_default(),
-                &final_html,
-                request.campaign_id,
-                &request.list_ids,
-            )?,
-            campaign_id: request.campaign_id,
-            list_ids: &request.list_ids,
-            expected_body_sha256: None,
-            queue_before: &queue_before,
-            schedule_job_ids_before: &schedule_job_ids_before,
-            stats_before: &stats_before,
-            expected_recipient_count: request.expected_recipient_count,
+        let send_evidence = self.post_guarded_send_and_reconcile(GuardedSendRequestInput {
+            send_form,
+            atomic_authority_binding,
+            campaign_id: live_campaign_id,
+            list_ids: &live_list_ids,
+            expected_body_sha256: identity.html_sha256,
+            expected_recipient_count: live_recipient_count,
             max_rows,
         })?;
         let sent = send_evidence.reconciliation.terminal_application_proven();
-        let mut warnings = readiness.warnings.clone();
+        let queue_rows_before = send_evidence.reconciliation.queue_rows_before;
+        let queue_rows_after = send_evidence.reconciliation.queue_rows_after;
+        let stats_rows_before = send_evidence.reconciliation.stats_rows_before;
+        let stats_rows_after = send_evidence.reconciliation.stats_rows_after;
         warnings.extend(seed_send_apply_warnings(&send_evidence.reconciliation));
 
         Ok(self.seed_send_report_from_parts(
             request,
             guarded_writes_enabled,
             send_controls_enabled,
-            readiness.campaign_body,
+            campaign_body,
             send_wizard,
-            readiness.gates,
+            gates,
             sent,
             send_evidence.status_code,
             send_evidence.redirected,
-            queue_before.len(),
-            send_evidence.reconciliation.queue_rows_after,
-            stats_before.len(),
-            send_evidence.reconciliation.stats_rows_after,
+            queue_rows_before,
+            queue_rows_after,
+            stats_rows_before,
+            stats_rows_after,
             Some(send_evidence.reconciliation),
             warnings,
         ))
@@ -1277,89 +1441,101 @@ impl AdminHtmlClient {
 
         self.login()?;
         let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
-        let schedule_before_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
-        let schedule_job_ids_before = schedule_job_ids_from_html(&schedule_before_html);
-        let queue_before = parse_table_rows(&schedule_before_html, max_rows)?;
-        let stats_before =
-            parse_table_rows(&self.get_allowed(&AdminReadPage::Stats.path())?, max_rows)?;
-        let (send_wizard, final_html) = self.render_send_wizard_final_page(
-            &SendWizardReadbackRequest {
+        let authority = self.review_guarded_send_live_authority(
+            &GuardedSendAuthorityExpectation {
                 campaign_id: request.campaign_id,
-                list_ids: request.list_ids.clone(),
-                expected_recipient_count: Some(request.expected_recipient_count),
-                max_queue_rows: request.max_queue_rows,
+                list_ids: &request.list_ids,
+                expected_recipient_count: request.expected_recipient_count,
+                expected_subject: Some(request.expected_subject.as_str()),
+                expected_html_sha256: Some(request.expected_html_sha256.as_str()),
+                expected_from_email: Some(request.expected_from_email.as_str()),
+                expected_reply_to_email: Some(request.expected_reply_to_email.as_str()),
             },
             max_rows,
         )?;
-        if !send_wizard.ok {
-            let mut warnings = readiness.warnings.clone();
-            warnings.extend(send_wizard.warnings.clone());
-            warnings.push(
-                "production send refused because the final send wizard proof failed".to_string(),
-            );
-            return Ok(self.production_send_report_from_parts(
-                request,
-                guarded_writes_enabled,
-                send_controls_enabled,
-                production_send_controls_enabled,
-                readiness.campaign_body,
-                send_wizard,
-                readiness.gates,
+        let GuardedSendAuthorityReview {
+            confirmed,
+            atomic_binding,
+            refusal_reason,
+        } = authority;
+        let GuardedSendAuthoritySnapshot {
+            campaign_body,
+            send_wizard,
+            send_form,
+            identity,
+            ..
+        } = confirmed;
+        let mut gates = readiness.gates;
+        let mut warnings = readiness.warnings;
+        warnings.extend(send_wizard.warnings.clone());
+        if let Some(reason) = refusal_reason {
+            let queue_rows_before = send_wizard.queue_rows_before;
+            let queue_rows_after = send_wizard.queue_rows_after;
+            let stats_rows_before = send_wizard.stats_rows_before;
+            let stats_rows_after = send_wizard.stats_rows_after;
+            gates.push(gate(
+                "final_atomic_send_authority",
                 false,
-                None,
-                false,
-                queue_before.len(),
-                queue_before.len(),
-                stats_before.len(),
-                stats_before.len(),
-                None,
-                warnings,
-            ));
-        }
-        if matches!(send_wizard.send_immediately_checked, Some(false)) {
-            let mut warnings = readiness.warnings.clone();
-            warnings.push(
-                "production send refused because final form did not select immediate send"
+                "blocker",
+                "the current admin HTML surface did not prove one atomic live authority product through dispatch"
                     .to_string(),
-            );
+            ));
+            warnings.push(reason);
             return Ok(self.production_send_report_from_parts(
                 request,
                 guarded_writes_enabled,
                 send_controls_enabled,
                 production_send_controls_enabled,
-                readiness.campaign_body,
+                campaign_body,
                 send_wizard,
-                readiness.gates,
+                gates,
                 false,
                 None,
                 false,
-                queue_before.len(),
-                queue_before.len(),
-                stats_before.len(),
-                stats_before.len(),
+                queue_rows_before,
+                queue_rows_after,
+                stats_rows_before,
+                stats_rows_after,
                 None,
                 warnings,
             ));
         }
+        let atomic_authority_binding = atomic_binding.ok_or_else(|| {
+            InterspireError::Safety(
+                "guarded production send reached no atomic live authority binding; no final request was constructed or dispatched"
+                    .to_string(),
+            )
+        })?;
+        gates.push(gate(
+            "final_atomic_send_authority",
+            true,
+            "blocker",
+            "one application-native atomic live authority binding covered the exact final submission"
+                .to_string(),
+        ));
+        let live_campaign_id = identity.campaign_id;
+        let live_list_ids = identity.selected_list_ids;
+        let live_recipient_count = identity.recipient_count.ok_or_else(|| {
+            InterspireError::Safety(
+                "guarded production send lost live recipient-count authority before dispatch"
+                    .to_string(),
+            )
+        })?;
 
-        let send_evidence = self.post_guarded_send_and_reconcile(GuardedSendReconcileInput {
-            send_form: guarded_send_final_form_post_for_request(
-                self.config.base_url.as_deref().unwrap_or_default(),
-                &final_html,
-                request.campaign_id,
-                &request.list_ids,
-            )?,
-            campaign_id: request.campaign_id,
-            list_ids: &request.list_ids,
-            expected_body_sha256: Some(request.expected_html_sha256.clone()),
-            queue_before: &queue_before,
-            schedule_job_ids_before: &schedule_job_ids_before,
-            stats_before: &stats_before,
-            expected_recipient_count: request.expected_recipient_count,
+        let send_evidence = self.post_guarded_send_and_reconcile(GuardedSendRequestInput {
+            send_form,
+            atomic_authority_binding,
+            campaign_id: live_campaign_id,
+            list_ids: &live_list_ids,
+            expected_body_sha256: identity.html_sha256,
+            expected_recipient_count: live_recipient_count,
             max_rows,
         })?;
         let sent = send_evidence.reconciliation.terminal_application_proven();
-        let mut warnings = readiness.warnings.clone();
+        let queue_rows_before = send_evidence.reconciliation.queue_rows_before;
+        let queue_rows_after = send_evidence.reconciliation.queue_rows_after;
+        let stats_rows_before = send_evidence.reconciliation.stats_rows_before;
+        let stats_rows_after = send_evidence.reconciliation.stats_rows_after;
         warnings.extend(production_send_apply_warnings(
             &send_evidence.reconciliation,
         ));
@@ -1369,16 +1545,16 @@ impl AdminHtmlClient {
             guarded_writes_enabled,
             send_controls_enabled,
             production_send_controls_enabled,
-            readiness.campaign_body,
+            campaign_body,
             send_wizard,
-            readiness.gates,
+            gates,
             sent,
             send_evidence.status_code,
             send_evidence.redirected,
-            queue_before.len(),
-            send_evidence.reconciliation.queue_rows_after,
-            stats_before.len(),
-            send_evidence.reconciliation.stats_rows_after,
+            queue_rows_before,
+            queue_rows_after,
+            stats_rows_before,
+            stats_rows_after,
             Some(send_evidence.reconciliation),
             warnings,
         ))
@@ -1386,8 +1562,155 @@ impl AdminHtmlClient {
 
     fn post_guarded_send_and_reconcile(
         &self,
-        input: GuardedSendReconcileInput<'_>,
+        input: GuardedSendRequestInput<'_>,
     ) -> Result<GuardedSendEvidence, InterspireError> {
+        self.post_guarded_send_and_reconcile_with_dispatch(input, |request| {
+            request.send().map_err(|_| ())
+        })
+    }
+
+    fn post_guarded_send_and_reconcile_with_dispatch<F, E>(
+        &self,
+        request_input: GuardedSendRequestInput<'_>,
+        dispatch: F,
+    ) -> Result<GuardedSendEvidence, InterspireError>
+    where
+        F: FnOnce(RequestBuilder) -> Result<reqwest::blocking::Response, E>,
+    {
+        let input = self.capture_guarded_send_baseline(request_input)?;
+        self.post_guarded_send_from_baseline_with_dispatch(input, dispatch)
+    }
+
+    fn capture_guarded_send_baseline<'a>(
+        &self,
+        request: GuardedSendRequestInput<'a>,
+    ) -> Result<GuardedSendReconcileInput<'a>, InterspireError> {
+        if !request
+            .atomic_authority_binding
+            .validates(&request.send_form)
+        {
+            return Err(InterspireError::Safety(
+                "guarded send atomic live authority did not bind the exact final submission; no final request was constructed or dispatched"
+                    .to_string(),
+            ));
+        }
+        let candidate = self.capture_guarded_send_baseline_snapshot(
+            request.campaign_id,
+            request.max_rows,
+            "guarded send final pre-dispatch candidate baseline",
+            false,
+        )?;
+        let confirmed = self.capture_guarded_send_baseline_snapshot(
+            request.campaign_id,
+            request.max_rows,
+            "guarded send final pre-dispatch confirmation baseline",
+            true,
+        )?;
+        if candidate.schedule_job_ids != confirmed.schedule_job_ids
+            || candidate.manage_job_ids != confirmed.manage_job_ids
+            || candidate.campaign_job_ids != confirmed.campaign_job_ids
+            || candidate.stats_identity.ids() != confirmed.stats_identity.ids()
+        {
+            return Err(InterspireError::Safety(
+                "guarded send final pre-dispatch baseline identities changed during bounded capture; no final request was dispatched"
+                    .to_string(),
+            ));
+        }
+        let baseline_context = GuardedSendBaselineContext {
+            campaign_id: request.campaign_id,
+            list_ids: request.list_ids.to_vec(),
+            expected_body_sha256: request.expected_body_sha256.clone(),
+            expected_recipient_count: request.expected_recipient_count,
+            max_rows: request.max_rows,
+            authority_submission_sha256: request.atomic_authority_binding.submission_sha256.clone(),
+            authority_state_version: request.atomic_authority_binding.state_version.clone(),
+            capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
+        };
+        let GuardedSendRequestInput {
+            send_form,
+            atomic_authority_binding,
+            campaign_id,
+            list_ids,
+            expected_body_sha256,
+            expected_recipient_count,
+            max_rows,
+        } = request;
+        let input = GuardedSendReconcileInput {
+            send_form,
+            atomic_authority_binding,
+            campaign_id,
+            list_ids,
+            expected_body_sha256,
+            expected_recipient_count,
+            max_rows,
+            baseline_context,
+            queue_before: confirmed.queue_before,
+            schedule_job_ids_before: confirmed.schedule_job_ids,
+            manage_job_ids_before: confirmed.manage_job_ids,
+            campaign_job_ids_before: confirmed.campaign_job_ids,
+            queue_job_ids_before: confirmed.queue_job_ids,
+            stats_before: confirmed.stats_before,
+            stats_identity_before: confirmed.stats_identity,
+            baseline_identity_stable: true,
+        };
+        validate_guarded_send_baseline_context(&input)?;
+        Ok(input)
+    }
+
+    fn capture_guarded_send_baseline_snapshot(
+        &self,
+        campaign_id: u64,
+        max_rows: usize,
+        operation: &str,
+        stats_first: bool,
+    ) -> Result<GuardedSendBaselineSnapshot, InterspireError> {
+        let (queue_inventory, stats_html) = if stats_first {
+            let stats_html = self.get_allowed(&AdminReadPage::Stats.path())?;
+            let queue_inventory = self.complete_queue_control_inventory(max_rows, operation)?;
+            (queue_inventory, stats_html)
+        } else {
+            let queue_inventory = self.complete_queue_control_inventory(max_rows, operation)?;
+            let stats_html = self.get_allowed(&AdminReadPage::Stats.path())?;
+            (queue_inventory, stats_html)
+        };
+        let queue_before = parse_table_rows(&queue_inventory.schedule_html, max_rows)?;
+        let schedule_job_ids = queue_job_ids_for_source(
+            &queue_inventory.links,
+            crate::response::QueueControlSource::Schedule,
+        );
+        let manage_job_ids = queue_job_ids_for_source(
+            &queue_inventory.links,
+            crate::response::QueueControlSource::CampaignManage,
+        );
+        let campaign_job_ids =
+            queue_manage_job_ids_for_campaign(&queue_inventory.links, campaign_id);
+        let queue_job_ids = schedule_job_ids.union(&manage_job_ids).copied().collect();
+        let stats_identity = parse_stats_identity_inventory(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &stats_html,
+            max_rows,
+        )?;
+        let stats_before = parse_table_rows(&stats_html, max_rows)?;
+        Ok(GuardedSendBaselineSnapshot {
+            queue_before,
+            schedule_job_ids,
+            manage_job_ids,
+            campaign_job_ids,
+            queue_job_ids,
+            stats_before,
+            stats_identity,
+        })
+    }
+
+    fn post_guarded_send_from_baseline_with_dispatch<F, E>(
+        &self,
+        input: GuardedSendReconcileInput<'_>,
+        dispatch: F,
+    ) -> Result<GuardedSendEvidence, InterspireError>
+    where
+        F: FnOnce(RequestBuilder) -> Result<reqwest::blocking::Response, E>,
+    {
+        validate_guarded_send_baseline_context(&input)?;
         let (send_url, send_pairs) = input.send_form.clone();
         let request = self.proof_post_with_page_context(
             send_url,
@@ -1395,16 +1718,22 @@ impl AdminHtmlClient {
             &AdminReadPage::SendStart.path(),
         )?;
         let mut progress = GuardedSendProgress::default();
-        let response = match request.send() {
+        progress.notes.push(
+            "complete authenticated Schedule, Manage, and Stats baselines were stable across two bounded captures at the final pre-dispatch stage"
+                .to_string(),
+        );
+        let response = match dispatch(request) {
             Ok(response) => response,
             Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
-                    progress,
-                    Some(
-                        "the final request was dispatched but its HTTP response was unavailable; application outcome remains uncertain",
-                    ),
-                ));
+                progress.response_uncertain = true;
+                progress.job_evidence.add_gap(
+                    "the final request was attempted but no HTTP response was available; whether it reached the application remains uncertain",
+                );
+                progress.notes.push(
+                    "request-response uncertainty was retained as a nonterminal reconciliation receipt"
+                        .to_string(),
+                );
+                return Ok(self.complete_guarded_send_readback(&input, progress, None));
             }
         };
         let status = response.status();
@@ -1652,70 +1981,124 @@ impl AdminHtmlClient {
             }
         }
 
-        let schedule_after_html = match self.get_allowed(&AdminReadPage::Schedule.path()) {
-            Ok(html) => html,
+        Ok(self.complete_guarded_send_readback(&input, progress, final_response_summary))
+    }
+
+    fn complete_guarded_send_readback(
+        &self,
+        input: &GuardedSendReconcileInput<'_>,
+        mut progress: GuardedSendProgress,
+        final_response_summary: Option<String>,
+    ) -> GuardedSendEvidence {
+        let queue_inventory = match self
+            .complete_queue_control_inventory(input.max_rows, "guarded send readback")
+        {
+            Ok(inventory) => inventory,
             Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
+                return guarded_send_evidence_from_progress(
+                    input,
                     progress,
-                    Some("Schedule readback was unavailable after request dispatch"),
-                ));
+                    Some(
+                        "Schedule and campaign Manage identity readback was incomplete after request dispatch",
+                    ),
+                );
             }
         };
-        progress.queue_after = match parse_table_rows(&schedule_after_html, input.max_rows) {
-            Ok(rows) => Some(rows),
-            Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
-                    progress,
-                    Some("Schedule readback could not be parsed after request dispatch"),
-                ));
+        progress.queue_after =
+            match parse_table_rows(&queue_inventory.schedule_html, input.max_rows) {
+                Ok(rows) => Some(rows),
+                Err(_) => {
+                    return guarded_send_evidence_from_progress(
+                        input,
+                        progress,
+                        Some("Schedule readback could not be parsed after request dispatch"),
+                    );
+                }
+            };
+        let schedule_job_ids_after = queue_job_ids_for_source(
+            &queue_inventory.links,
+            crate::response::QueueControlSource::Schedule,
+        );
+        let manage_job_ids_after = queue_job_ids_for_source(
+            &queue_inventory.links,
+            crate::response::QueueControlSource::CampaignManage,
+        );
+        let queue_job_ids_after = schedule_job_ids_after
+            .union(&manage_job_ids_after)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        match queue_job_identity_delta(&input.queue_job_ids_before, &queue_job_ids_after) {
+            QueueJobIdentityDelta::None if progress.job_evidence.job_id.is_none() => progress
+                .job_evidence
+                .add_gap("bounded Schedule/Manage readback exposed no new diagnostic job identity"),
+            QueueJobIdentityDelta::None => progress.notes.push(
+                "bounded Schedule/Manage readback added no queue-only job identity".to_string(),
+            ),
+            QueueJobIdentityDelta::Unique(job_id) => {
+                if progress.job_evidence.job_id == Some(job_id) && !progress.job_evidence.conflicted
+                {
+                    progress.notes.push(
+                        "one Schedule/Manage delta matched the native response-bound job; queue movement remains diagnostic only"
+                            .to_string(),
+                    );
+                } else {
+                    progress.job_identity_ambiguous = true;
+                    progress.job_evidence.add_gap(
+                        "one Schedule/Manage job appeared after the baseline, but queue movement and campaign association do not bind that concurrent job to this request"
+                            .to_string(),
+                    );
+                }
             }
-        };
-        match schedule_job_identity_delta(
-            input.schedule_job_ids_before,
-            &schedule_job_ids_from_html(&schedule_after_html),
-        ) {
-            ScheduleJobIdentityDelta::None => progress
-                .job_evidence
-                .add_gap("Schedule readback exposed no unique new job identity"),
-            ScheduleJobIdentityDelta::Unique(job_id) => progress
-                .job_evidence
-                .observe(Some(job_id), "Schedule identity delta"),
-            ScheduleJobIdentityDelta::Ambiguous { added, removed } => {
+            QueueJobIdentityDelta::Ambiguous { added, removed } => {
+                progress.job_identity_ambiguous = true;
                 progress.job_evidence.add_gap(format!(
-                    "Schedule identity reconciliation was ambiguous: {added} added and {removed} removed"
+                    "bounded Schedule/Manage identity reconciliation was ambiguous: {added} added and {removed} removed"
                 ));
             }
         }
+        progress.active_job_ids_after = Some(queue_job_ids_after);
 
         let stats_after_html = match self.get_allowed(&AdminReadPage::Stats.path()) {
             Ok(html) => html,
             Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
+                return guarded_send_evidence_from_progress(
+                    input,
                     progress,
                     Some("Stats readback was unavailable after request dispatch"),
-                ));
+                );
             }
         };
         progress.stats_after = match parse_table_rows(&stats_after_html, input.max_rows) {
             Ok(rows) => Some(rows),
             Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
+                return guarded_send_evidence_from_progress(
+                    input,
                     progress,
                     Some("Stats readback could not be parsed after request dispatch"),
-                ));
+                );
+            }
+        };
+        progress.stats_identity_after = match parse_stats_identity_inventory(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &stats_after_html,
+            input.max_rows,
+        ) {
+            Ok(inventory) => Some(inventory),
+            Err(_) => {
+                return guarded_send_evidence_from_progress(
+                    input,
+                    progress,
+                    Some("Stats identity readback was incomplete after request dispatch"),
+                );
             }
         };
         if progress.job_evidence.job_id.is_none()
             && stable_stats_identity_delta(
-                input.stats_before,
+                &input.stats_before,
                 progress
                     .stats_after
                     .as_deref()
-                    .unwrap_or(input.stats_before),
+                    .unwrap_or(input.stats_before.as_slice()),
             )
             .added
                 == 0
@@ -1726,7 +2109,8 @@ impl AdminHtmlClient {
                     .push(format!("Final Step4 response summary: {summary}"));
             }
         }
-        Ok(guarded_send_evidence_from_progress(&input, progress, None))
+        progress.reconciliation_readback_complete = true;
+        guarded_send_evidence_from_progress(input, progress, None)
     }
 
     fn proof_post_with_page_context(
@@ -1899,6 +2283,133 @@ impl AdminHtmlClient {
         Ok((report, final_html))
     }
 
+    fn review_guarded_send_live_authority(
+        &self,
+        expectation: &GuardedSendAuthorityExpectation<'_>,
+        max_rows: usize,
+    ) -> Result<GuardedSendAuthorityReview, InterspireError> {
+        let prepared = self.capture_guarded_send_live_authority(expectation, max_rows)?;
+        let candidate = self.capture_guarded_send_live_authority(expectation, max_rows)?;
+        let confirmed = self.capture_guarded_send_live_authority(expectation, max_rows)?;
+
+        let mut refusal_reason = guarded_send_authority_snapshot_refusal(&prepared, expectation)
+            .or_else(|| guarded_send_authority_snapshot_refusal(&candidate, expectation))
+            .or_else(|| guarded_send_authority_snapshot_refusal(&confirmed, expectation));
+        if refusal_reason.is_none() && prepared.identity != candidate.identity {
+            refusal_reason = Some(
+                "guarded send live campaign, audience, or final-form authority changed between the prepared and candidate authority captures; no final request was constructed or dispatched"
+                    .to_string(),
+            );
+        }
+        if refusal_reason.is_none() && candidate.identity != confirmed.identity {
+            refusal_reason = Some(
+                "guarded send live campaign, audience, or final-form authority changed between the candidate and confirmed authority captures; no final request was constructed or dispatched"
+                    .to_string(),
+            );
+        }
+
+        let atomic_binding = match (
+            prepared.atomic_binding.as_ref(),
+            candidate.atomic_binding.as_ref(),
+            confirmed.atomic_binding.as_ref(),
+        ) {
+            (Some(prepared_binding), Some(candidate_binding), Some(confirmed_binding))
+                if prepared_binding == candidate_binding
+                    && candidate_binding == confirmed_binding
+                    && confirmed_binding.validates(&confirmed.send_form) =>
+            {
+                Some(confirmed_binding.clone())
+            }
+            _ => None,
+        };
+        if refusal_reason.is_none() && atomic_binding.is_none() {
+            refusal_reason = Some(
+                "guarded send refused because the admin HTML surface exposed no authenticated atomic state version or lock binding the exact live campaign, body, audience, final-form token, and submitted pairs through the POST boundary; no final request was constructed or dispatched"
+                    .to_string(),
+            );
+        }
+
+        Ok(GuardedSendAuthorityReview {
+            confirmed,
+            atomic_binding,
+            refusal_reason,
+        })
+    }
+
+    fn capture_guarded_send_live_authority(
+        &self,
+        expectation: &GuardedSendAuthorityExpectation<'_>,
+        max_rows: usize,
+    ) -> Result<GuardedSendAuthoritySnapshot, InterspireError> {
+        let (campaign_body, subject_sha256) =
+            self.campaign_body_authority_authenticated(expectation.campaign_id)?;
+        let (send_wizard, final_html) = self.render_send_wizard_final_page(
+            &SendWizardReadbackRequest {
+                campaign_id: expectation.campaign_id,
+                list_ids: expectation.list_ids.to_vec(),
+                expected_recipient_count: Some(expectation.expected_recipient_count),
+                max_queue_rows: Some(max_rows),
+            },
+            max_rows,
+        )?;
+        let send_form = guarded_send_final_form_post(
+            self.config.base_url.as_deref().unwrap_or_default(),
+            &final_html,
+        )?;
+        let (_, token) = guarded_send_form_token(&send_form.1)?;
+        let mut selected_list_ids = send_wizard.selected_list_ids.clone();
+        selected_list_ids.sort_unstable();
+        let identity = GuardedSendAuthorityIdentity {
+            campaign_id: send_wizard.selected_campaign_id.unwrap_or_default(),
+            subject_sha256,
+            html_sha256: campaign_body.html_sha256.clone(),
+            text_sha256: campaign_body.text_sha256.clone(),
+            from_name_sha256: guarded_send_exact_form_value_sha256(
+                &send_form.1,
+                &["sendfromname", "fromname"],
+                false,
+            ),
+            from_email_sha256: guarded_send_exact_form_value_sha256(
+                &send_form.1,
+                &["sendfromemail", "fromemail"],
+                true,
+            ),
+            reply_to_email_sha256: guarded_send_exact_form_value_sha256(
+                &send_form.1,
+                &["replytoemail"],
+                true,
+            ),
+            bounce_email_sha256: guarded_send_exact_form_value_sha256(
+                &send_form.1,
+                &["bounceemail"],
+                true,
+            ),
+            selected_list_ids,
+            recipient_count: send_wizard.recipient_count,
+            send_immediately_checked: send_wizard.send_immediately_checked,
+            notify_owner_checked: send_wizard.notify_owner_checked,
+            track_opens_checked: send_wizard.track_opens_checked,
+            track_links_checked: send_wizard.track_links_checked,
+            multipart_checked: send_wizard.multipart_checked,
+            embed_images_checked: send_wizard.embed_images_checked,
+            final_form_action_fingerprint: send_wizard.final_form_action_fingerprint.clone(),
+            final_form_token_sha256: sha256_hex(&token),
+            submission_sha256: guarded_send_submission_sha256(&send_form),
+        };
+
+        Ok(GuardedSendAuthoritySnapshot {
+            campaign_body,
+            send_wizard,
+            send_form,
+            identity,
+            // The current admin HTML form exposes CSRF protection, not an
+            // application-native state version or lock over campaign and
+            // audience state. Keep dispatch authority absent until such a
+            // binding is implemented and independently proven.
+            atomic_binding: None,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn seed_send_report_from_readiness(
         &self,
@@ -1975,6 +2486,8 @@ impl AdminHtmlClient {
                 )
             }
         });
+        let boundary_evidence_note =
+            guarded_send_boundary_evidence_note(reconciliation.status, "seed-send");
         SeedSendApplyReport {
             ok: sent,
             configured: true,
@@ -2012,8 +2525,8 @@ impl AdminHtmlClient {
                 .collect(),
             evidence: admin_evidence(vec![
                 "seed send apply requires INTERSPIRE_GUARDED_WRITES=1 and INTERSPIRE_SEND_CONTROLS=1".to_string(),
-                "campaign body audit and send wizard proof passed immediately before final send form post".to_string(),
-                "final send form controls were captured from the live Interspire page and posted to the guarded seed-send route".to_string(),
+                "fresh campaign body, audience, and final-form authority was evaluated before any final send request".to_string(),
+                boundary_evidence_note,
             ]),
         }
     }
@@ -2060,6 +2573,8 @@ impl AdminHtmlClient {
                 )
             }
         });
+        let boundary_evidence_note =
+            guarded_send_boundary_evidence_note(reconciliation.status, "production-send");
         ProductionSendApplyReport {
             ok: sent,
             configured: true,
@@ -2099,8 +2614,8 @@ impl AdminHtmlClient {
                 .collect(),
             evidence: admin_evidence(vec![
                 "production send apply requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, and INTERSPIRE_PRODUCTION_SEND_CONTROLS=1".to_string(),
-                "campaign body audit and send wizard proof passed immediately before final send form post".to_string(),
-                "final send form controls were captured from the live Interspire page and posted to the guarded production-send route".to_string(),
+                "fresh campaign body, audience, and final-form authority was evaluated before any final send request".to_string(),
+                boundary_evidence_note,
             ]),
         }
     }
@@ -2291,6 +2806,7 @@ fn optional_nonempty_sha256(value: Option<&str>) -> Option<String> {
     value.filter(|value| !value.is_empty()).map(sha256_hex)
 }
 
+#[cfg(test)]
 fn campaign_body_audit_from_html(
     campaign_id: u64,
     html: &str,
@@ -2669,40 +3185,182 @@ fn guarded_send_final_form_post(
     ))
 }
 
-fn guarded_send_final_form_post_for_request(
-    base_url: &str,
-    html: &str,
-    campaign_id: u64,
-    list_ids: &[u64],
-) -> Result<(Url, Vec<(String, String)>), InterspireError> {
-    let (action_url, mut pairs) = guarded_send_final_form_post(base_url, html)?;
-    bind_guarded_send_request_pairs(&mut pairs, campaign_id, list_ids)?;
-    Ok((action_url, pairs))
+fn guarded_send_form_token(
+    pairs: &[(String, String)],
+) -> Result<(String, String), InterspireError> {
+    let tokens = pairs
+        .iter()
+        .filter(|(name, _)| is_csrf_field_name(name))
+        .collect::<Vec<_>>();
+    match tokens.as_slice() {
+        [(name, value)] if !value.trim().is_empty() => Ok(((*name).clone(), (*value).clone())),
+        [] | [_] => Err(InterspireError::Safety(
+            "guarded final send form did not expose one authenticated form token; no final request was constructed or dispatched"
+                .to_string(),
+        )),
+        _ => Err(InterspireError::Safety(
+            "guarded final send form exposed duplicate form-token authority; no final request was constructed or dispatched"
+                .to_string(),
+        )),
+    }
 }
 
-fn bind_guarded_send_request_pairs(
-    pairs: &mut Vec<(String, String)>,
-    campaign_id: u64,
-    list_ids: &[u64],
-) -> Result<(), InterspireError> {
-    if list_ids.is_empty() {
-        return Err(InterspireError::Safety(
-            "guarded final send post requires at least one request-bound list id".to_string(),
-        ));
+fn guarded_send_submission_sha256(send_form: &(Url, Vec<(String, String)>)) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"interspire-mcp:guarded-send-submission:v1\0");
+    update_guarded_send_digest_field(&mut digest, send_form.0.as_str().as_bytes());
+    update_guarded_send_digest_field(&mut digest, &(send_form.1.len() as u64).to_be_bytes());
+    for (name, value) in &send_form.1 {
+        update_guarded_send_digest_field(&mut digest, name.as_bytes());
+        update_guarded_send_digest_field(&mut digest, value.as_bytes());
+    }
+    hex::encode(digest.finalize())
+}
+
+fn guarded_send_exact_form_value_sha256(
+    pairs: &[(String, String)],
+    names: &[&str],
+    normalize_email: bool,
+) -> Option<String> {
+    let mut matches = pairs.iter().filter(|(name, _)| {
+        names
+            .iter()
+            .any(|expected| name.eq_ignore_ascii_case(expected))
+    });
+    let value = matches.next()?.1.trim();
+    if value.is_empty() || matches.next().is_some() {
+        return None;
+    }
+    let value = if normalize_email {
+        value.to_ascii_lowercase()
+    } else {
+        value.to_string()
+    };
+    Some(sha256_hex(&value))
+}
+
+fn update_guarded_send_digest_field(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
+}
+
+fn guarded_send_authority_snapshot_refusal(
+    snapshot: &GuardedSendAuthoritySnapshot,
+    expectation: &GuardedSendAuthorityExpectation<'_>,
+) -> Option<String> {
+    let refuse = |field: &str| {
+        Some(format!(
+            "guarded send live {field} authority was absent, malformed, or did not match the exact approved request; no final request was constructed or dispatched"
+        ))
+    };
+    if snapshot.send_wizard.selected_campaign_id != Some(expectation.campaign_id) {
+        return refuse("campaign");
     }
 
-    // Interspire 8 can render Step4 with selection state held in the session
-    // rather than echoed as final form controls. Only after the no-send proof
-    // has accepted the exact request do we bind those campaign/list ids into
-    // the final POST, so a de-selected HTML control cannot drift the send.
-    pairs.retain(|(name, _)| {
-        !is_guarded_send_campaign_selection_name(name) && !is_guarded_send_list_selection_name(name)
-    });
-    pairs.push(("newsletter".to_string(), campaign_id.to_string()));
-    for list_id in list_ids {
-        pairs.push(("lists[]".to_string(), list_id.to_string()));
+    let mut expected_list_ids = expectation.list_ids.to_vec();
+    expected_list_ids.sort_unstable();
+    expected_list_ids.dedup();
+    if expected_list_ids.len() != expectation.list_ids.len()
+        || snapshot.identity.selected_list_ids.len() != snapshot.send_wizard.selected_list_ids.len()
+        || snapshot.identity.selected_list_ids != expected_list_ids
+    {
+        return refuse("selected-list");
     }
-    Ok(())
+    if snapshot.send_wizard.recipient_count != Some(expectation.expected_recipient_count) {
+        return refuse("recipient-count");
+    }
+    if snapshot.identity.subject_sha256.is_none()
+        || expectation.expected_subject.is_some_and(|expected| {
+            snapshot.identity.subject_sha256.as_deref() != Some(sha256_hex(expected).as_str())
+        })
+    {
+        return refuse("campaign-subject");
+    }
+    if snapshot.campaign_body.html_sha256.is_none()
+        || expectation
+            .expected_html_sha256
+            .is_some_and(|expected| snapshot.campaign_body.html_sha256.as_deref() != Some(expected))
+    {
+        return refuse("campaign-body");
+    }
+    if snapshot.campaign_body.text_bytes > 0 && snapshot.campaign_body.text_sha256.is_none() {
+        return refuse("campaign-text-body");
+    }
+    if snapshot.identity.from_name_sha256.is_none()
+        || snapshot.identity.from_email_sha256.is_none()
+        || snapshot.identity.reply_to_email_sha256.is_none()
+        || snapshot.identity.bounce_email_sha256.is_none()
+        || snapshot.send_wizard.from_name.is_none()
+        || snapshot.send_wizard.from_email_redacted.is_none()
+        || snapshot.send_wizard.reply_to_email_redacted.is_none()
+        || snapshot.send_wizard.bounce_email_redacted.is_none()
+    {
+        return refuse("sender, reply-to, or bounce");
+    }
+    if expectation.expected_from_email.is_some_and(|expected| {
+        snapshot.identity.from_email_sha256.as_deref()
+            != Some(sha256_hex(&expected.trim().to_ascii_lowercase()).as_str())
+    }) {
+        return refuse("sender");
+    }
+    if expectation.expected_reply_to_email.is_some_and(|expected| {
+        snapshot.identity.reply_to_email_sha256.as_deref()
+            != Some(sha256_hex(&expected.trim().to_ascii_lowercase()).as_str())
+    }) {
+        return refuse("reply-to");
+    }
+    if snapshot.send_wizard.send_immediately_checked != Some(true)
+        || snapshot.send_wizard.notify_owner_checked.is_none()
+        || snapshot.send_wizard.track_opens_checked.is_none()
+        || snapshot.send_wizard.track_links_checked.is_none()
+        || snapshot.send_wizard.multipart_checked.is_none()
+        || snapshot.send_wizard.embed_images_checked.is_none()
+    {
+        return refuse("final-wizard");
+    }
+    if !snapshot.send_wizard.ok
+        || !snapshot.send_wizard.queue_unchanged
+        || !snapshot.send_wizard.stats_unchanged
+        || !snapshot.send_wizard.final_form_posts_to_send_boundary
+        || snapshot.send_wizard.final_form_action_fingerprint.is_none()
+    {
+        return refuse("final-form action");
+    }
+
+    let campaign_values = snapshot
+        .send_form
+        .1
+        .iter()
+        .filter(|(name, _)| is_guarded_send_campaign_selection_name(name))
+        .map(|(_, value)| value.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    if campaign_values.as_slice() != [Some(expectation.campaign_id)] {
+        return refuse("submitted campaign pair");
+    }
+    let mut list_values = snapshot
+        .send_form
+        .1
+        .iter()
+        .filter(|(name, _)| is_guarded_send_list_selection_name(name))
+        .map(|(_, value)| value.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    if list_values.iter().any(Option::is_none) {
+        return refuse("submitted list pair");
+    }
+    let list_value_count = list_values.len();
+    let mut list_values = list_values.drain(..).flatten().collect::<Vec<_>>();
+    list_values.sort_unstable();
+    list_values.dedup();
+    if list_values.len() != list_value_count || list_values != expected_list_ids {
+        return refuse("submitted list pair");
+    }
+    if guarded_send_form_token(&snapshot.send_form.1).is_err()
+        || snapshot.identity.submission_sha256
+            != guarded_send_submission_sha256(&snapshot.send_form)
+    {
+        return refuse("form-token or submitted-pair");
+    }
+    None
 }
 
 fn is_guarded_send_campaign_selection_name(name: &str) -> bool {
@@ -2756,32 +3414,63 @@ fn guarded_send_evidence_from_progress(
 ) -> GuardedSendEvidence {
     if let Some(gap) = uncertainty_gap {
         progress.job_evidence.add_gap(gap);
-        progress.notes.push(
+        let note = if progress.response_uncertain {
+            "request-response uncertainty was retained as a nonterminal reconciliation receipt"
+                .to_string()
+        } else {
             "post-boundary uncertainty was retained as a nonterminal reconciliation receipt"
-                .to_string(),
-        );
+                .to_string()
+        };
+        if !progress.notes.contains(&note) {
+            progress.notes.push(note);
+        }
     }
     let queue_after = progress
         .queue_after
         .as_deref()
-        .unwrap_or(input.queue_before);
+        .unwrap_or(input.queue_before.as_slice());
     let stats_after = progress
         .stats_after
         .as_deref()
-        .unwrap_or(input.stats_before);
+        .unwrap_or(input.stats_before.as_slice());
+    let stats_identity_after = progress
+        .stats_identity_after
+        .as_ref()
+        .unwrap_or(&input.stats_identity_before);
+    let job_active_after = progress.job_evidence.job_id.map(|job_id| {
+        progress
+            .active_job_ids_after
+            .as_ref()
+            .is_none_or(|job_ids| job_ids.contains(&job_id))
+    });
+    let job_identity_ambiguous =
+        progress.job_evidence.conflicted || progress.job_identity_ambiguous;
     let reconciliation = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
         campaign_id: input.campaign_id,
         list_ids: input.list_ids,
         expected_body_sha256: input.expected_body_sha256.clone(),
-        queue_before: input.queue_before,
+        queue_before: &input.queue_before,
         queue_after,
-        stats_before: input.stats_before,
+        stats_before: &input.stats_before,
         stats_after,
+        schedule_job_ids_before: &input.schedule_job_ids_before,
+        manage_job_ids_before: &input.manage_job_ids_before,
+        campaign_job_ids_before: &input.campaign_job_ids_before,
+        stats_identity_before: &input.stats_identity_before,
+        stats_identity_after,
         expected_recipient_count: input.expected_recipient_count,
+        baseline_max_rows: input.max_rows,
+        baseline_context_verified: validate_guarded_send_baseline_context(input).is_ok(),
+        baseline_identity_stable: input.baseline_identity_stable,
+        baseline_capture_stage: input.baseline_context.capture_stage,
         job_id: progress.job_evidence.job_id,
+        job_active_after,
         smtp_reason: progress.smtp_reason,
         popup_steps: progress.popup_steps,
         approved_cron_schedule: progress.approved_cron_schedule,
+        response_uncertain: progress.response_uncertain,
+        reconciliation_readback_complete: progress.reconciliation_readback_complete,
+        job_identity_ambiguous,
         proof_gaps: progress.job_evidence.proof_gaps,
         notes: progress.notes,
     });
@@ -2838,6 +3527,33 @@ fn guarded_send_terminal_reconciliation(
     let stats_identity_delta = stable_stats_identity_delta(input.stats_before, input.stats_after);
     let mut proof_gaps = input.proof_gaps;
     let mut notes = input.notes;
+    match unique_added_stats_identity(input.stats_identity_before, input.stats_identity_after) {
+        Ok(Some(row)) => {
+            if row.recipients != input.expected_recipient_count {
+                proof_gaps.push(format!(
+                    "new Stats identity {} reported {} recipients instead of the expected {}",
+                    row.stat_id, row.recipients, input.expected_recipient_count
+                ));
+            } else {
+                notes.push(format!(
+                    "new Stats identity {} matched the expected aggregate recipient count",
+                    row.stat_id
+                ));
+            }
+            proof_gaps.push(format!(
+                "new Stats identity {} has no application-native association to the bound job; aggregate labels, counts, timing, and baseline position are nonterminal context only",
+                row.stat_id
+            ));
+        }
+        Ok(None) => {
+            proof_gaps.push("no new durable Stats identity was observed".to_string());
+        }
+        Err((added, removed)) => {
+            proof_gaps.push(format!(
+                "durable Stats identity reconciliation was ambiguous: {added} added and {removed} removed"
+            ));
+        }
+    }
 
     match stats_identity_delta {
         StableStatsIdentityDelta {
@@ -2856,21 +3572,16 @@ fn guarded_send_terminal_reconciliation(
         StableStatsIdentityDelta {
             added: 0,
             removed: 0,
-        } => {
-            proof_gaps.push("no new durable Stats identity was observed".to_string());
-        }
+        } => {}
         StableStatsIdentityDelta {
             added: 1,
             removed: 0,
         } => {
-            proof_gaps.push(
-                "one new stable Stats identity was observed, but this proof surface did not expose a durable stat id bound to the intended job, campaign, and lists"
-                    .to_string(),
-            );
+            notes.push("one new stable Stats row shape was observed".to_string());
         }
         StableStatsIdentityDelta { added, removed } => {
-            proof_gaps.push(format!(
-                "Stats identity reconciliation was ambiguous: {added} added and {removed} removed"
+            notes.push(format!(
+                "Stats row-shape reconciliation changed: {added} added and {removed} removed"
             ));
         }
     }
@@ -2904,37 +3615,92 @@ fn guarded_send_terminal_reconciliation(
             );
         }
     }
+    match input.job_active_after {
+        Some(true) => proof_gaps.push(
+            "the bound job still exposed an active Schedule or campaign Manage action".to_string(),
+        ),
+        None if input.job_id.is_some() => proof_gaps
+            .push("post-send Schedule and campaign Manage absence was not proven".to_string()),
+        Some(false) | None => {}
+    }
 
-    let status = if input.smtp_reason.is_some() {
+    let status = if input.response_uncertain {
+        SendApplyStatus::ResponseUncertain
+    } else if input.smtp_reason.is_some() {
         SendApplyStatus::TransportFailed
     } else if input.job_id.is_some() {
         SendApplyStatus::Queued
     } else {
         SendApplyStatus::Posted
     };
-    if matches!(status, SendApplyStatus::Posted) {
-        proof_gaps.push(
+    match status {
+        SendApplyStatus::ResponseUncertain => {
+            proof_gaps.push(
+                "the final request was attempted, but no HTTP response proved whether the application received it"
+                    .to_string(),
+            );
+            proof_gaps.push(
+                "retry or resend is not authorized while request-response uncertainty remains"
+                    .to_string(),
+            );
+        }
+        SendApplyStatus::Posted => proof_gaps.push(
             "final send boundary was posted without complete durable application proof".to_string(),
-        );
+        ),
+        _ => {}
     }
 
+    let status_follow_up = input.job_id.map(|job_id| {
+        SendJobFollowUpContract::new(
+            job_id,
+            input.campaign_id,
+            input.list_ids.to_vec(),
+            input.expected_recipient_count,
+            input.expected_body_sha256.clone(),
+        )
+        .with_stats_baseline(input.stats_identity_before.ids().into_iter().collect())
+    });
     let follow_up_contract = if matches!(status, SendApplyStatus::Queued) {
-        input.job_id.map(|job_id| {
-            SendJobFollowUpContract::new(
-                job_id,
-                input.campaign_id,
-                input.list_ids.to_vec(),
-                input.expected_recipient_count,
-                input.expected_body_sha256,
-            )
-        })
+        status_follow_up.clone()
+    } else {
+        None
+    };
+    let uncertainty_recovery_contract = if matches!(status, SendApplyStatus::ResponseUncertain) {
+        let identity_state = if !input.reconciliation_readback_complete {
+            SendUncertaintyIdentityState::ReadbackIncomplete
+        } else if input.job_identity_ambiguous || input.job_id.is_some() {
+            SendUncertaintyIdentityState::AmbiguousOrUnbound
+        } else {
+            SendUncertaintyIdentityState::NoNewJob
+        };
+        Some(SendUncertaintyRecoveryContract::hold(
+            input.campaign_id,
+            input.list_ids.to_vec(),
+            input.expected_recipient_count,
+            input.expected_body_sha256.clone(),
+            input.schedule_job_ids_before.iter().copied().collect(),
+            input.manage_job_ids_before.iter().copied().collect(),
+            input.campaign_job_ids_before.iter().copied().collect(),
+            input.stats_identity_before.ids().into_iter().collect(),
+            input.baseline_max_rows,
+            input.baseline_capture_stage,
+            input.baseline_context_verified,
+            input.baseline_identity_stable,
+            true,
+            input.reconciliation_readback_complete,
+            identity_state,
+        ))
     } else {
         None
     };
 
     SendReconciliationReport::new(
         status,
-        input.job_id,
+        if matches!(status, SendApplyStatus::ResponseUncertain) {
+            None
+        } else {
+            input.job_id
+        },
         None,
         None,
         None,
@@ -2950,6 +3716,7 @@ fn guarded_send_terminal_reconciliation(
         notes,
     )
     .with_follow_up_contract(follow_up_contract)
+    .with_uncertainty_recovery_contract(uncertainty_recovery_contract)
 }
 
 fn stats_rows_stable_for_no_send_proof(before: &[String], after: &[String]) -> bool {
@@ -3153,108 +3920,77 @@ fn send_popup_path_candidates(html: &str) -> Vec<String> {
     candidates
 }
 
-fn schedule_job_ids_from_html(html: &str) -> BTreeSet<u64> {
-    let mut ids = BTreeSet::new();
-    let document = Html::parse_document(html);
-    if let Ok(input_selector) = Selector::parse("input") {
-        for input in document.select(&input_selector) {
-            if input
-                .value()
-                .attr("name")
-                .is_some_and(|name| name.eq_ignore_ascii_case("jobs[]"))
-            {
-                if let Some(id) = input
-                    .value()
-                    .attr("value")
-                    .and_then(|value| value.parse::<u64>().ok())
-                {
-                    ids.insert(id);
-                }
-            }
-        }
-    }
-    if let Ok(link_selector) = Selector::parse("a") {
-        for link in document.select(&link_selector) {
-            if let Some(href) = link.value().attr("href") {
-                if let Some(id) = schedule_job_id_from_path(href) {
-                    ids.insert(id);
-                }
-            }
-        }
-    }
-    for candidate in schedule_path_candidates(html) {
-        if let Some(id) = schedule_job_id_from_path(&candidate) {
-            ids.insert(id);
-        }
-    }
-    ids
-}
-
-fn schedule_job_identity_delta(
+fn queue_job_identity_delta(
     before: &BTreeSet<u64>,
     after: &BTreeSet<u64>,
-) -> ScheduleJobIdentityDelta {
+) -> QueueJobIdentityDelta {
     let added = after.difference(before).copied().collect::<Vec<_>>();
     let removed = before.difference(after).count();
     match (added.as_slice(), removed) {
-        ([], 0) => ScheduleJobIdentityDelta::None,
-        ([job_id], 0) => ScheduleJobIdentityDelta::Unique(*job_id),
-        _ => ScheduleJobIdentityDelta::Ambiguous {
+        ([], 0) => QueueJobIdentityDelta::None,
+        ([job_id], 0) => QueueJobIdentityDelta::Unique(*job_id),
+        _ => QueueJobIdentityDelta::Ambiguous {
             added: added.len(),
             removed,
         },
     }
 }
 
-fn schedule_path_candidates(html: &str) -> Vec<String> {
-    let mut candidates = Vec::new();
-    let lower = html.to_ascii_lowercase();
-    let mut offset = 0usize;
-    while let Some(relative) = lower[offset..].find("index.php?page=schedule") {
-        let start = offset + relative;
-        let raw_tail = &html[start..];
-        let end = raw_tail
-            .find(|ch: char| matches!(ch, '"' | '\'' | '<' | '>' | ')' | ';') || ch.is_whitespace())
-            .unwrap_or(raw_tail.len());
-        candidates.push(raw_tail[..end].replace("&amp;", "&"));
-        offset = start + end.max(1);
-    }
-    candidates
+fn queue_job_ids_for_source(
+    links: &[super::QueueControlLink],
+    source: crate::response::QueueControlSource,
+) -> BTreeSet<u64> {
+    links
+        .iter()
+        .filter(|link| link.candidate.source == source)
+        .map(|link| link.route.identifier_value)
+        .collect()
 }
 
-fn schedule_job_id_from_path(path: &str) -> Option<u64> {
-    let base = Url::parse("https://example.test/admin/").ok()?;
-    let url = base.join(&path.replace("&amp;", "&")).ok()?;
-    let page = url
-        .query_pairs()
-        .find(|(key, _)| key.eq_ignore_ascii_case("Page"))
-        .map(|(_, value)| value.to_string())?;
-    if !page.eq_ignore_ascii_case("Schedule") {
-        return None;
+fn queue_manage_job_ids_for_campaign(
+    links: &[super::QueueControlLink],
+    campaign_id: u64,
+) -> BTreeSet<u64> {
+    links
+        .iter()
+        .filter(|link| {
+            link.candidate.source == crate::response::QueueControlSource::CampaignManage
+                && link.candidate.campaign_id == Some(campaign_id)
+        })
+        .map(|link| link.route.identifier_value)
+        .collect()
+}
+
+fn validate_guarded_send_baseline_context(
+    input: &GuardedSendReconcileInput<'_>,
+) -> Result<(), InterspireError> {
+    if !input.atomic_authority_binding.validates(&input.send_form) {
+        return Err(InterspireError::Safety(
+            "guarded send atomic live authority no longer bound the exact final submission; no final request was constructed or dispatched"
+                .to_string(),
+        ));
     }
-    for key in ["job", "Job", "jobid", "JobID"] {
-        if let Some(value) = url
-            .query_pairs()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
-            .and_then(|(_, value)| value.as_ref().parse::<u64>().ok())
-        {
-            return Some(value);
-        }
+    let expected = GuardedSendBaselineContext {
+        campaign_id: input.campaign_id,
+        list_ids: input.list_ids.to_vec(),
+        expected_body_sha256: input.expected_body_sha256.clone(),
+        expected_recipient_count: input.expected_recipient_count,
+        max_rows: input.max_rows,
+        authority_submission_sha256: input.atomic_authority_binding.submission_sha256.clone(),
+        authority_state_version: input.atomic_authority_binding.state_version.clone(),
+        capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
+    };
+    if input.baseline_context != expected || !input.baseline_identity_stable {
+        return Err(InterspireError::Safety(
+            "guarded send final pre-dispatch baseline context or freshness did not match the exact request; no final request was dispatched"
+                .to_string(),
+        ));
     }
-    None
+    Ok(())
 }
 
 fn send_popup_job_id(url: &Url) -> Option<u64> {
-    for key in ["job", "Job", "jobid", "JobID", "id", "sendid", "SendID"] {
-        if let Some(value) = url
-            .query_pairs()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
-            .and_then(|(_, value)| value.as_ref().parse::<u64>().ok())
-        {
-            return Some(value);
-        }
-    }
-    None
+    safety::guarded_send_popup_job_id(url).ok()
 }
 
 fn seed_send_apply_warnings(reconciliation: &SendReconciliationReport) -> Vec<String> {
@@ -3310,11 +4046,14 @@ fn send_apply_warnings(
     external_monitoring_warning: &str,
 ) -> Vec<String> {
     let mut warnings = match reconciliation.status {
+        SendApplyStatus::ResponseUncertain => vec![format!(
+            "{label} final request was attempted, but no HTTP response proved whether the application received it; reconciliation remains response-uncertain, so HOLD and do not retry or resend, and use only the returned bounded read-only uncertainty recovery contract"
+        )],
         SendApplyStatus::Posted => vec![format!(
             "{label} final boundary was posted, but durable application identity and terminal state were not proven; observed execution or readback signals remain nonterminal"
         )],
         SendApplyStatus::Queued => vec![format!(
-            "{label} has a durable job identity, but a bound terminal Stats identity remains unproven; use the returned follow-up contract for exact readback"
+            "{label} has a durable job identity, but the bounded admin surface exposes no application-native job-to-Stats association; the returned follow-up contract remains nonterminal readback context"
         )],
         SendApplyStatus::TransportFailed => vec![format!(
             "{label} reached the guarded Interspire send loop but Interspire reported a transport failure"
@@ -3337,6 +4076,20 @@ fn send_apply_warnings(
         ));
     }
     warnings
+}
+
+fn guarded_send_boundary_evidence_note(status: SendApplyStatus, route_label: &str) -> String {
+    match status {
+        SendApplyStatus::Refused => {
+            format!("no final send form request was attempted on the guarded {route_label} route")
+        }
+        SendApplyStatus::ResponseUncertain => format!(
+            "the final send form request was attempted on the guarded {route_label} route, but no HTTP response proved whether the application received it; hold and do not retry or resend"
+        ),
+        _ => format!(
+            "final send form controls were captured from the live Interspire page and posted to the guarded {route_label} route"
+        ),
+    }
 }
 
 fn transport_failure_reason(html: &str) -> Option<String> {
@@ -3914,33 +4667,1024 @@ fn sha256_hex(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::stats_identity::{StatsIdentityInventory, StatsRowIdentity};
     use super::{
         append_csrf_pair_if_missing, campaign_body_audit_from_html, campaign_body_parts_from_html,
         campaign_body_step1_pairs, campaign_body_step2_action_path, campaign_test_send_digest,
         campaign_test_send_has_applyable_html, campaign_test_send_report, csrf_pair,
         expected_public_subject_matches, guarded_schedule_approval_url,
-        guarded_send_evidence_from_progress, guarded_send_final_form_post,
-        guarded_send_final_form_post_for_request, guarded_send_popup_url,
-        guarded_send_terminal_reconciliation, is_guarded_send_campaign_selection_name,
-        list_ids_warning, optional_nonempty_sha256, parse_send_wizard_final_page,
-        preview_send_response_success, recipient_count_marker, rows_changed_for_send_proof,
-        rows_unchanged_for_send_proof, schedule_job_identity_delta, schedule_job_ids_from_html,
+        guarded_send_boundary_evidence_note, guarded_send_evidence_from_progress,
+        guarded_send_exact_form_value_sha256, guarded_send_final_form_post,
+        guarded_send_form_token, guarded_send_popup_url, guarded_send_terminal_reconciliation,
+        is_guarded_send_list_selection_name, list_ids_warning, optional_nonempty_sha256,
+        parse_send_wizard_final_page, preview_send_response_success, queue_job_identity_delta,
+        recipient_count_marker, rows_changed_for_send_proof, rows_unchanged_for_send_proof,
         seed_send_apply_warnings, selected_or_hidden_list_ids,
         send_apply_preflight_refusal_warnings, send_step2_action_path, sha256_hex,
         stable_stats_identity_delta, stats_rows_stable_for_no_send_proof, step4_response_summary,
-        transport_failure_reason, validate_single_preview_email, GuardedSendJobEvidence,
-        GuardedSendProgress, GuardedSendReconcileInput, GuardedSendTerminalInput,
-        ScheduleJobIdentityDelta, StableStatsIdentityDelta,
+        transport_failure_reason, validate_single_preview_email, GuardedSendAtomicAuthorityBinding,
+        GuardedSendAuthorityExpectation, GuardedSendBaselineContext, GuardedSendJobEvidence,
+        GuardedSendProgress, GuardedSendReconcileInput, GuardedSendRequestInput,
+        GuardedSendTerminalInput, QueueJobIdentityDelta, StableStatsIdentityDelta,
     };
     use crate::{
+        config::{AdminHtmlConfig, InterspireVersion},
         redact,
         response::{
-            CampaignBodyAuditReport, CampaignTestSendApplyRequest, SendApplyStatus,
-            SendReconciliationReport,
+            CampaignBodyAuditReport, CampaignTestSendApplyRequest, ProductionSendApplyRequest,
+            SeedSendApplyRequest, SendApplyStatus, SendBaselineCaptureStage,
+            SendReconciliationReport, SendUncertaintyDecision, SendUncertaintyIdentityState,
+            SendUncertaintyNextAction,
         },
     };
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
     use url::Url;
+
+    const RESPONSE_LOSS_LIST_IDS: &[u64] = &[8001];
+    const AUTHORITY_CAMPAIGN_ID: u64 = 9001;
+    const AUTHORITY_LIST_ID: u64 = 8001;
+    const AUTHORITY_RECIPIENT_COUNT: u64 = 5;
+    const AUTHORITY_HTML_BODY: &str =
+        "<html><body><a href=\"https://example.invalid\">Read</a>%%UNSUBSCRIBELINK%%</body></html>";
+    const AUTHORITY_TEXT_BODY: &str = "Read: https://example.invalid\n%%UNSUBSCRIBELINK%%";
+
+    fn empty_stats_identity_inventory() -> StatsIdentityInventory {
+        StatsIdentityInventory { rows: Vec::new() }
+    }
+
+    fn stats_identity_inventory(rows: &[(u64, u64)]) -> StatsIdentityInventory {
+        stats_identity_inventory_for("Campaign Alpha", rows)
+    }
+
+    fn stats_identity_inventory_for(
+        campaign_label: &str,
+        rows: &[(u64, u64)],
+    ) -> StatsIdentityInventory {
+        StatsIdentityInventory {
+            rows: rows
+                .iter()
+                .enumerate()
+                .map(|(index, (stat_id, recipients))| StatsRowIdentity {
+                    stat_id: *stat_id,
+                    row_ordinal: index + 1,
+                    row_summary: format!(
+                        "Synthetic Stats row {campaign_label} {stat_id} {recipients}"
+                    ),
+                    recipients: *recipients,
+                })
+                .collect(),
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ResponseLossReadbackFixture {
+        NativeResponseBoundJob,
+        SameCampaignAfterConfirmed,
+        NoNewJob,
+        AmbiguousJobs,
+        PostDispatchCappedStats,
+        SameCampaignGapJob,
+        SameCampaignBetweenCaptures,
+        ScheduleOverCap,
+        ScheduleExactlyAtCap,
+        ManageExactlyAtCap,
+        StatsPagination,
+        BaselineFreshnessMismatch,
+    }
+
+    struct ResponseLossReadbackServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        dispatched: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl ResponseLossReadbackServer {
+        fn requests(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|err| panic!("response-loss request lock poisoned: {err}"))
+                .clone()
+        }
+
+        fn mark_dispatched(&self) {
+            self.dispatched.store(true, Ordering::Release);
+        }
+    }
+
+    impl Drop for ResponseLossReadbackServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| panic!("response-loss fixture server thread panicked"));
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AuthorityDriftField {
+        Campaign,
+        Subject,
+        SubjectRedactionCollision,
+        Body,
+        Sender,
+        ReplyTo,
+        Bounce,
+        Lists,
+        RecipientCount,
+        Action,
+        Token,
+        SubmittedPairs,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AuthorityDriftPhase {
+        BeforeFirstCapture,
+        BetweenCaptures,
+        AfterConfirmedCapture,
+    }
+
+    struct AuthorityReadbackServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        after_confirmed_drift_armed: Arc<AtomicBool>,
+        final_send_posts: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl AuthorityReadbackServer {
+        fn requests(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|err| panic!("authority request lock poisoned: {err}"))
+                .clone()
+        }
+
+        fn final_send_posts(&self) -> usize {
+            self.final_send_posts.load(Ordering::Acquire)
+        }
+
+        fn after_confirmed_drift_armed(&self) -> bool {
+            self.after_confirmed_drift_armed.load(Ordering::Acquire)
+        }
+    }
+
+    impl Drop for AuthorityReadbackServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| panic!("authority fixture server thread panicked"));
+            }
+        }
+    }
+
+    fn spawn_authority_readback_server(
+        field: AuthorityDriftField,
+        phase: AuthorityDriftPhase,
+    ) -> AuthorityReadbackServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+        let after_confirmed_drift_armed = Arc::new(AtomicBool::new(false));
+        let thread_after_confirmed_drift_armed = Arc::clone(&after_confirmed_drift_armed);
+        let final_send_posts = Arc::new(AtomicUsize::new(0));
+        let thread_final_send_posts = Arc::clone(&final_send_posts);
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let mut campaign_reads = 0usize;
+            let mut wizard_renders = 0usize;
+            while !thread_stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 16_384];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("fixture request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| panic!("authority request lock poisoned: {err}"))
+                            .push(request.clone());
+
+                        let (status, extra_headers, body) = if request.contains("Page=Lists") {
+                            (
+                                "200 OK",
+                                "",
+                                "<html><body><h1>Contact Lists</h1></body></html>".to_string(),
+                            )
+                        } else if request.contains("Page=Newsletters&Action=Edit&id=9001") {
+                            campaign_reads += 1;
+                            (
+                                "200 OK",
+                                "",
+                                authority_campaign_html(field, phase, campaign_reads),
+                            )
+                        } else if request.starts_with("GET ") && request.contains("Page=Send ") {
+                            ("200 OK", "", authority_send_start_html())
+                        } else if request.starts_with("POST ")
+                            && request.contains("Page=Send&Action=Step2")
+                        {
+                            wizard_renders += 1;
+                            let body = authority_final_wizard_html(field, phase, wizard_renders);
+                            if phase == AuthorityDriftPhase::AfterConfirmedCapture
+                                && wizard_renders == 3
+                            {
+                                thread_after_confirmed_drift_armed.store(true, Ordering::Release);
+                            }
+                            ("200 OK", "", body)
+                        } else if request.starts_with("POST ")
+                            && (request.contains("Page=Send&Action=Step3")
+                                || request.contains("Page=Send&Action=Step4")
+                                || request.contains("Page=Send&Action=Send"))
+                        {
+                            thread_final_send_posts.fetch_add(1, Ordering::AcqRel);
+                            (
+                                    "409 Conflict",
+                                    "",
+                                    "<html><body>synthetic final send must remain unreachable</body></html>"
+                                        .to_string(),
+                                )
+                        } else if request.contains("Page=Schedule") {
+                            ("200 OK", "", queue_schedule_html(&[]))
+                        } else if request.contains("Page=Stats") {
+                            ("200 OK", "", stats_html(&[70], false))
+                        } else {
+                            (
+                                "404 Not Found",
+                                "",
+                                "<html><body>unexpected synthetic authority route</body></html>"
+                                    .to_string(),
+                            )
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .unwrap_or_else(|err| panic!("fixture response write failed: {err}"));
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => panic!("authority fixture accept failed: {err}"),
+                }
+            }
+        });
+        AuthorityReadbackServer {
+            base_url: format!("http://{address}/admin/"),
+            requests,
+            after_confirmed_drift_armed,
+            final_send_posts,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn authority_drifted(phase: AuthorityDriftPhase, ordinal: usize) -> bool {
+        match phase {
+            AuthorityDriftPhase::BeforeFirstCapture => ordinal >= 1,
+            AuthorityDriftPhase::BetweenCaptures => ordinal >= 2,
+            AuthorityDriftPhase::AfterConfirmedCapture => false,
+        }
+    }
+
+    fn authority_campaign_html(
+        field: AuthorityDriftField,
+        phase: AuthorityDriftPhase,
+        ordinal: usize,
+    ) -> String {
+        let drifted = authority_drifted(phase, ordinal);
+        let subject = if field == AuthorityDriftField::SubjectRedactionCollision {
+            "token alpha"
+        } else if drifted && field == AuthorityDriftField::Subject {
+            "Changed synthetic subject"
+        } else {
+            "Synthetic subject"
+        };
+        let html_body = if drifted && field == AuthorityDriftField::Body {
+            "<html><body><a href=\"https://example.invalid/changed\">Changed</a>%%UNSUBSCRIBELINK%%</body></html>"
+        } else {
+            AUTHORITY_HTML_BODY
+        };
+        format!(
+            r#"<html><body><form>
+              <input name="name" value="Synthetic campaign">
+              <input name="subject" value="{subject}">
+              <textarea name="htmlbody">{html_body}</textarea>
+              <textarea name="textbody">{AUTHORITY_TEXT_BODY}</textarea>
+            </form></body></html>"#
+        )
+    }
+
+    fn authority_send_start_html() -> String {
+        r#"<html><body>
+          <form action="index.php?Page=Send&Action=Step2">
+            <input type="hidden" name="csrfToken" value="synthetic-start-token">
+          </form>
+        </body></html>"#
+            .to_string()
+    }
+
+    fn authority_final_wizard_html(
+        field: AuthorityDriftField,
+        phase: AuthorityDriftPhase,
+        ordinal: usize,
+    ) -> String {
+        let drifted = authority_drifted(phase, ordinal);
+        let campaign_id = if drifted && field == AuthorityDriftField::Campaign {
+            9002
+        } else {
+            AUTHORITY_CAMPAIGN_ID
+        };
+        let list_id = if drifted && field == AuthorityDriftField::Lists {
+            8002
+        } else {
+            AUTHORITY_LIST_ID
+        };
+        let recipient_count = if drifted && field == AuthorityDriftField::RecipientCount {
+            26
+        } else {
+            AUTHORITY_RECIPIENT_COUNT
+        };
+        let sender = if drifted && field == AuthorityDriftField::Sender {
+            "changed-sender@example.invalid"
+        } else {
+            "sender@example.invalid"
+        };
+        let reply_to = if drifted && field == AuthorityDriftField::ReplyTo {
+            "changed-reply@example.invalid"
+        } else {
+            "reply@example.invalid"
+        };
+        let bounce = if drifted && field == AuthorityDriftField::Bounce {
+            "changed-bounce@example.invalid"
+        } else {
+            "bounce@example.invalid"
+        };
+        let action = if drifted && field == AuthorityDriftField::Action {
+            "Step3"
+        } else {
+            "Step4"
+        };
+        let token = if drifted && field == AuthorityDriftField::Token {
+            "changed-final-token"
+        } else {
+            "synthetic-final-token"
+        };
+        let delivery_mode = if drifted && field == AuthorityDriftField::SubmittedPairs {
+            "changed"
+        } else {
+            "stable"
+        };
+        format!(
+            r#"<html><body>
+            <form name="frmSend" action="index.php?Page=Send&Action={action}">
+              <input type="hidden" name="csrfToken" value="{token}">
+              <select name="newsletter"><option value="{campaign_id}" selected>Synthetic campaign</option></select>
+              <input type="hidden" name="lists[]" value="{list_id}">
+              <input name="sendfromname" value="Synthetic sender">
+              <input name="sendfromemail" value="{sender}">
+              <input name="replytoemail" value="{reply_to}">
+              <input name="bounceemail" value="{bounce}">
+              <input type="checkbox" name="sendimmediately" value="1" checked>
+              <input type="checkbox" name="notifyowner" value="1">
+              <input type="checkbox" name="trackopens" value="1" checked>
+              <input type="checkbox" name="tracklinks" value="1" checked>
+              <input type="checkbox" name="sendmultipart" value="1" checked>
+              <input type="checkbox" name="embedimages" value="1">
+              <input type="hidden" name="deliverymode" value="{delivery_mode}">
+              <input type="submit" name="SendButton" value="Send now">
+              <p>{recipient_count} recipients selected</p>
+            </form>
+          </body></html>"#
+        )
+    }
+
+    fn spawn_response_loss_readback_server(
+        mode: ResponseLossReadbackFixture,
+    ) -> ResponseLossReadbackServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let thread_dispatched = Arc::clone(&dispatched);
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut schedule_reads = 0usize;
+            let mut manage_reads = 0usize;
+            let mut stats_reads = 0usize;
+            while !thread_stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 8192];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("fixture request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("response-loss request lock poisoned: {err}")
+                            })
+                            .push(request.clone());
+                        if request.starts_with("POST ")
+                            && request.contains("Page=Send&Action=Step4")
+                        {
+                            thread_dispatched.store(true, Ordering::Release);
+                            if mode == ResponseLossReadbackFixture::NativeResponseBoundJob {
+                                write_fixture_http_response(
+                                    &mut stream,
+                                    "302 Found",
+                                    "location: index.php?Page=Send&Action=Send&job=43&Started=1\r\n",
+                                    "",
+                                );
+                            } else {
+                                write_fixture_http_response(
+                                    &mut stream,
+                                    "409 Conflict",
+                                    "",
+                                    "<html><body>synthetic response-loss dispatch must be injected</body></html>",
+                                );
+                            }
+                            continue;
+                        }
+                        if request.starts_with("GET ")
+                            && request.contains("Page=Send&Action=Send&job=43")
+                        {
+                            write_fixture_http_response(&mut stream, "200 OK", "", "");
+                            continue;
+                        }
+                        let (route_read, route_ordinal) = if request.contains("Page=Schedule") {
+                            schedule_reads += 1;
+                            ("schedule", schedule_reads)
+                        } else if request.contains("Page=Stats") {
+                            stats_reads += 1;
+                            ("stats", stats_reads)
+                        } else if request.contains("Page=Newsletters&Action=Manage") {
+                            manage_reads += 1;
+                            ("manage", manage_reads)
+                        } else {
+                            ("unexpected", 0)
+                        };
+                        write_response_loss_readback(
+                            &mut stream,
+                            route_read,
+                            route_ordinal,
+                            mode,
+                            thread_dispatched.load(Ordering::Acquire),
+                        );
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => panic!("response-loss fixture accept failed: {err}"),
+                }
+            }
+        });
+        ResponseLossReadbackServer {
+            base_url: format!("http://{address}/admin/"),
+            requests,
+            dispatched,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn write_response_loss_readback(
+        stream: &mut std::net::TcpStream,
+        route: &str,
+        route_ordinal: usize,
+        mode: ResponseLossReadbackFixture,
+        dispatched: bool,
+    ) {
+        let body = if route == "schedule" {
+            response_loss_schedule_html(mode, dispatched, route_ordinal)
+        } else if route == "stats" {
+            response_loss_stats_html(mode, dispatched)
+        } else if route == "manage" {
+            response_loss_manage_html(mode, dispatched, route_ordinal)
+        } else {
+            "<html><body>unexpected synthetic read-only request</body></html>".to_string()
+        };
+        write_fixture_http_response(stream, "200 OK", "", &body);
+    }
+
+    fn write_fixture_http_response(
+        stream: &mut std::net::TcpStream,
+        status: &str,
+        extra_headers: &str,
+        body: &str,
+    ) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .unwrap_or_else(|err| panic!("fixture response write failed: {err}"));
+    }
+
+    fn response_loss_schedule_html(
+        mode: ResponseLossReadbackFixture,
+        dispatched: bool,
+        read_ordinal: usize,
+    ) -> String {
+        let jobs = match mode {
+            ResponseLossReadbackFixture::NativeResponseBoundJob if dispatched => vec![43],
+            ResponseLossReadbackFixture::SameCampaignAfterConfirmed if dispatched => vec![43],
+            ResponseLossReadbackFixture::AmbiguousJobs if dispatched => vec![43, 44],
+            ResponseLossReadbackFixture::SameCampaignGapJob => vec![43],
+            ResponseLossReadbackFixture::SameCampaignBetweenCaptures if read_ordinal >= 2 => {
+                vec![43]
+            }
+            ResponseLossReadbackFixture::ScheduleOverCap => vec![41, 42, 43],
+            ResponseLossReadbackFixture::ScheduleExactlyAtCap => vec![41, 42],
+            ResponseLossReadbackFixture::BaselineFreshnessMismatch if read_ordinal == 1 => vec![43],
+            ResponseLossReadbackFixture::BaselineFreshnessMismatch => vec![44],
+            _ => Vec::new(),
+        };
+        queue_schedule_html(&jobs)
+    }
+
+    fn response_loss_manage_html(
+        mode: ResponseLossReadbackFixture,
+        dispatched: bool,
+        read_ordinal: usize,
+    ) -> String {
+        let jobs = match mode {
+            ResponseLossReadbackFixture::NativeResponseBoundJob if dispatched => vec![43],
+            ResponseLossReadbackFixture::SameCampaignAfterConfirmed if dispatched => vec![43],
+            ResponseLossReadbackFixture::SameCampaignGapJob => vec![43],
+            ResponseLossReadbackFixture::SameCampaignBetweenCaptures if read_ordinal >= 2 => {
+                vec![43]
+            }
+            ResponseLossReadbackFixture::ManageExactlyAtCap => vec![41, 42],
+            ResponseLossReadbackFixture::BaselineFreshnessMismatch if read_ordinal == 1 => vec![43],
+            ResponseLossReadbackFixture::BaselineFreshnessMismatch => vec![44],
+            _ => Vec::new(),
+        };
+        queue_manage_html(&jobs)
+    }
+
+    fn response_loss_stats_html(mode: ResponseLossReadbackFixture, dispatched: bool) -> String {
+        let ids = if mode == ResponseLossReadbackFixture::PostDispatchCappedStats && dispatched {
+            vec![70, 71, 72]
+        } else {
+            vec![70]
+        };
+        let pagination = mode == ResponseLossReadbackFixture::StatsPagination;
+        stats_html(&ids, pagination)
+    }
+
+    fn queue_schedule_html(job_ids: &[u64]) -> String {
+        if job_ids.is_empty() {
+            return "<html><body><h1>View Scheduled Email Queue</h1><p>There are no emails currently scheduled.</p></body></html>".to_string();
+        }
+        let rows = job_ids
+            .iter()
+            .map(|job_id| {
+                format!(
+                    r#"<tr><td>Synthetic active job {job_id}</td><td><a href="index.php?Page=Schedule&Action=Pause&job={job_id}">Pause</a></td></tr>"#
+                )
+            })
+            .collect::<String>();
+        format!(
+            "<html><body><h1>View Scheduled Email Queue</h1><table><tr><th>Campaign</th><th>Actions</th></tr>{rows}</table></body></html>"
+        )
+    }
+
+    fn queue_manage_html(job_ids: &[u64]) -> String {
+        if job_ids.is_empty() {
+            return "<html><body><h1>View Email Campaigns</h1><p>There are no email campaigns.</p></body></html>".to_string();
+        }
+        let rows = job_ids
+            .iter()
+            .map(|job_id| {
+                format!(
+                    r#"<tr><td>Synthetic campaign {job_id}</td><td><a href="index.php?Page=Newsletters&Action=Edit&id=9001">Edit</a><a href="index.php?Page=Send&Action=PauseSend&Job={job_id}">Pause</a></td></tr>"#
+                )
+            })
+            .collect::<String>();
+        format!(
+            "<html><body><h1>View Email Campaigns</h1><table><tr><th>Campaign</th><th>Actions</th></tr>{rows}</table></body></html>"
+        )
+    }
+
+    fn stats_html(stat_ids: &[u64], pagination: bool) -> String {
+        let rows = stat_ids
+            .iter()
+            .map(|stat_id| {
+                format!(
+                    r#"<tr><td>Synthetic Campaign {stat_id}</td><td>25 0 0</td><td><a href="index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid={stat_id}">View</a></td></tr>"#
+                )
+            })
+            .collect::<String>();
+        let pagination = if pagination {
+            r#"<a class="pagination nextpage" href="index.php?Page=Stats&DisplayPage=2">Next</a>"#
+        } else {
+            ""
+        };
+        format!(
+            "<html><body><h1>Email Campaign Statistics</h1><table><tr><th>Campaign</th><th>Counts</th><th>Actions</th></tr>{rows}</table>{pagination}</body></html>"
+        )
+    }
+
+    fn response_loss_input(base_url: &str, max_rows: usize) -> GuardedSendRequestInput<'static> {
+        let send_form = (
+            Url::parse(&format!("{base_url}index.php?Page=Send&Action=Step4"))
+                .expect("synthetic send URL"),
+            vec![
+                ("csrfToken".to_string(), "synthetic-token".to_string()),
+                ("newsletter".to_string(), "9001".to_string()),
+                ("lists[]".to_string(), "8001".to_string()),
+                ("SendButton".to_string(), "Send now".to_string()),
+            ],
+        );
+        let atomic_authority_binding = GuardedSendAtomicAuthorityBinding::synthetic(&send_form);
+        GuardedSendRequestInput {
+            send_form,
+            atomic_authority_binding,
+            campaign_id: 9001,
+            list_ids: RESPONSE_LOSS_LIST_IDS,
+            expected_body_sha256: Some("synthetic-body-sha256".to_string()),
+            expected_recipient_count: 25,
+            max_rows,
+        }
+    }
+
+    fn response_loss_client(base_url: &str) -> super::AdminHtmlClient {
+        super::AdminHtmlClient::new(AdminHtmlConfig {
+            version: InterspireVersion::Auto,
+            base_url: Some(base_url.to_string()),
+            username: Some("fixture-user".to_string()),
+            password: Some("fixture-value".to_string()),
+            cloudflare_access: crate::config::CloudflareAccessConfig::default(),
+            enrich_limit: 25,
+        })
+        .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn authority_expectation<'a>(
+        expected_html_sha256: &'a str,
+    ) -> GuardedSendAuthorityExpectation<'a> {
+        GuardedSendAuthorityExpectation {
+            campaign_id: AUTHORITY_CAMPAIGN_ID,
+            list_ids: &[AUTHORITY_LIST_ID],
+            expected_recipient_count: AUTHORITY_RECIPIENT_COUNT,
+            expected_subject: Some("Synthetic subject"),
+            expected_html_sha256: Some(expected_html_sha256),
+            expected_from_email: Some("sender@example.invalid"),
+            expected_reply_to_email: Some("reply@example.invalid"),
+        }
+    }
+
+    fn authority_drift_fields() -> [AuthorityDriftField; 11] {
+        [
+            AuthorityDriftField::Campaign,
+            AuthorityDriftField::Subject,
+            AuthorityDriftField::Body,
+            AuthorityDriftField::Sender,
+            AuthorityDriftField::ReplyTo,
+            AuthorityDriftField::Bounce,
+            AuthorityDriftField::Lists,
+            AuthorityDriftField::RecipientCount,
+            AuthorityDriftField::Action,
+            AuthorityDriftField::Token,
+            AuthorityDriftField::SubmittedPairs,
+        ]
+    }
+
+    #[test]
+    fn live_authority_drift_before_first_capture_refuses_without_final_post() {
+        let expected_html_sha256 = sha256_hex(AUTHORITY_HTML_BODY);
+        for field in authority_drift_fields() {
+            let server =
+                spawn_authority_readback_server(field, AuthorityDriftPhase::BeforeFirstCapture);
+            let client = response_loss_client(&server.base_url);
+            let review = client
+                .review_guarded_send_live_authority(
+                    &authority_expectation(&expected_html_sha256),
+                    25,
+                )
+                .unwrap_or_else(|err| panic!("{field:?}: {err}"));
+
+            assert!(review.atomic_binding.is_none(), "{field:?}");
+            assert!(
+                review.refusal_reason.is_some(),
+                "{field:?} retained dispatch authority"
+            );
+            assert_eq!(server.final_send_posts(), 0, "{field:?}");
+            assert!(server.requests().iter().all(|request| !request
+                .starts_with("POST /admin/index.php?Page=Send&Action=Step3")
+                && !request.starts_with("POST /admin/index.php?Page=Send&Action=Step4")
+                && !request.starts_with("POST /admin/index.php?Page=Send&Action=Send")));
+        }
+    }
+
+    #[test]
+    fn live_authority_drift_between_captures_refuses_without_final_post() {
+        let expected_html_sha256 = sha256_hex(AUTHORITY_HTML_BODY);
+        for field in authority_drift_fields() {
+            let server =
+                spawn_authority_readback_server(field, AuthorityDriftPhase::BetweenCaptures);
+            let client = response_loss_client(&server.base_url);
+            let review = client
+                .review_guarded_send_live_authority(
+                    &authority_expectation(&expected_html_sha256),
+                    25,
+                )
+                .unwrap_or_else(|err| panic!("{field:?}: {err}"));
+
+            assert!(review.atomic_binding.is_none(), "{field:?}");
+            assert!(
+                review.refusal_reason.is_some(),
+                "{field:?} retained dispatch authority"
+            );
+            assert_eq!(server.final_send_posts(), 0, "{field:?}");
+        }
+    }
+
+    #[test]
+    fn stable_captures_still_refuse_after_confirmed_window_without_atomic_binding() {
+        let expected_html_sha256 = sha256_hex(AUTHORITY_HTML_BODY);
+        for field in authority_drift_fields() {
+            let server =
+                spawn_authority_readback_server(field, AuthorityDriftPhase::AfterConfirmedCapture);
+            let client = response_loss_client(&server.base_url);
+            let review = client
+                .review_guarded_send_live_authority(
+                    &authority_expectation(&expected_html_sha256),
+                    25,
+                )
+                .unwrap_or_else(|err| panic!("{field:?}: {err}"));
+
+            assert!(review.atomic_binding.is_none(), "{field:?}");
+            assert!(
+                review
+                    .refusal_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("no authenticated atomic state version")),
+                "{field:?}: {:?}",
+                review.refusal_reason
+            );
+            assert!(server.after_confirmed_drift_armed(), "{field:?}");
+            assert_eq!(server.final_send_posts(), 0, "{field:?}");
+        }
+    }
+
+    #[test]
+    fn public_seed_send_apply_refuses_at_atomic_authority_gate_without_final_post() {
+        let server = spawn_authority_readback_server(
+            AuthorityDriftField::Body,
+            AuthorityDriftPhase::AfterConfirmedCapture,
+        );
+        let client = response_loss_client(&server.base_url);
+        let report = client
+            .seed_send_apply(
+                &SeedSendApplyRequest {
+                    campaign_id: AUTHORITY_CAMPAIGN_ID,
+                    list_ids: vec![AUTHORITY_LIST_ID],
+                    expected_recipient_count: AUTHORITY_RECIPIENT_COUNT,
+                    expected_from_email: Some("sender@example.invalid".to_string()),
+                    expected_reply_to_email: Some("reply@example.invalid".to_string()),
+                    expected_subject: Some("Synthetic subject".to_string()),
+                    expected_html_sha256: Some(sha256_hex(AUTHORITY_HTML_BODY)),
+                    max_queue_rows: Some(25),
+                    oci_ledger_preflight: None,
+                    acknowledge_seed_send: true,
+                },
+                true,
+                true,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.ok);
+        assert!(!report.sent);
+        assert_eq!(report.post_status_code, None);
+        assert_eq!(report.reconciliation.status, SendApplyStatus::Refused);
+        assert!(report.gates.iter().any(|gate| {
+            gate.name == "final_atomic_send_authority" && !gate.passed && gate.severity == "blocker"
+        }));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no authenticated atomic state version")));
+        assert_eq!(server.final_send_posts(), 0);
+    }
+
+    #[test]
+    fn public_production_send_apply_refuses_at_atomic_authority_gate_without_final_post() {
+        let server = spawn_authority_readback_server(
+            AuthorityDriftField::Body,
+            AuthorityDriftPhase::AfterConfirmedCapture,
+        );
+        let client = response_loss_client(&server.base_url);
+        let report = client
+            .production_send_apply(
+                &ProductionSendApplyRequest {
+                    campaign_id: AUTHORITY_CAMPAIGN_ID,
+                    list_ids: vec![AUTHORITY_LIST_ID],
+                    expected_recipient_count: AUTHORITY_RECIPIENT_COUNT,
+                    expected_from_email: "sender@example.invalid".to_string(),
+                    expected_reply_to_email: "reply@example.invalid".to_string(),
+                    expected_subject: "Synthetic subject".to_string(),
+                    expected_html_sha256: sha256_hex(AUTHORITY_HTML_BODY),
+                    ops_work_item_ref: None,
+                    max_queue_rows: Some(25),
+                    oci_ledger_preflight: None,
+                    acknowledge_production_send: true,
+                    confirmation_phrase: "SEND_PRODUCTION_CAMPAIGN".to_string(),
+                },
+                true,
+                true,
+                true,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.ok);
+        assert!(!report.sent);
+        assert!(!report.production_send_authorized);
+        assert_eq!(report.post_status_code, None);
+        assert_eq!(report.reconciliation.status, SendApplyStatus::Refused);
+        assert!(report.gates.iter().any(|gate| {
+            gate.name == "final_atomic_send_authority" && !gate.passed && gate.severity == "blocker"
+        }));
+        assert_eq!(server.final_send_posts(), 0);
+    }
+
+    #[test]
+    fn live_authority_expected_values_do_not_accept_redaction_collisions() {
+        let expected_html_sha256 = sha256_hex(AUTHORITY_HTML_BODY);
+        for (expected_from, expected_reply, expected_refusal) in [
+            (
+                Some("shadow@example.invalid"),
+                Some("reply@example.invalid"),
+                "sender",
+            ),
+            (
+                Some("sender@example.invalid"),
+                Some("random@example.invalid"),
+                "reply-to",
+            ),
+        ] {
+            let server = spawn_authority_readback_server(
+                AuthorityDriftField::Body,
+                AuthorityDriftPhase::AfterConfirmedCapture,
+            );
+            let client = response_loss_client(&server.base_url);
+            let mut expectation = authority_expectation(&expected_html_sha256);
+            expectation.expected_from_email = expected_from;
+            expectation.expected_reply_to_email = expected_reply;
+            let review = client
+                .review_guarded_send_live_authority(&expectation, 25)
+                .unwrap_or_else(|err| panic!("{err}"));
+
+            assert!(
+                review
+                    .refusal_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(expected_refusal)),
+                "{:?}",
+                review.refusal_reason
+            );
+            assert_eq!(server.final_send_posts(), 0);
+        }
+    }
+
+    #[test]
+    fn live_authority_subject_uses_exact_private_identity_before_public_redaction() {
+        let expected_html_sha256 = sha256_hex(AUTHORITY_HTML_BODY);
+        let server = spawn_authority_readback_server(
+            AuthorityDriftField::SubjectRedactionCollision,
+            AuthorityDriftPhase::AfterConfirmedCapture,
+        );
+        let client = response_loss_client(&server.base_url);
+        let mut matching = authority_expectation(&expected_html_sha256);
+        matching.expected_subject = Some("token alpha");
+        let matching_review = client
+            .review_guarded_send_live_authority(&matching, 25)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            matching_review
+                .refusal_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no authenticated atomic state version")),
+            "{:?}",
+            matching_review.refusal_reason
+        );
+
+        let server = spawn_authority_readback_server(
+            AuthorityDriftField::SubjectRedactionCollision,
+            AuthorityDriftPhase::AfterConfirmedCapture,
+        );
+        let client = response_loss_client(&server.base_url);
+        let mut mismatching = authority_expectation(&expected_html_sha256);
+        mismatching.expected_subject = Some("token beta");
+        let mismatching_review = client
+            .review_guarded_send_live_authority(&mismatching, 25)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            mismatching_review
+                .refusal_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("campaign-subject")),
+            "{:?}",
+            mismatching_review.refusal_reason
+        );
+    }
+
+    #[test]
+    fn exact_form_authority_hash_rejects_duplicate_or_empty_aliases() {
+        let single = vec![(
+            "sendfromemail".to_string(),
+            "Sender@Example.INVALID".to_string(),
+        )];
+        assert_eq!(
+            guarded_send_exact_form_value_sha256(&single, &["sendfromemail", "fromemail"], true),
+            Some(sha256_hex("sender@example.invalid"))
+        );
+
+        let duplicate = vec![
+            (
+                "sendfromemail".to_string(),
+                "sender@example.invalid".to_string(),
+            ),
+            ("fromemail".to_string(), "other@example.invalid".to_string()),
+        ];
+        assert!(guarded_send_exact_form_value_sha256(
+            &duplicate,
+            &["sendfromemail", "fromemail"],
+            true
+        )
+        .is_none());
+        assert!(guarded_send_exact_form_value_sha256(
+            &[("sendfromemail".to_string(), "  ".to_string())],
+            &["sendfromemail", "fromemail"],
+            true
+        )
+        .is_none());
+        assert!(guarded_send_exact_form_value_sha256(
+            &[
+                (
+                    "sendfromemail".to_string(),
+                    "sender@example.invalid".to_string(),
+                ),
+                ("fromemail".to_string(), "  ".to_string()),
+            ],
+            &["sendfromemail", "fromemail"],
+            true
+        )
+        .is_none());
+        assert!(guarded_send_form_token(&[("csrfToken".to_string(), "  ".to_string())]).is_err());
+        assert!(guarded_send_form_token(&[
+            ("csrfToken".to_string(), "provider-token".to_string()),
+            ("_token".to_string(), "  ".to_string()),
+        ])
+        .is_err());
+    }
 
     #[test]
     fn campaign_body_audit_counts_tokens_without_returning_body() {
@@ -4351,55 +6095,37 @@ mod tests {
     }
 
     #[test]
-    fn schedule_job_identity_delta_requires_one_exact_new_identity() {
-        let before_html = r#"
-            <tr>
-              <td><input type="checkbox" name="jobs[]" value="42"></td>
-              <td><a href="index.php?Page=Schedule&amp;Action=Approve&amp;job=42">Approve</a></td>
-            </tr>
-        "#;
-        let after_html = r#"
-            <tr>
-              <td><input type="checkbox" name="jobs[]" value="42"></td>
-              <td><a href="index.php?Page=Schedule&amp;Action=Approve&amp;job=42">Approve</a></td>
-            </tr>
-            <tr>
-              <td><input type="checkbox" name="jobs[]" value="43"></td>
-              <td><a href="index.php?Page=Schedule&Action=Pause&job=43">Pause</a></td>
-            </tr>
-            <a href="index.php?Page=Newsletters&Action=View&id=99">View</a>
-        "#;
+    fn queue_job_identity_delta_requires_one_exact_new_identity() {
+        let before = [42_u64].into_iter().collect();
+        let after = [42_u64, 43].into_iter().collect();
 
         assert_eq!(
-            schedule_job_identity_delta(
-                &schedule_job_ids_from_html(before_html),
-                &schedule_job_ids_from_html(after_html),
-            ),
-            ScheduleJobIdentityDelta::Unique(43)
+            queue_job_identity_delta(&before, &after),
+            QueueJobIdentityDelta::Unique(43)
         );
     }
 
     #[test]
-    fn schedule_job_identity_delta_rejects_no_change_removal_and_multiple_additions() {
+    fn queue_job_identity_delta_rejects_no_change_removal_and_multiple_additions() {
         let before = [41_u64, 42].into_iter().collect();
         let unchanged = [41_u64, 42].into_iter().collect();
         let removed = [42_u64].into_iter().collect();
         let multiple_added = [41_u64, 42, 43, 44].into_iter().collect();
 
         assert_eq!(
-            schedule_job_identity_delta(&before, &unchanged),
-            ScheduleJobIdentityDelta::None
+            queue_job_identity_delta(&before, &unchanged),
+            QueueJobIdentityDelta::None
         );
         assert_eq!(
-            schedule_job_identity_delta(&before, &removed),
-            ScheduleJobIdentityDelta::Ambiguous {
+            queue_job_identity_delta(&before, &removed),
+            QueueJobIdentityDelta::Ambiguous {
                 added: 0,
                 removed: 1,
             }
         );
         assert_eq!(
-            schedule_job_identity_delta(&before, &multiple_added),
-            ScheduleJobIdentityDelta::Ambiguous {
+            queue_job_identity_delta(&before, &multiple_added),
+            QueueJobIdentityDelta::Ambiguous {
                 added: 2,
                 removed: 0,
             }
@@ -4421,69 +6147,512 @@ mod tests {
     }
 
     #[test]
-    fn guarded_send_response_loss_returns_nonterminal_receipt_after_dispatch() {
-        let queue = Vec::new();
-        let stats = Vec::new();
-        let schedule_job_ids = BTreeSet::new();
-        let input = GuardedSendReconcileInput {
-            send_form: (
-                Url::parse("https://example.test/admin/index.php?Page=Send&Action=Step4")
-                    .expect("synthetic send URL"),
-                Vec::new(),
-            ),
-            campaign_id: 9001,
-            list_ids: &[8001],
-            expected_body_sha256: None,
-            queue_before: &queue,
-            schedule_job_ids_before: &schedule_job_ids,
-            stats_before: &stats,
-            expected_recipient_count: 25,
-            max_rows: 25,
-        };
-        let evidence = guarded_send_evidence_from_progress(
-            &input,
-            GuardedSendProgress::default(),
-            Some(
-                "the final request was dispatched but its HTTP response was unavailable; application outcome remains uncertain",
-            ),
+    fn native_response_bound_job_remains_nonterminal_with_read_only_follow_up() {
+        let server = spawn_response_loss_readback_server(
+            ResponseLossReadbackFixture::NativeResponseBoundJob,
         );
+        let client = response_loss_client(&server.base_url);
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 25),
+                |request| request.send().map_err(|_| ()),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
 
+        assert_eq!(evidence.status_code, Some(302));
+        assert!(evidence.redirected);
+        assert_eq!(evidence.reconciliation.status, SendApplyStatus::Queued);
+        assert_eq!(evidence.reconciliation.job_id, Some(43));
+        assert!(evidence.reconciliation.follow_up_contract.is_some());
+        assert!(evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .is_none());
+        assert!(!evidence.reconciliation.terminal_application_proven());
+        assert!(evidence
+            .reconciliation
+            .notes
+            .iter()
+            .any(|note| note.contains("native response-bound job")));
+        let requests = server.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.starts_with("POST ") && request.contains("Page=Send&Action=Step4")
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("Page=Send&Action=Send&job=43"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn response_loss_never_binds_same_campaign_job_inserted_after_confirmed_capture() {
+        let server = spawn_response_loss_readback_server(
+            ResponseLossReadbackFixture::SameCampaignAfterConfirmed,
+        );
+        let client = response_loss_client(&server.base_url);
+        let mut attempted = false;
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 25),
+                |_| {
+                    server.mark_dispatched();
+                    attempted = true;
+                    Err::<reqwest::blocking::Response, _>(())
+                },
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(attempted);
         assert_eq!(evidence.status_code, None);
         assert!(!evidence.redirected);
-        assert_eq!(evidence.reconciliation.status, SendApplyStatus::Posted);
+        assert_eq!(
+            evidence.reconciliation.status,
+            SendApplyStatus::ResponseUncertain
+        );
         assert!(!evidence.reconciliation.terminal_application_proven());
         assert_eq!(evidence.reconciliation.sent_count, None);
+        assert_eq!(evidence.reconciliation.job_id, None);
+        assert!(evidence.reconciliation.follow_up_contract.is_none());
+        let recovery = evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .as_ref()
+            .expect("response uncertainty recovery contract");
+        assert_eq!(recovery.decision, SendUncertaintyDecision::HoldDoNotRetry);
+        assert!(!recovery.retry_authorized);
+        assert!(!recovery.mutation_authorized);
+        assert!(!recovery.terminal_success_authorized);
+        assert!(recovery.baselines_authenticated);
+        assert!(recovery.baselines_captured_before_dispatch);
+        assert_eq!(
+            recovery.baseline_capture_stage,
+            SendBaselineCaptureStage::FinalPreDispatch
+        );
+        assert!(recovery.baseline_context_verified);
+        assert!(recovery.baseline_identity_stable);
+        assert!(recovery.baseline_inventory_complete);
+        assert!(recovery.reconciliation_attempted_in_same_invocation);
+        assert!(recovery.readback_complete);
+        assert_eq!(recovery.schedule_job_ids_before, Vec::<u64>::new());
+        assert_eq!(recovery.manage_job_ids_before, Vec::<u64>::new());
+        assert_eq!(recovery.campaign_job_ids_before, Vec::<u64>::new());
+        assert_eq!(
+            recovery.identity_state,
+            SendUncertaintyIdentityState::AmbiguousOrUnbound
+        );
+        assert_eq!(recovery.observed_job_id, None);
+        assert_eq!(
+            recovery.next_action,
+            SendUncertaintyNextAction::HoldForBoundedReadOnlyReconciliation
+        );
+        assert!(recovery.status_follow_up.is_none());
+        assert!(recovery.guidance.contains("do not retry or resend"));
+        assert!(recovery.guidance.contains("singleton difference"));
         assert!(evidence
             .reconciliation
             .proof_gaps
             .iter()
-            .any(|gap| gap.contains("HTTP response was unavailable")));
+            .any(|gap| gap.contains("do not bind that concurrent job")));
+        assert!(evidence
+            .reconciliation
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("whether it reached the application remains uncertain")));
         assert!(evidence
             .reconciliation
             .notes
             .iter()
             .any(|note| note.contains("nonterminal reconciliation receipt")));
+        let warnings = seed_send_apply_warnings(&evidence.reconciliation);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("response-uncertain")));
+        assert!(warnings.iter().all(|warning| !warning.contains("posted")));
+        assert!(evidence
+            .reconciliation
+            .proof_gaps
+            .iter()
+            .all(|gap| !gap.contains("posted")));
+        let evidence_note =
+            guarded_send_boundary_evidence_note(evidence.reconciliation.status, "seed-send");
+        assert!(evidence_note.contains("request was attempted"));
+        assert!(!evidence_note.contains("posted"));
+        let requests = server.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("Page=Schedule"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("Page=Stats"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("Page=Newsletters&Action=Manage"))
+                .count(),
+            3
+        );
+        assert_eq!(requests.len(), 9);
+        assert!(requests[0].contains("Page=Schedule"));
+        assert!(requests[1].contains("Page=Newsletters&Action=Manage"));
+        assert!(requests[2].contains("Page=Stats"));
+        assert!(requests[3].contains("Page=Stats"));
+        assert!(requests[4].contains("Page=Schedule"));
+        assert!(requests[5].contains("Page=Newsletters&Action=Manage"));
+        assert!(requests[6].contains("Page=Schedule"));
+        assert!(requests[7].contains("Page=Newsletters&Action=Manage"));
+        assert!(requests[8].contains("Page=Stats"));
+        assert!(requests.iter().all(|request| request.starts_with("GET ")));
+        assert!(requests
+            .iter()
+            .all(|request| !request.contains("Page=Send")));
+    }
+
+    #[test]
+    fn same_campaign_job_present_before_first_capture_stays_in_the_baseline() {
+        let server =
+            spawn_response_loss_readback_server(ResponseLossReadbackFixture::SameCampaignGapJob);
+        let client = response_loss_client(&server.base_url);
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 25),
+                |_| {
+                    server.mark_dispatched();
+                    Err::<reqwest::blocking::Response, _>(())
+                },
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(evidence.reconciliation.job_id, None);
+        let recovery = evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .as_ref()
+            .expect("response uncertainty recovery contract");
+        assert_eq!(
+            recovery.identity_state,
+            SendUncertaintyIdentityState::NoNewJob
+        );
+        assert_eq!(recovery.schedule_job_ids_before, vec![43]);
+        assert_eq!(recovery.manage_job_ids_before, vec![43]);
+        assert_eq!(recovery.campaign_job_ids_before, vec![43]);
+        assert_eq!(recovery.observed_job_id, None);
+        assert!(recovery.status_follow_up.is_none());
+        assert!(!recovery.retry_authorized);
+        assert!(!recovery.mutation_authorized);
+        assert!(!recovery.terminal_success_authorized);
+    }
+
+    #[test]
+    fn same_campaign_job_inserted_between_captures_refuses_before_dispatch() {
+        let server = spawn_response_loss_readback_server(
+            ResponseLossReadbackFixture::SameCampaignBetweenCaptures,
+        );
+        let client = response_loss_client(&server.base_url);
+        let mut attempted = false;
+        let error = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 25),
+                |_| {
+                    attempted = true;
+                    Err::<reqwest::blocking::Response, _>(())
+                },
+            )
+            .expect_err("same-campaign insertion between captures must refuse");
+
+        assert!(!attempted);
+        assert!(error
+            .to_string()
+            .contains("baseline identities changed during bounded capture"));
+        assert!(server
+            .requests()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
+    }
+
+    #[test]
+    fn guarded_send_response_loss_with_one_under_cap_holds_without_retry() {
+        let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::NoNewJob);
+        let client = response_loss_client(&server.base_url);
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 3),
+                |_| {
+                    server.mark_dispatched();
+                    Err::<reqwest::blocking::Response, _>(())
+                },
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            evidence.reconciliation.status,
+            SendApplyStatus::ResponseUncertain
+        );
+        assert_eq!(evidence.reconciliation.job_id, None);
+        assert!(evidence.reconciliation.follow_up_contract.is_none());
+        let recovery = evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .as_ref()
+            .expect("response uncertainty recovery contract");
+        assert!(recovery.readback_complete);
+        assert_eq!(recovery.baseline_max_rows, 3);
+        assert_eq!(
+            recovery.identity_state,
+            SendUncertaintyIdentityState::NoNewJob
+        );
+        assert_eq!(recovery.observed_job_id, None);
+        assert!(recovery.status_follow_up.is_none());
+        assert_eq!(
+            recovery.next_action,
+            SendUncertaintyNextAction::HoldForBoundedReadOnlyReconciliation
+        );
+        assert!(!recovery.retry_authorized);
+        assert!(recovery.guidance.contains("absence of a new identity"));
+    }
+
+    #[test]
+    fn guarded_send_response_loss_with_ambiguous_jobs_holds_without_selection() {
+        let server =
+            spawn_response_loss_readback_server(ResponseLossReadbackFixture::AmbiguousJobs);
+        let client = response_loss_client(&server.base_url);
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 25),
+                |_| {
+                    server.mark_dispatched();
+                    Err::<reqwest::blocking::Response, _>(())
+                },
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            evidence.reconciliation.status,
+            SendApplyStatus::ResponseUncertain
+        );
+        assert_eq!(evidence.reconciliation.job_id, None);
+        let recovery = evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .as_ref()
+            .expect("response uncertainty recovery contract");
+        assert!(recovery.readback_complete);
+        assert_eq!(
+            recovery.identity_state,
+            SendUncertaintyIdentityState::AmbiguousOrUnbound
+        );
+        assert!(recovery.status_follow_up.is_none());
+        assert!(!recovery.retry_authorized);
+        assert!(recovery.guidance.contains("never choose by row order"));
+        assert!(evidence
+            .reconciliation
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("2 added")));
+    }
+
+    #[test]
+    fn guarded_send_response_loss_with_capped_post_readback_marks_recovery_incomplete() {
+        let server = spawn_response_loss_readback_server(
+            ResponseLossReadbackFixture::PostDispatchCappedStats,
+        );
+        let client = response_loss_client(&server.base_url);
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 3),
+                |_| {
+                    server.mark_dispatched();
+                    Err::<reqwest::blocking::Response, _>(())
+                },
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            evidence.reconciliation.status,
+            SendApplyStatus::ResponseUncertain
+        );
+        let recovery = evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .as_ref()
+            .expect("response uncertainty recovery contract");
+        assert!(!recovery.readback_complete);
+        assert_eq!(
+            recovery.identity_state,
+            SendUncertaintyIdentityState::ReadbackIncomplete
+        );
+        assert!(recovery.status_follow_up.is_none());
+        assert!(!recovery.retry_authorized);
+        assert!(!recovery.mutation_authorized);
+        assert!(recovery.guidance.contains("partial or capped state"));
+        assert!(evidence
+            .reconciliation
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("Stats identity readback was incomplete")));
+    }
+
+    #[test]
+    fn final_pre_dispatch_baseline_rejects_caps_and_pagination_without_dispatch() {
+        for (mode, expected) in [
+            (
+                ResponseLossReadbackFixture::ScheduleOverCap,
+                "reached the configured row cap",
+            ),
+            (
+                ResponseLossReadbackFixture::ScheduleExactlyAtCap,
+                "reached the configured row cap",
+            ),
+            (
+                ResponseLossReadbackFixture::ManageExactlyAtCap,
+                "reached the configured row cap",
+            ),
+            (
+                ResponseLossReadbackFixture::StatsPagination,
+                "exposed pagination",
+            ),
+        ] {
+            let server = spawn_response_loss_readback_server(mode);
+            let client = response_loss_client(&server.base_url);
+            let mut attempted = false;
+            let error = client
+                .post_guarded_send_and_reconcile_with_dispatch(
+                    response_loss_input(&server.base_url, 3),
+                    |_| {
+                        attempted = true;
+                        Err::<reqwest::blocking::Response, _>(())
+                    },
+                )
+                .expect_err("incomplete pre-dispatch baseline must fail closed");
+
+            assert!(!attempted, "{mode:?} reached the dispatch closure");
+            assert!(
+                error.to_string().contains(expected),
+                "{mode:?} returned unexpected error: {error}"
+            );
+            assert!(server
+                .requests()
+                .iter()
+                .all(|request| request.starts_with("GET ")));
+        }
+    }
+
+    #[test]
+    fn final_pre_dispatch_baseline_rejects_identity_movement_without_dispatch() {
+        let server = spawn_response_loss_readback_server(
+            ResponseLossReadbackFixture::BaselineFreshnessMismatch,
+        );
+        let client = response_loss_client(&server.base_url);
+        let mut attempted = false;
+        let error = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(&server.base_url, 25),
+                |_| {
+                    attempted = true;
+                    Err::<reqwest::blocking::Response, _>(())
+                },
+            )
+            .expect_err("moving baseline must fail closed");
+
+        assert!(!attempted);
+        assert!(error
+            .to_string()
+            .contains("baseline identities changed during bounded capture"));
+    }
+
+    #[test]
+    fn final_pre_dispatch_baseline_context_mismatch_cannot_reach_dispatch() {
+        let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::NoNewJob);
+        let client = response_loss_client(&server.base_url);
+        let mut input = client
+            .capture_guarded_send_baseline(response_loss_input(&server.base_url, 25))
+            .unwrap_or_else(|err| panic!("{err}"));
+        input.baseline_context.campaign_id = 9002;
+        let mut attempted = false;
+        let error = client
+            .post_guarded_send_from_baseline_with_dispatch(input, |_| {
+                attempted = true;
+                Err::<reqwest::blocking::Response, _>(())
+            })
+            .expect_err("mismatched context must fail closed");
+
+        assert!(!attempted);
+        assert!(error
+            .to_string()
+            .contains("baseline context or freshness did not match the exact request"));
+    }
+
+    #[test]
+    fn atomic_authority_mismatch_cannot_reach_baseline_or_dispatch() {
+        let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::NoNewJob);
+        let client = response_loss_client(&server.base_url);
+        let mut input = response_loss_input(&server.base_url, 25);
+        input.atomic_authority_binding.submission_sha256 = "mismatched-submission".to_string();
+        let mut attempted = false;
+        let error = client
+            .post_guarded_send_and_reconcile_with_dispatch(input, |_| {
+                attempted = true;
+                Err::<reqwest::blocking::Response, _>(())
+            })
+            .expect_err("mismatched atomic binding must fail closed");
+
+        assert!(!attempted);
+        assert!(server.requests().is_empty());
+        assert!(error
+            .to_string()
+            .contains("did not bind the exact final submission"));
     }
 
     #[test]
     fn guarded_send_uncertainty_preserves_only_a_nonconflicting_job_follow_up() {
-        let queue = Vec::new();
-        let stats = Vec::new();
-        let schedule_job_ids = BTreeSet::new();
+        let send_form = (
+            Url::parse("https://example.test/admin/index.php?Page=Send&Action=Step4")
+                .expect("synthetic send URL"),
+            vec![("csrfToken".to_string(), "synthetic-token".to_string())],
+        );
+        let atomic_authority_binding = GuardedSendAtomicAuthorityBinding::synthetic(&send_form);
         let input = GuardedSendReconcileInput {
-            send_form: (
-                Url::parse("https://example.test/admin/index.php?Page=Send&Action=Step4")
-                    .expect("synthetic send URL"),
-                Vec::new(),
-            ),
+            send_form,
+            atomic_authority_binding: atomic_authority_binding.clone(),
             campaign_id: 9001,
             list_ids: &[8001],
             expected_body_sha256: None,
-            queue_before: &queue,
-            schedule_job_ids_before: &schedule_job_ids,
-            stats_before: &stats,
             expected_recipient_count: 25,
             max_rows: 25,
+            baseline_context: GuardedSendBaselineContext {
+                campaign_id: 9001,
+                list_ids: vec![8001],
+                expected_body_sha256: None,
+                expected_recipient_count: 25,
+                max_rows: 25,
+                authority_submission_sha256: atomic_authority_binding.submission_sha256.clone(),
+                authority_state_version: atomic_authority_binding.state_version.clone(),
+                capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
+            },
+            queue_before: Vec::new(),
+            schedule_job_ids_before: BTreeSet::new(),
+            manage_job_ids_before: BTreeSet::new(),
+            campaign_job_ids_before: BTreeSet::new(),
+            queue_job_ids_before: BTreeSet::new(),
+            stats_before: Vec::new(),
+            stats_identity_before: empty_stats_identity_inventory(),
+            baseline_identity_stable: true,
         };
         let mut progress = GuardedSendProgress {
             status_code: Some(200),
@@ -4513,48 +6682,10 @@ mod tests {
     }
 
     #[test]
-    fn guarded_send_final_form_post_binds_interspire_8_request_campaign_and_list() {
-        let html = r#"
-            <form action="index.php?Page=Send&Action=Step4&csrfToken=abc">
-              <input type="hidden" name="csrfToken" value="abc">
-              <select name="newsletter">
-                <option value="0" selected>Please select an email campaign</option>
-                <option value="2">Example Campaign</option>
-              </select>
-              <input name="sendfromemail" value="sender@example.invalid">
-              <input type="checkbox" name="trackopens" value="1" checked>
-              <input type="submit" name="SendButton" value="Send now">
-            </form>
-        "#;
-
-        let (url, pairs) =
-            guarded_send_final_form_post_for_request("https://example.test/admin/", html, 2, &[9])
-                .expect("request-bound guarded send final form post");
-
-        assert!(url.as_str().contains("Page=Send&Action=Step4"));
-        assert_eq!(
-            pairs
-                .iter()
-                .filter(|(name, _)| name.eq_ignore_ascii_case("newsletter"))
-                .map(|(_, value)| value.as_str())
-                .collect::<Vec<_>>(),
-            vec!["2"]
-        );
-        assert_eq!(
-            pairs
-                .iter()
-                .filter(|(name, _)| name.eq_ignore_ascii_case("lists[]"))
-                .map(|(_, value)| value.as_str())
-                .collect::<Vec<_>>(),
-            vec!["9"]
-        );
-        assert!(pairs.contains(&("SendButton".to_string(), "Send now".to_string())));
-    }
-
-    #[test]
-    fn guarded_send_final_form_post_replaces_stale_list_controls() {
+    fn guarded_send_final_form_post_preserves_provider_authority_without_reconstruction() {
         let html = r#"
             <form action="index.php?Page=Send&Action=Step4">
+              <input type="hidden" name="csrfToken" value="provider-token">
               <input type="hidden" name="newsletter" value="2">
               <input type="hidden" name="lists[]" value="1">
               <input type="hidden" name="listid" value="4">
@@ -4562,53 +6693,21 @@ mod tests {
             </form>
         "#;
 
-        let (_, pairs) =
-            guarded_send_final_form_post_for_request("https://example.test/admin/", html, 2, &[9])
-                .expect("request-bound guarded send final form post");
+        let (_, pairs) = guarded_send_final_form_post("https://example.test/admin/", html)
+            .expect("provider-derived guarded send final form post");
 
         assert_eq!(
             pairs
                 .iter()
-                .filter(|(name, _)| name.eq_ignore_ascii_case("lists[]"))
+                .filter(|(name, _)| is_guarded_send_list_selection_name(name))
                 .map(|(_, value)| value.as_str())
                 .collect::<Vec<_>>(),
-            vec!["9"]
+            vec!["1", "4"]
         );
-        assert!(!pairs
+        assert!(pairs
             .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("listid") && value == "4"));
-        assert!(!pairs
-            .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("lists[]") && value == "1"));
-    }
-
-    #[test]
-    fn guarded_send_final_form_post_replaces_all_stale_campaign_controls() {
-        let html = r#"
-            <form action="index.php?Page=Send&Action=Step4">
-              <input type="hidden" name="newsletter" value="1">
-              <input type="hidden" name="NewsletterChosen" value="1">
-              <select name="campaignid">
-                <option value="1" selected>Old Campaign</option>
-                <option value="2">Requested Campaign</option>
-              </select>
-              <input type="hidden" name="lists[]" value="9">
-              <input type="submit" name="SendButton" value="Send now">
-            </form>
-        "#;
-
-        let (_, pairs) =
-            guarded_send_final_form_post_for_request("https://example.test/admin/", html, 2, &[9])
-                .expect("request-bound guarded send final form post");
-
-        assert_eq!(
-            pairs
-                .iter()
-                .filter(|(name, _)| is_guarded_send_campaign_selection_name(name))
-                .map(|(name, value)| (name.as_str(), value.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("newsletter", "2")]
-        );
+            .any(|(name, value)| name.eq_ignore_ascii_case("newsletter") && value == "2"));
+        assert!(pairs.iter().all(|(_, value)| value != "9"));
     }
 
     #[test]
@@ -4759,6 +6858,7 @@ mod tests {
             "Email Campaign Statistics".to_string(),
             "Campaign Alpha Renamed 'List One&#' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 4 1 View Export Print Delete".to_string(),
         ];
+        let stats_identity = stats_identity_inventory(&[(70, 25)]);
 
         let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
             campaign_id: 9001,
@@ -4768,11 +6868,24 @@ mod tests {
             queue_after: &queue,
             stats_before: &stats_before,
             stats_after: &stats_after,
+            schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
+            stats_identity_before: &stats_identity,
+            stats_identity_after: &stats_identity,
             expected_recipient_count: 999,
+            baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: Some(7001),
+            job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 2,
             approved_cron_schedule: false,
+            response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: vec!["send popup loop stopped after a repeated route".to_string()],
         });
@@ -4803,6 +6916,8 @@ mod tests {
         let stats_after = vec![
             "Campaign Beta 'List Two' July 1 2026, 11:43 am July 1 2026, 11:44 am 25 0 0 View Export Print Delete".to_string(),
         ];
+        let stats_identity_before = stats_identity_inventory(&[(70, 25)]);
+        let stats_identity_after = stats_identity_inventory(&[(71, 25)]);
 
         assert_eq!(
             stable_stats_identity_delta(&stats_before, &stats_after),
@@ -4820,11 +6935,24 @@ mod tests {
             queue_after: &queue,
             stats_before: &stats_before,
             stats_after: &stats_after,
+            schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
+            stats_identity_before: &stats_identity_before,
+            stats_identity_after: &stats_identity_after,
             expected_recipient_count: 25,
+            baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: Some(7001),
+            job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
+            response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -4839,7 +6967,7 @@ mod tests {
     }
 
     #[test]
-    fn guarded_send_terminal_reconciliation_rejects_unbound_added_stats_identity() {
+    fn guarded_send_terminal_reconciliation_rejects_stats_identity_while_job_is_active() {
         let queue_before = Vec::new();
         let queue_after = vec!["Campaign Alpha Waiting Action Job".to_string()];
         let stats_before = vec![
@@ -4849,6 +6977,8 @@ mod tests {
             "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
             "Campaign Gamma 'List Three' July 1 2026, 11:45 am July 1 2026, 11:46 am 25 0 0 View Export Print Delete".to_string(),
         ];
+        let stats_identity_before = stats_identity_inventory(&[(70, 25)]);
+        let stats_identity_after = stats_identity_inventory(&[(70, 25), (71, 25)]);
 
         let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
             campaign_id: 9001,
@@ -4858,11 +6988,24 @@ mod tests {
             queue_after: &queue_after,
             stats_before: &stats_before,
             stats_after: &stats_after,
+            schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
+            stats_identity_before: &stats_identity_before,
+            stats_identity_after: &stats_identity_after,
             expected_recipient_count: 25,
+            baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: Some(7001),
+            job_active_after: Some(true),
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
+            response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -4875,7 +7018,112 @@ mod tests {
         assert!(report
             .proof_gaps
             .iter()
-            .any(|gap| gap.contains("did not expose a durable stat id")));
+            .any(|gap| gap.contains("still exposed an active")));
+    }
+
+    #[test]
+    fn guarded_send_terminal_reconciliation_rejects_unrelated_same_count_stats_row() {
+        let queue = Vec::new();
+        let stats_identity_before = stats_identity_inventory(&[(70, 25)]);
+        let mut stats_identity_after = stats_identity_before.clone();
+        stats_identity_after
+            .rows
+            .extend(stats_identity_inventory_for("Campaign Beta", &[(71, 25)]).rows);
+
+        let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &queue,
+            queue_after: &queue,
+            stats_before: &queue,
+            stats_after: &queue,
+            schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
+            stats_identity_before: &stats_identity_before,
+            stats_identity_after: &stats_identity_after,
+            expected_recipient_count: 25,
+            baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
+            job_id: Some(7001),
+            job_active_after: Some(false),
+            smtp_reason: None,
+            popup_steps: 1,
+            approved_cron_schedule: false,
+            response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
+            proof_gaps: Vec::new(),
+            notes: Vec::new(),
+        });
+
+        assert_eq!(report.status, SendApplyStatus::Queued);
+        assert!(!report.terminal_application_proven());
+        assert_eq!(report.stat_id, None);
+        assert!(report
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("no application-native association")));
+    }
+
+    #[test]
+    fn concurrent_same_name_same_count_stats_row_remains_nonterminal() {
+        let queue = Vec::new();
+        let stats_before = vec![
+            "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
+        ];
+        let stats_after = vec![
+            "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
+            "Campaign Alpha 'List Two' July 1 2026, 11:43 am July 1 2026, 11:44 am 25 0 0 View Export Print Delete".to_string(),
+        ];
+        let stats_identity_before = stats_identity_inventory(&[(70, 25)]);
+        let stats_identity_after = stats_identity_inventory(&[(70, 25), (71, 25)]);
+
+        let report = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
+            campaign_id: 9001,
+            list_ids: &[8001],
+            expected_body_sha256: None,
+            queue_before: &queue,
+            queue_after: &queue,
+            stats_before: &stats_before,
+            stats_after: &stats_after,
+            schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
+            stats_identity_before: &stats_identity_before,
+            stats_identity_after: &stats_identity_after,
+            expected_recipient_count: 25,
+            baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
+            job_id: Some(7001),
+            job_active_after: Some(false),
+            smtp_reason: None,
+            popup_steps: 1,
+            approved_cron_schedule: false,
+            response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
+            proof_gaps: Vec::new(),
+            notes: Vec::new(),
+        });
+
+        assert_eq!(report.status, SendApplyStatus::Queued);
+        assert!(!report.terminal_application_proven());
+        assert_eq!(report.job_id, Some(7001));
+        assert_eq!(report.stat_id, None);
+        assert_eq!(report.sent_count, None);
+        assert_eq!(report.failed_count, None);
+        assert_eq!(report.unsent_count, None);
+        assert!(report.follow_up_contract.is_some());
+        assert!(report
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("no application-native association")));
     }
 
     #[test]
@@ -4889,11 +7137,24 @@ mod tests {
             queue_after: &rows,
             stats_before: &rows,
             stats_after: &rows,
+            schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
+            stats_identity_before: &empty_stats_identity_inventory(),
+            stats_identity_after: &empty_stats_identity_inventory(),
             expected_recipient_count: 25,
+            baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: None,
+            job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 0,
             approved_cron_schedule: false,
+            response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -4905,11 +7166,24 @@ mod tests {
             queue_after: &rows,
             stats_before: &rows,
             stats_after: &rows,
+            schedule_job_ids_before: &BTreeSet::new(),
+            manage_job_ids_before: &BTreeSet::new(),
+            campaign_job_ids_before: &BTreeSet::new(),
+            stats_identity_before: &empty_stats_identity_inventory(),
+            stats_identity_after: &empty_stats_identity_inventory(),
             expected_recipient_count: 25,
+            baseline_max_rows: 25,
+            baseline_context_verified: true,
+            baseline_identity_stable: true,
+            baseline_capture_stage: SendBaselineCaptureStage::FinalPreDispatch,
             job_id: Some(7001),
+            job_active_after: Some(false),
             smtp_reason: Some("synthetic transport failure".to_string()),
             popup_steps: 1,
             approved_cron_schedule: false,
+            response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5020,7 +7294,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_send_apply_warnings_name_the_missing_bound_stats_identity_for_queued_state() {
+    fn seed_send_apply_warnings_name_the_missing_native_stats_association() {
         let reconciliation = SendReconciliationReport::new(
             SendApplyStatus::Queued,
             Some(41),
@@ -5043,10 +7317,10 @@ mod tests {
 
         assert!(warnings
             .iter()
-            .any(|warning| warning.contains("bound terminal Stats identity")));
+            .any(|warning| warning.contains("no application-native job-to-Stats association")));
         assert!(warnings
             .iter()
-            .any(|warning| warning.contains("follow-up contract")));
+            .any(|warning| warning.contains("nonterminal readback context")));
         assert_eq!(reconciliation.sent_count, None);
     }
 

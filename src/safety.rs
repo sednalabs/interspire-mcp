@@ -27,6 +27,7 @@ pub enum AdminReadPage {
     SendStart,
     Schedule,
     Stats,
+    StatsNewsletterSummary { stat_id: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +77,9 @@ impl AdminReadPage {
             Self::SendStart => "index.php?Page=Send".to_string(),
             Self::Schedule => "index.php?Page=Schedule".to_string(),
             Self::Stats => "index.php?Page=Stats".to_string(),
+            Self::StatsNewsletterSummary { stat_id } => {
+                format!("index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid={stat_id}")
+            }
         }
     }
 }
@@ -523,8 +527,11 @@ pub fn classify_allowed_admin_get(url: &Url) -> Result<AdminReadPage, Interspire
                 .iter()
                 .find(|(key, _)| key.eq_ignore_ascii_case("id"))
                 .and_then(|(_, value)| value.parse::<u64>().ok())
+                .filter(|id| *id > 0)
                 .ok_or_else(|| {
-                    InterspireError::Safety("newsletter edit page missing numeric id".to_string())
+                    InterspireError::Safety(
+                        "newsletter edit page missing positive numeric id".to_string(),
+                    )
                 })?;
             Ok(AdminReadPage::NewsletterEdit { id })
         }
@@ -533,6 +540,51 @@ pub fn classify_allowed_admin_get(url: &Url) -> Result<AdminReadPage, Interspire
             Ok(AdminReadPage::Schedule)
         }
         (Some("Stats"), None) if only_query_keys(&pairs, &["Page"]) => Ok(AdminReadPage::Stats),
+        (Some("Stats"), Some(action)) if action.eq_ignore_ascii_case("Newsletters") => {
+            ensure_only_query_keys(
+                &pairs,
+                &[
+                    "Page",
+                    "Action",
+                    "SubAction",
+                    "id",
+                    "statid",
+                    "SortBy",
+                    "Direction",
+                    "DisplayPage",
+                    "PerPage",
+                ],
+            )?;
+            let subaction = pairs
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("SubAction"))
+                .map(|(_, value)| value.to_string());
+            if !subaction
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("Step1"))
+            {
+                return Err(InterspireError::Safety(
+                    "Stats newsletter summary route requires SubAction=Step1".to_string(),
+                ));
+            }
+            let ids = pairs
+                .iter()
+                .filter(|(key, _)| {
+                    key.eq_ignore_ascii_case("id") || key.eq_ignore_ascii_case("statid")
+                })
+                .map(|(_, value)| value.parse::<u64>().ok())
+                .collect::<Vec<_>>();
+            let stat_id = match ids.as_slice() {
+                [Some(stat_id)] if *stat_id > 0 => *stat_id,
+                _ => {
+                    return Err(InterspireError::Safety(
+                        "Stats newsletter summary route requires one positive stat identity"
+                            .to_string(),
+                    ))
+                }
+            };
+            Ok(AdminReadPage::StatsNewsletterSummary { stat_id })
+        }
         _ => Err(InterspireError::Safety(format!(
             "admin GET is not in the read allowlist: Page={page:?} Action={action:?}"
         ))),
@@ -812,16 +864,7 @@ pub fn classify_allowed_guarded_send_popup(url: &Url) -> Result<(), InterspireEr
         )));
     }
 
-    let has_numeric_job = ["job", "jobid", "id", "sendid"].iter().any(|key| {
-        query_value(&pairs, key)
-            .as_deref()
-            .is_some_and(|value| value.parse::<u64>().is_ok())
-    });
-    if !has_numeric_job {
-        return Err(InterspireError::Safety(
-            "guarded send popup route missing numeric job identifier".to_string(),
-        ));
-    }
+    guarded_send_popup_job_id_from_pairs(&pairs)?;
     if let Some(started) = query_value(&pairs, "Started").or_else(|| query_value(&pairs, "started"))
     {
         if !matches!(started.as_str(), "0" | "1") {
@@ -832,6 +875,11 @@ pub fn classify_allowed_guarded_send_popup(url: &Url) -> Result<(), InterspireEr
     }
 
     Ok(())
+}
+
+pub fn guarded_send_popup_job_id(url: &Url) -> Result<u64, InterspireError> {
+    classify_allowed_guarded_send_popup(url)?;
+    guarded_send_popup_job_id_from_pairs(&url.query_pairs().collect::<Vec<_>>())
 }
 
 pub fn classify_allowed_guarded_schedule_approval(url: &Url) -> Result<(), InterspireError> {
@@ -1421,6 +1469,48 @@ fn query_value(
         .map(|(_, value)| value.to_string())
 }
 
+fn guarded_send_popup_job_id_from_pairs(
+    pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
+) -> Result<u64, InterspireError> {
+    let aliases = ["job", "jobid", "id", "sendid"];
+    let mut identities = pairs
+        .iter()
+        .filter(|(key, _)| aliases.iter().any(|alias| key.eq_ignore_ascii_case(alias)))
+        .map(|(_, value)| {
+            value.parse::<u64>().map_err(|_| {
+                InterspireError::Safety(
+                    "guarded send popup job identifier must be a positive integer".to_string(),
+                )
+            })
+        });
+
+    let first = identities.next().transpose()?.ok_or_else(|| {
+        InterspireError::Safety(
+            "guarded send popup route missing numeric job identifier".to_string(),
+        )
+    })?;
+    if first == 0 {
+        return Err(InterspireError::Safety(
+            "guarded send popup job identifier must be a positive integer".to_string(),
+        ));
+    }
+    for identity in identities {
+        let identity = identity?;
+        if identity == 0 {
+            return Err(InterspireError::Safety(
+                "guarded send popup job identifier must be a positive integer".to_string(),
+            ));
+        }
+        if identity != first {
+            return Err(InterspireError::Safety(
+                "guarded send popup route exposed conflicting job identifiers".to_string(),
+            ));
+        }
+    }
+
+    Ok(first)
+}
+
 fn subscriber_search_list_id(
     pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
 ) -> Result<u64, InterspireError> {
@@ -1696,6 +1786,50 @@ mod tests {
             classify_allowed_admin_get(&url("index.php?Page=Stats")).ok(),
             Some(AdminReadPage::Stats)
         );
+        assert_eq!(
+            classify_allowed_admin_get(&url(
+                "index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=17"
+            ))
+            .ok(),
+            Some(AdminReadPage::StatsNewsletterSummary { stat_id: 17 })
+        );
+        assert_eq!(
+            classify_allowed_admin_get(&url(
+                "index.php?Page=Stats&Action=Newsletters&SubAction=Step1&id=18&SortBy=finishtime&Direction=down&DisplayPage=1"
+            ))
+            .ok(),
+            Some(AdminReadPage::StatsNewsletterSummary { stat_id: 18 })
+        );
+    }
+
+    #[test]
+    fn newsletter_edit_requires_positive_identity() {
+        for path in [
+            "index.php?Page=Newsletters&Action=Edit",
+            "index.php?Page=Newsletters&Action=Edit&id=0",
+            "index.php?Page=Newsletters&Action=Edit&id=test",
+        ] {
+            assert!(
+                classify_allowed_admin_get(&url(path)).is_err(),
+                "unexpectedly allowed {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn stats_newsletter_summary_requires_one_positive_unsmuggled_identity() {
+        for path in [
+            "index.php?Page=Stats&Action=Newsletters&SubAction=Step1",
+            "index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=0",
+            "index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=17&id=18",
+            "index.php?Page=Stats&Action=Newsletters&SubAction=Delete&statid=17",
+            "index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=17&Next=Send",
+        ] {
+            assert!(
+                classify_allowed_admin_get(&url(path)).is_err(),
+                "unexpectedly allowed {path}"
+            );
+        }
     }
 
     #[test]
@@ -1894,12 +2028,29 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("{err}"));
         assert!(popup.as_str().contains("Action=Send"));
+        assert_eq!(
+            guarded_send_popup_job_id(&popup).unwrap_or_else(|err| panic!("{err}")),
+            2
+        );
+
+        let consistent_aliases = ensure_allowed_guarded_send_popup(
+            base_url,
+            "index.php?Page=Send&Action=Send&Job=2&id=2",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            guarded_send_popup_job_id(&consistent_aliases).unwrap_or_else(|err| panic!("{err}")),
+            2
+        );
 
         for path in [
             "index.php?Page=Send&Action=Send",
             "index.php?Page=Send&Action=Step4&Job=2",
             "index.php?Page=Schedule&Action=Send&Job=2",
             "index.php?Page=Send&Action=Send&Job=abc",
+            "index.php?Page=Send&Action=Send&Job=2&id=3",
+            "index.php?Page=Send&Action=Send&Job=2&id=abc",
+            "index.php?Page=Send&Action=Send&Job=0",
             "index.php?Page=Send&Action=Send&Job=2&Started=maybe",
             "cron/index.php?Page=Send&Action=Send&Job=2",
         ] {

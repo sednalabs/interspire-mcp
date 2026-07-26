@@ -6,6 +6,7 @@ use serde::Serialize;
 #[serde(rename_all = "snake_case")]
 pub enum SendApplyStatus {
     Refused,
+    ResponseUncertain,
     Posted,
     Queued,
     Processed,
@@ -23,11 +24,145 @@ impl SendApplyStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SendUncertaintyDecision {
+    HoldDoNotRetry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SendUncertaintyIdentityState {
+    NoNewJob,
+    AmbiguousOrUnbound,
+    ReadbackIncomplete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SendUncertaintyNextAction {
+    HoldForBoundedReadOnlyReconciliation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SendBaselineCaptureStage {
+    FinalPreDispatch,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SendUncertaintyRecoveryContract {
+    pub decision: SendUncertaintyDecision,
+    pub retry_authorized: bool,
+    pub mutation_authorized: bool,
+    pub terminal_success_authorized: bool,
+    pub baselines_authenticated: bool,
+    pub baselines_captured_before_dispatch: bool,
+    pub baseline_capture_stage: SendBaselineCaptureStage,
+    pub baseline_context_verified: bool,
+    pub baseline_identity_stable: bool,
+    pub baseline_inventory_complete: bool,
+    pub reconciliation_attempted_in_same_invocation: bool,
+    pub baseline_max_rows: usize,
+    pub campaign_id: u64,
+    pub list_ids: Vec<u64>,
+    pub expected_recipient_count: u64,
+    pub expected_body_sha256: Option<String>,
+    pub schedule_job_ids_before: Vec<u64>,
+    pub manage_job_ids_before: Vec<u64>,
+    pub campaign_job_ids_before: Vec<u64>,
+    pub stats_ids_before: Vec<u64>,
+    pub readback_complete: bool,
+    pub identity_state: SendUncertaintyIdentityState,
+    pub observed_job_id: Option<u64>,
+    pub next_action: SendUncertaintyNextAction,
+    pub status_follow_up: Option<SendJobFollowUpContract>,
+    pub guidance: String,
+}
+
+impl SendUncertaintyRecoveryContract {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn hold(
+        campaign_id: u64,
+        list_ids: Vec<u64>,
+        expected_recipient_count: u64,
+        expected_body_sha256: Option<String>,
+        schedule_job_ids_before: Vec<u64>,
+        manage_job_ids_before: Vec<u64>,
+        campaign_job_ids_before: Vec<u64>,
+        stats_ids_before: Vec<u64>,
+        baseline_max_rows: usize,
+        baseline_capture_stage: SendBaselineCaptureStage,
+        baseline_context_verified: bool,
+        baseline_identity_stable: bool,
+        baseline_inventory_complete: bool,
+        readback_complete: bool,
+        identity_state: SendUncertaintyIdentityState,
+    ) -> Self {
+        let identity_state = if !baseline_context_verified
+            || !baseline_identity_stable
+            || !baseline_inventory_complete
+        {
+            SendUncertaintyIdentityState::ReadbackIncomplete
+        } else {
+            identity_state
+        };
+        let readback_complete = baseline_context_verified
+            && baseline_identity_stable
+            && baseline_inventory_complete
+            && readback_complete
+            && !matches!(
+                identity_state,
+                SendUncertaintyIdentityState::ReadbackIncomplete
+            );
+        let guidance = match identity_state {
+            SendUncertaintyIdentityState::NoNewJob =>
+                "Hold and do not retry or resend. Repeat only bounded read-only Schedule, Manage, and Stats reconciliation from the captured baseline; absence of a new identity does not prove non-receipt."
+                    .to_string(),
+            SendUncertaintyIdentityState::AmbiguousOrUnbound =>
+                "Hold and do not retry or resend. Queue-only identities remain unbound to this request even with campaign association; never choose by row order, labels, counts, timing, or singleton difference."
+                    .to_string(),
+            SendUncertaintyIdentityState::ReadbackIncomplete =>
+                "Hold and do not retry or resend. Restore complete authenticated bounded Schedule, Manage, and Stats reads before reconciliation; partial or capped state cannot prove absence or success."
+                    .to_string(),
+        };
+        Self {
+            decision: SendUncertaintyDecision::HoldDoNotRetry,
+            retry_authorized: false,
+            mutation_authorized: false,
+            terminal_success_authorized: false,
+            baselines_authenticated: true,
+            baselines_captured_before_dispatch: true,
+            baseline_capture_stage,
+            baseline_context_verified,
+            baseline_identity_stable,
+            baseline_inventory_complete,
+            reconciliation_attempted_in_same_invocation: true,
+            baseline_max_rows,
+            campaign_id,
+            list_ids,
+            expected_recipient_count,
+            expected_body_sha256,
+            schedule_job_ids_before,
+            manage_job_ids_before,
+            campaign_job_ids_before,
+            stats_ids_before,
+            readback_complete,
+            identity_state,
+            observed_job_id: None,
+            next_action: SendUncertaintyNextAction::HoldForBoundedReadOnlyReconciliation,
+            status_follow_up: None,
+            guidance,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SendReconciliationReport {
     pub status: SendApplyStatus,
     pub job_id: Option<u64>,
     pub follow_up_contract: Option<SendJobFollowUpContract>,
+    pub uncertainty_recovery_contract: Option<SendUncertaintyRecoveryContract>,
     pub queue_id: Option<u64>,
     pub stat_id: Option<u64>,
     pub sent_count: Option<u64>,
@@ -156,6 +291,7 @@ impl SendReconciliationReport {
             status,
             job_id,
             follow_up_contract: None,
+            uncertainty_recovery_contract: None,
             queue_id,
             stat_id,
             sent_count,
@@ -188,7 +324,24 @@ impl SendReconciliationReport {
     }
 
     pub fn with_follow_up_contract(mut self, contract: Option<SendJobFollowUpContract>) -> Self {
-        self.follow_up_contract = contract;
+        self.follow_up_contract = if matches!(self.status, SendApplyStatus::ResponseUncertain) {
+            None
+        } else {
+            contract
+        };
+        self
+    }
+
+    pub(crate) fn with_uncertainty_recovery_contract(
+        mut self,
+        contract: Option<SendUncertaintyRecoveryContract>,
+    ) -> Self {
+        self.uncertainty_recovery_contract =
+            if matches!(self.status, SendApplyStatus::ResponseUncertain) {
+                contract
+            } else {
+                None
+            };
         self
     }
 
@@ -302,8 +455,11 @@ impl SendReconciliationReport {
 
 #[cfg(test)]
 mod tests {
-    use super::{SendApplyStatus, SendReconciliationReport};
-
+    use super::{
+        SendApplyStatus, SendBaselineCaptureStage, SendReconciliationReport,
+        SendUncertaintyDecision, SendUncertaintyIdentityState, SendUncertaintyNextAction,
+        SendUncertaintyRecoveryContract,
+    };
     fn reconciliation(
         status: SendApplyStatus,
         job_id: Option<u64>,
@@ -365,15 +521,137 @@ mod tests {
     #[test]
     fn send_reconciliation_terminal_controls_preserve_nonterminal_states() {
         let refused = reconciliation(SendApplyStatus::Refused, None, None);
+        let response_uncertain = reconciliation(SendApplyStatus::ResponseUncertain, None, None);
         let posted = reconciliation(SendApplyStatus::Posted, None, None);
         let queued = reconciliation(SendApplyStatus::Queued, Some(41), None);
 
         assert_eq!(refused.status, SendApplyStatus::Refused);
+        assert_eq!(
+            response_uncertain.status,
+            SendApplyStatus::ResponseUncertain
+        );
         assert_eq!(posted.status, SendApplyStatus::Posted);
         assert_eq!(queued.status, SendApplyStatus::Queued);
         assert!(!refused.terminal_application_proven());
+        assert!(!response_uncertain.terminal_application_proven());
         assert!(!posted.terminal_application_proven());
         assert!(!queued.terminal_application_proven());
+    }
+
+    #[test]
+    fn uncertainty_recovery_contract_is_a_closed_hold_do_not_retry_authority() {
+        let recovery = SendUncertaintyRecoveryContract::hold(
+            9001,
+            vec![8001],
+            25,
+            Some("synthetic-body-sha256".to_string()),
+            vec![41],
+            vec![41],
+            vec![41],
+            vec![70],
+            25,
+            SendBaselineCaptureStage::FinalPreDispatch,
+            true,
+            true,
+            true,
+            true,
+            SendUncertaintyIdentityState::AmbiguousOrUnbound,
+        );
+
+        assert_eq!(recovery.decision, SendUncertaintyDecision::HoldDoNotRetry);
+        assert!(!recovery.retry_authorized);
+        assert!(!recovery.mutation_authorized);
+        assert!(!recovery.terminal_success_authorized);
+        assert!(recovery.baselines_authenticated);
+        assert!(recovery.baselines_captured_before_dispatch);
+        assert_eq!(
+            recovery.baseline_capture_stage,
+            SendBaselineCaptureStage::FinalPreDispatch
+        );
+        assert!(recovery.baseline_context_verified);
+        assert!(recovery.baseline_identity_stable);
+        assert!(recovery.baseline_inventory_complete);
+        assert!(recovery.reconciliation_attempted_in_same_invocation);
+        assert_eq!(recovery.schedule_job_ids_before, vec![41]);
+        assert_eq!(recovery.manage_job_ids_before, vec![41]);
+        assert_eq!(recovery.campaign_job_ids_before, vec![41]);
+        assert_eq!(recovery.stats_ids_before, vec![70]);
+        assert_eq!(
+            recovery.next_action,
+            SendUncertaintyNextAction::HoldForBoundedReadOnlyReconciliation
+        );
+        assert_eq!(recovery.observed_job_id, None);
+        assert!(recovery.status_follow_up.is_none());
+        assert!(recovery.guidance.contains("do not retry or resend"));
+        assert!(recovery.guidance.contains("singleton difference"));
+
+        let unstable = SendUncertaintyRecoveryContract::hold(
+            9001,
+            vec![8001],
+            25,
+            Some("synthetic-body-sha256".to_string()),
+            vec![41],
+            vec![41],
+            vec![41],
+            vec![70],
+            25,
+            SendBaselineCaptureStage::FinalPreDispatch,
+            true,
+            false,
+            true,
+            true,
+            SendUncertaintyIdentityState::NoNewJob,
+        );
+        assert_eq!(
+            unstable.identity_state,
+            SendUncertaintyIdentityState::ReadbackIncomplete
+        );
+        assert!(!unstable.readback_complete);
+        assert!(unstable.status_follow_up.is_none());
+        assert!(!unstable.retry_authorized);
+        assert!(!unstable.mutation_authorized);
+        assert!(!unstable.terminal_success_authorized);
+
+        let non_uncertain = reconciliation(SendApplyStatus::Queued, Some(43), None)
+            .with_uncertainty_recovery_contract(Some(recovery.clone()));
+        assert!(non_uncertain.uncertainty_recovery_contract.is_none());
+
+        let report = reconciliation(SendApplyStatus::ResponseUncertain, Some(43), None)
+            .with_follow_up_contract(recovery.status_follow_up.clone())
+            .with_uncertainty_recovery_contract(Some(recovery));
+        assert!(report.follow_up_contract.is_none());
+        assert!(report.uncertainty_recovery_contract.is_some());
+        assert!(!report.terminal_application_proven());
+        let serialized =
+            serde_json::to_value(&report).unwrap_or_else(|err| panic!("serialize: {err}"));
+        assert_eq!(
+            serialized["uncertainty_recovery_contract"]["decision"],
+            "hold_do_not_retry"
+        );
+        assert_eq!(
+            serialized["uncertainty_recovery_contract"]["retry_authorized"],
+            false
+        );
+        assert_eq!(
+            serialized["uncertainty_recovery_contract"]["baseline_capture_stage"],
+            "final_pre_dispatch"
+        );
+        assert_eq!(
+            serialized["uncertainty_recovery_contract"]["baseline_identity_stable"],
+            true
+        );
+        assert_eq!(
+            serialized["uncertainty_recovery_contract"]["manage_job_ids_before"],
+            serde_json::json!([41])
+        );
+        assert_eq!(
+            serialized["uncertainty_recovery_contract"]["campaign_job_ids_before"],
+            serde_json::json!([41])
+        );
+        assert_eq!(
+            serialized["uncertainty_recovery_contract"]["terminal_success_authorized"],
+            false
+        );
     }
 
     #[test]
