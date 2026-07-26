@@ -33,7 +33,6 @@ pub enum SendUncertaintyDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SendUncertaintyIdentityState {
-    ExactJob,
     NoNewJob,
     AmbiguousOrUnbound,
     ReadbackIncomplete,
@@ -42,7 +41,6 @@ pub enum SendUncertaintyIdentityState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SendUncertaintyNextAction {
-    ReadOnlyJobStatus,
     HoldForBoundedReadOnlyReconciliation,
 }
 
@@ -100,19 +98,12 @@ impl SendUncertaintyRecoveryContract {
         baseline_inventory_complete: bool,
         readback_complete: bool,
         identity_state: SendUncertaintyIdentityState,
-        observed_job_id: Option<u64>,
-        status_follow_up: Option<SendJobFollowUpContract>,
     ) -> Self {
-        let observed_job_id = observed_job_id.filter(|job_id| *job_id > 0);
         let identity_state = if !baseline_context_verified
             || !baseline_identity_stable
             || !baseline_inventory_complete
         {
             SendUncertaintyIdentityState::ReadbackIncomplete
-        } else if matches!(identity_state, SendUncertaintyIdentityState::ExactJob)
-            && (observed_job_id.is_none() || status_follow_up.is_none() || !readback_complete)
-        {
-            SendUncertaintyIdentityState::AmbiguousOrUnbound
         } else {
             identity_state
         };
@@ -124,31 +115,16 @@ impl SendUncertaintyRecoveryContract {
                 identity_state,
                 SendUncertaintyIdentityState::ReadbackIncomplete
             );
-        let (next_action, status_follow_up, guidance) = match identity_state {
-            SendUncertaintyIdentityState::ExactJob => (
-                SendUncertaintyNextAction::ReadOnlyJobStatus,
-                status_follow_up,
-                "Hold and do not retry or resend. Use only the returned read-only job-status context; it cannot authorize mutation, resend, or terminal success."
-                    .to_string(),
-            ),
-            SendUncertaintyIdentityState::NoNewJob => (
-                SendUncertaintyNextAction::HoldForBoundedReadOnlyReconciliation,
-                None,
+        let guidance = match identity_state {
+            SendUncertaintyIdentityState::NoNewJob =>
                 "Hold and do not retry or resend. Repeat only bounded read-only Schedule, Manage, and Stats reconciliation from the captured baseline; absence of a new identity does not prove non-receipt."
                     .to_string(),
-            ),
-            SendUncertaintyIdentityState::AmbiguousOrUnbound => (
-                SendUncertaintyNextAction::HoldForBoundedReadOnlyReconciliation,
-                None,
-                "Hold and do not retry or resend. Resolve queue identity only through bounded read-only Schedule and exact Manage association; never choose by row order, labels, counts, or timing."
+            SendUncertaintyIdentityState::AmbiguousOrUnbound =>
+                "Hold and do not retry or resend. Queue-only identities remain unbound to this request even with campaign association; never choose by row order, labels, counts, timing, or singleton difference."
                     .to_string(),
-            ),
-            SendUncertaintyIdentityState::ReadbackIncomplete => (
-                SendUncertaintyNextAction::HoldForBoundedReadOnlyReconciliation,
-                None,
+            SendUncertaintyIdentityState::ReadbackIncomplete =>
                 "Hold and do not retry or resend. Restore complete authenticated bounded Schedule, Manage, and Stats reads before reconciliation; partial or capped state cannot prove absence or success."
                     .to_string(),
-            ),
         };
         Self {
             decision: SendUncertaintyDecision::HoldDoNotRetry,
@@ -173,9 +149,9 @@ impl SendUncertaintyRecoveryContract {
             stats_ids_before,
             readback_complete,
             identity_state,
-            observed_job_id,
-            next_action,
-            status_follow_up,
+            observed_job_id: None,
+            next_action: SendUncertaintyNextAction::HoldForBoundedReadOnlyReconciliation,
+            status_follow_up: None,
             guidance,
         }
     }
@@ -484,8 +460,6 @@ mod tests {
         SendUncertaintyDecision, SendUncertaintyIdentityState, SendUncertaintyNextAction,
         SendUncertaintyRecoveryContract,
     };
-    use crate::response::SendJobFollowUpContract;
-
     fn reconciliation(
         status: SendApplyStatus,
         job_id: Option<u64>,
@@ -566,14 +540,6 @@ mod tests {
 
     #[test]
     fn uncertainty_recovery_contract_is_a_closed_hold_do_not_retry_authority() {
-        let status_follow_up = SendJobFollowUpContract::new(
-            43,
-            9001,
-            vec![8001],
-            25,
-            Some("synthetic-body-sha256".to_string()),
-        )
-        .with_stats_baseline(vec![70]);
         let recovery = SendUncertaintyRecoveryContract::hold(
             9001,
             vec![8001],
@@ -589,9 +555,7 @@ mod tests {
             true,
             true,
             true,
-            SendUncertaintyIdentityState::ExactJob,
-            Some(43),
-            Some(status_follow_up.clone()),
+            SendUncertaintyIdentityState::AmbiguousOrUnbound,
         );
 
         assert_eq!(recovery.decision, SendUncertaintyDecision::HoldDoNotRetry);
@@ -614,10 +578,12 @@ mod tests {
         assert_eq!(recovery.stats_ids_before, vec![70]);
         assert_eq!(
             recovery.next_action,
-            SendUncertaintyNextAction::ReadOnlyJobStatus
+            SendUncertaintyNextAction::HoldForBoundedReadOnlyReconciliation
         );
-        assert!(recovery.status_follow_up.is_some());
+        assert_eq!(recovery.observed_job_id, None);
+        assert!(recovery.status_follow_up.is_none());
         assert!(recovery.guidance.contains("do not retry or resend"));
+        assert!(recovery.guidance.contains("singleton difference"));
 
         let unstable = SendUncertaintyRecoveryContract::hold(
             9001,
@@ -634,9 +600,7 @@ mod tests {
             false,
             true,
             true,
-            SendUncertaintyIdentityState::ExactJob,
-            Some(43),
-            Some(status_follow_up),
+            SendUncertaintyIdentityState::NoNewJob,
         );
         assert_eq!(
             unstable.identity_state,

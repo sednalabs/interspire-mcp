@@ -94,14 +94,18 @@ Current public behavior:
   and `cron_maintenance`.
 - `INTERSPIRE_SEND_CONTROLS=1` enables explicitly acknowledged one-recipient
   campaign preview/test sends through `interspire_campaign_test_send_apply`
-  and bounded seed sends through `interspire_seed_send_apply`. It also enables
-  `interspire_oci_send_ledger_prepare_apply`, which writes only a private local
-  ledger file and does not send.
+  and bounded seed authority evaluation through `interspire_seed_send_apply`.
+  The current admin HTML adapter still refuses seed evaluation before final
+  request construction or dispatch because it has no authenticated atomic state
+  binding. The flag also enables `interspire_oci_send_ledger_prepare_apply`,
+  which writes only a private local ledger file and does not send.
 - `INTERSPIRE_PRODUCTION_SEND_CONTROLS=1` additionally enables
-  `interspire_production_send_apply`, which requires exact expected recipient
-  count, From, Reply-To, subject, HTML SHA-256, and confirmation phrase.
-- `INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1` makes both guarded send apply tools
-  refuse before the final Interspire send form unless `oci_ledger_preflight`
+  production authority evaluation through `interspire_production_send_apply`,
+  which requires exact expected recipient count, From, Reply-To, subject, HTML
+  SHA-256, and confirmation phrase. It does not override the missing atomic
+  state binding.
+- `INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1` makes both guarded-send evaluation
+  tools refuse before live authority review unless `oci_ledger_preflight`
   verifies the expected Interspire campaign/batch row count in the configured
   private ledger, with recipient keys, trace keys, and valid UTC
   `submitted_at`/timestamp values on each matched row. Matched rows also must
@@ -122,8 +126,8 @@ plan. Preview remains available without them.
 
 `interspire_oci_send_ledger_prepare_preview` and
 `interspire_oci_send_ledger_prepare_apply` are generic local-file helpers for
-operators who require a private OCI send ledger before a guarded Interspire send
-may proceed.
+operators who require a private OCI send ledger before a guarded Interspire
+request may be evaluated. Passing this ledger gate is never dispatch authority.
 
 The prepare tools:
 

@@ -13,10 +13,11 @@ Marketer state in typed, redacted, operator-oriented tools.
 - Safety posture: read-only by default, with guarded queue
   cancel/delete/pause/resume, guarded campaign, list, user, non-secret
   settings, list creation, campaign copy, semantic template, private artifact,
-  aggregate CSV import preflight, and explicit guarded-send apply paths.
+  aggregate CSV import preflight, and explicit guarded-send evaluation paths.
 - No-mutation proof posture: selected admin wizard pages may be rendered for
-  evidence without submitting a send. The final send form is available only to
-  the separate guarded-send apply tools.
+  evidence without submitting a send. The seed and production evaluation tools
+  also stop before final request construction because the current admin surface
+  has no authenticated atomic state binding.
 - Sensitive read posture: toolkit-owned metadata and policy preflight, with
   Interspire-owned target/field allowlists.
 
@@ -56,7 +57,7 @@ request/response profile is maintained in
 | `live/reads.rs` | Read-only backend handlers for status, list/contact readback, settings, queue stats, send-job status, cron readiness, stop-gate readiness, and campaign readback. |
 | `live/guarded.rs` | Guarded queue-control and form-write preview/apply handlers. |
 | `live/scaffold.rs` | Guarded list/campaign scaffold handlers plus aggregate CSV import preflight. |
-| `live/send.rs` | Guarded seed and production send apply handlers. |
+| `live/send.rs` | Guarded seed and production send evaluation handlers. |
 | `live/audience.rs` | Warm-up readiness and audience-hygiene handler orchestration. |
 | `live/support.rs` | Shared list caps, source-list filtering, and local helper utilities for the live backend. |
 | `xml_api.rs` | Interspire XML API reads and XML parsing. |
@@ -65,9 +66,9 @@ request/response profile is maintained in
 | `admin_html/stats_identity.rs` | Complete bounded positive Stats-row identity and aggregate-count parsing from exact read-only newsletter summary routes; unidentified non-header rows fail closed. |
 | `admin_html/forms.rs` | Guarded form snapshotting, allowlisted field updates, preview/apply plan binding, list-create apply, and field-scoped POST construction. |
 | `admin_html/scaffold.rs` | Campaign-copy route discovery and before/after draft detection. |
-| `admin_html/proof.rs` | No-mutation admin proof reads plus guarded final-send form capture for admin reachability, campaign body audit, render artifacts, Send wizard readback, seed-readiness gates, seed sends, and production sends. |
+| `admin_html/proof.rs` | No-mutation admin proof reads plus fresh three-snapshot final-send authority review for admin reachability, campaign body audit, render artifacts, Send wizard readback, seed-readiness gates, and fail-closed seed/production evaluation. |
 | `private_artifacts.rs` | Private local artifact root validation and atomic artifact writes outside the repository. |
-| `safety.rs` | URL allowlists for read pages, proof posts, guarded send posts, and guarded queue/form write routes. |
+| `safety.rs` | URL allowlists for read pages, proof posts, guarded-send route validation, and guarded queue/form write routes. |
 | `guarded_write.rs` | Shared plan-id and runtime enablement checks. |
 | `audience_hygiene.rs` | Private audience artifact construction outside git. |
 | `audience_hygiene_checkpoint.rs` | Checkpointed begin/resume/status flow for bounded audience export progress. |
@@ -204,20 +205,27 @@ local CSV under configured private roots and returns generic column labels plus
 aggregate file evidence. Explicit expected-count mismatches and preflight caps
 block the proof; there is no import apply handler in this public build.
 
-Guarded send apply tools deliberately sit outside the no-mutation proof family.
-They re-run the same campaign-body and Send wizard proof immediately, capture
-the live final send form, then require two stable complete bounded
-Schedule/Manage/Stats identity snapshots inside the guarded dispatch path
-before constructing the final POST. The second snapshot is the response-loss
-baseline; any cap, pagination, exact request-context mismatch, or identity
-movement fails closed before dispatch. Seed sends require a bounded recipient
-count. Production sends also
-require the production runtime gate, exact expected count, From, Reply-To,
-subject, HTML SHA-256, and confirmation phrase.
-When OCI ledger enforcement is enabled, both send apply paths first verify the
-configured private ledger has the expected Interspire campaign/batch rows, then
-refuse before the final send form if that proof is missing, incomplete, or tied
-to a different campaign id than the one being sent.
+Guarded-send evaluation deliberately sits outside the ordinary no-mutation proof
+family. After the caller and readiness gates pass, each tool captures three
+fresh authenticated authority snapshots spanning the campaign body, selected
+audience, recipient count, sender fields, every parsed wizard option, exact
+provider-derived final form, action, token, and ordered-pair digest. Raw subject
+and sender fields are retained only as full private identities for exact
+comparison; public reports remain redacted. Missing, malformed, duplicate,
+contradictory, capped, paginated, or moving authority fails closed. Caller
+values and recipient counts never reconstruct missing or stale provider form
+controls.
+
+The current admin HTML surface exposes CSRF protection but no authenticated
+application-native state version or lock that binds the confirmed campaign,
+audience, count, and final form through submission. Equal snapshots cannot
+close the post-confirmation race, so both tools return
+`final_atomic_send_authority=false` before constructing or posting a final
+request. Seed evaluation still requires a bounded recipient count. Production
+evaluation still requires the production runtime gate, exact expected count,
+From, Reply-To, subject, HTML SHA-256, and confirmation phrase. OCI ledger
+enforcement remains an additional precondition, not a substitute for the
+missing Interspire atomic binding.
 
 ## Contract Tests
 

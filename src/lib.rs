@@ -534,7 +534,7 @@ impl InterspireMcpServer {
                     .with_group("guarded-send")
                     .with_read_only(false)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Apply one explicitly acknowledged seed send after immediate readiness proof; response loss returns response_uncertain with bounded read-only hold/do-not-retry recovery, never resend authority.",
+                        "Evaluate one explicitly acknowledged seed-send request against fresh live authority. The current admin HTML surface refuses before dispatch because it exposes no atomic state binding; queue-only readback never creates request/job identity.",
                         [
                             "interspire",
                             "seed",
@@ -548,7 +548,7 @@ impl InterspireMcpServer {
                     .with_group("guarded-send")
                     .with_read_only(false)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Apply an explicitly acknowledged production send after strict readiness proof; response loss returns response_uncertain with bounded read-only hold/do-not-retry recovery, never resend authority.",
+                        "Evaluate one explicitly acknowledged production-send request against strict fresh live authority. The current admin HTML surface refuses before dispatch because it exposes no atomic state binding; queue-only readback never creates request/job identity.",
                         [
                             "interspire",
                             "production",
@@ -1208,7 +1208,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Apply one explicitly acknowledged seed send after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. Response loss returns response_uncertain rather than posted, attempts bounded read-only Schedule/Manage/Stats reconciliation in the same invocation, and returns hold/do-not-retry recovery that never authorizes resend, mutation, or terminal success."
+        description = "Evaluate one explicitly acknowledged seed-send request after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. The current admin HTML surface exposes no authenticated atomic state version or lock over the exact live campaign, body, sender, reply-to, bounce address, selected lists, recipient count, final-form token, and submitted pairs, so this tool refuses before constructing or dispatching the final request. A future reviewed native-bound dispatch must retain response_uncertain hold/do-not-retry behavior, and queue-only readback must never create exact request/job identity."
     )]
     fn interspire_seed_send_apply(
         &self,
@@ -1218,7 +1218,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Apply an explicitly acknowledged production send after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. Response loss returns response_uncertain rather than posted, attempts bounded read-only Schedule/Manage/Stats reconciliation in the same invocation, and returns hold/do-not-retry recovery that never authorizes resend, mutation, or terminal success."
+        description = "Evaluate one explicitly acknowledged production-send request after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. The current admin HTML surface exposes no authenticated atomic state version or lock over the exact live campaign, body, sender, reply-to, bounce address, selected lists, recipient count, final-form token, and submitted pairs, so this tool refuses before constructing or dispatching the final request. A future reviewed native-bound dispatch must retain response_uncertain hold/do-not-retry behavior, and queue-only readback must never create exact request/job identity."
     )]
     fn interspire_production_send_apply(
         &self,
@@ -1472,7 +1472,7 @@ impl InterspireMcpServer {
 impl ServerHandler for InterspireMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Safe Interspire Email Marketer evidence tools. Mutations are disabled by default and limited to guarded queue cancel/delete/pause/resume, campaign/list/user/settings/template apply plans, private render artifacts, and separately gated seed or production send apply tools.")
+            .with_instructions("Safe Interspire Email Marketer evidence tools. Mutations are disabled by default and limited to guarded queue cancel/delete/pause/resume, campaign/list/user/settings/template apply plans, private render artifacts, and separately gated seed or production authority evaluation. The current admin HTML adapter refuses seed and production dispatch before final request construction because it has no authenticated atomic state binding.")
     }
 
     fn list_tools(

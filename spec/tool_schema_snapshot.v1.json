@@ -1490,7 +1490,7 @@
         "readOnlyHint": false,
         "title": "Production send apply"
       },
-      "description": "Apply an explicitly acknowledged production send after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. Response loss returns response_uncertain rather than posted, attempts bounded read-only Schedule/Manage/Stats reconciliation in the same invocation, and returns hold/do-not-retry recovery that never authorizes resend, mutation, or terminal success.",
+      "description": "Evaluate one explicitly acknowledged production-send request after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. The current admin HTML surface exposes no authenticated atomic state version or lock over the exact live campaign, body, sender, reply-to, bounce address, selected lists, recipient count, final-form token, and submitted pairs, so this tool refuses before constructing or dispatching the final request. A future reviewed native-bound dispatch must retain response_uncertain hold/do-not-retry behavior, and queue-only readback must never create exact request/job identity.",
       "inputSchema": {
         "$defs": {
           "OciLedgerPreflightRequest": {
@@ -1779,7 +1779,7 @@
         "readOnlyHint": false,
         "title": "Seed send apply"
       },
-      "description": "Apply one explicitly acknowledged seed send after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. Response loss returns response_uncertain rather than posted, attempts bounded read-only Schedule/Manage/Stats reconciliation in the same invocation, and returns hold/do-not-retry recovery that never authorizes resend, mutation, or terminal success.",
+      "description": "Evaluate one explicitly acknowledged seed-send request after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. The current admin HTML surface exposes no authenticated atomic state version or lock over the exact live campaign, body, sender, reply-to, bounce address, selected lists, recipient count, final-form token, and submitted pairs, so this tool refuses before constructing or dispatching the final request. A future reviewed native-bound dispatch must retain response_uncertain hold/do-not-retry behavior, and queue-only readback must never create exact request/job identity.",
       "inputSchema": {
         "$defs": {
           "OciLedgerPreflightRequest": {
