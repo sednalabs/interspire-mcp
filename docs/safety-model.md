@@ -340,24 +340,23 @@ not for HTTP 200 or 302 alone.
 Queued-not-proven sends may include a `follow_up_contract` with the Interspire
 job id, campaign id, list ids, expected queue total, bounded Stats identity
 baseline, and the `interspire_send_job_status_readback` tool name. That status
-tool reads only allowlisted Schedule, newsletter Manage, Stats, and expected
-campaign edit pages. The same positive job may be normalized across one bounded
-row on each active source when the Manage row proves the intended campaign. A
-Schedule-only singleton discovered after an apply cannot create job identity
-unless popup evidence already agrees or the bounded Manage inventory supplies
-that campaign association.
+tool reads only allowlisted Schedule, newsletter Manage, and Stats pages. The
+same positive job may be normalized across one bounded row on each active source
+only when every Manage row proves the intended campaign. A Schedule-only
+singleton discovered after an apply cannot create job identity unless popup
+evidence already agrees or the bounded Manage inventory supplies that campaign
+association.
 
 Historical Stats row text, recipient-count equality, dates, campaign-like
-numeric text, and incidental job-id text never prove current job identity.
-Terminal application proof requires the active job actions to be absent plus
-exactly one new positive Stats route identity relative to the complete bounded
-baseline, no removed identity, the authoritative expected recipient total, and
-a domain-separated campaign-name identity matching a fresh read of the expected
-campaign edit form. The derived identity does not return the raw name; existing
-redacted row summaries remain bounded evidence. Exact list scope and body hashes
-remain caller-bound context because these admin pages do not re-prove them.
-Ambiguous, malformed, capped, paginated, campaign-mismatched, or
-response-uncertain evidence remains nonterminal. Direct queue-table and
+numeric text, and incidental job-id text never prove current job identity. The
+bounded admin surface exposes no application-native association from a job to a
+Stats row. A new positive Stats route identity relative to an internally
+captured or caller-carried baseline therefore remains diagnostic even when the
+active action disappears and aggregate counts, labels, or timing agree. Empty,
+partial, duplicate-name, same-count, concurrent, ambiguous, malformed, capped,
+paginated, unidentified-row, or response-uncertain evidence remains
+nonterminal. Exact list scope and body hashes remain caller-bound context
+because these admin pages do not re-prove them. Direct queue-table and
 unsent-reason aggregates remain unavailable; the tool must not fabricate them
 or derive outcomes from provider silence.
 

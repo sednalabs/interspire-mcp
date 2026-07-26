@@ -192,38 +192,6 @@ impl SendReconciliationReport {
         self
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn processed_with_bound_identity(
-        job_id: u64,
-        stat_id: u64,
-        sent_count: u64,
-        popup_steps: usize,
-        queue_rows_before: usize,
-        queue_rows_after: usize,
-        stats_rows_before: usize,
-        stats_rows_after: usize,
-        notes: Vec<String>,
-    ) -> Self {
-        Self::new_internal(
-            SendApplyStatus::Processed,
-            Some(job_id),
-            None,
-            Some(stat_id),
-            Some(sent_count),
-            None,
-            None,
-            None,
-            popup_steps,
-            queue_rows_before,
-            queue_rows_after,
-            stats_rows_before,
-            stats_rows_after,
-            Vec::new(),
-            notes,
-            true,
-        )
-    }
-
     pub fn refused(
         queue_rows_before: usize,
         queue_rows_after: usize,

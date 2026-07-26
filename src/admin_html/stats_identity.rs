@@ -5,7 +5,6 @@ use crate::{
     safety::{self, AdminReadPage},
 };
 use scraper::{Html, Selector};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,7 +12,6 @@ pub(super) struct StatsRowIdentity {
     pub stat_id: u64,
     pub row_ordinal: usize,
     pub row_summary: String,
-    pub campaign_identity: String,
     pub recipients: u64,
 }
 
@@ -64,7 +62,9 @@ pub(super) fn parse_stats_identity_inventory(
         Selector::parse("tr").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
     let link_selector =
         Selector::parse("a").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
-    let cell_selector =
+    let header_cell_selector =
+        Selector::parse("th").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
+    let data_cell_selector =
         Selector::parse("td").map_err(|err| InterspireError::HtmlParse(err.to_string()))?;
     let mut rows = Vec::new();
     let mut seen_ids = BTreeSet::new();
@@ -76,6 +76,11 @@ pub(super) fn parse_stats_identity_inventory(
         }
         let row_text = compact_text(&row.text().collect::<Vec<_>>().join(" "));
         if row_text.len() < 3 {
+            continue;
+        }
+        let header_cell_count = row.select(&header_cell_selector).count();
+        let data_cell_count = row.select(&data_cell_selector).count();
+        if header_cell_count > 0 && data_cell_count == 0 {
             continue;
         }
         inspected_rows += 1;
@@ -106,7 +111,10 @@ pub(super) fn parse_stats_identity_inventory(
             }
         }
         if stat_ids.is_empty() {
-            continue;
+            return Err(InterspireError::Safety(
+                "non-header Stats row did not expose one allowlisted durable View identity"
+                    .to_string(),
+            ));
         }
         let stat_id = match stat_ids.as_slice() {
             [stat_id] => *stat_id,
@@ -126,33 +134,15 @@ pub(super) fn parse_stats_identity_inventory(
                 "Stats row {stat_id} did not expose bounded aggregate counters"
             ))
         })?;
-        let campaign_label = row
-            .select(&cell_selector)
-            .map(|cell| compact_text(&cell.text().collect::<Vec<_>>().join(" ")))
-            .find(|label| !label.is_empty())
-            .ok_or_else(|| {
-                InterspireError::Safety(format!(
-                    "Stats row {stat_id} did not expose a campaign label"
-                ))
-            })?;
         rows.push(StatsRowIdentity {
             stat_id,
             row_ordinal: inspected_rows,
             row_summary: redact::redact_sensitive_text(&row_text),
-            campaign_identity: campaign_label_identity(&campaign_label),
             recipients: counts.0,
         });
     }
 
     Ok(StatsIdentityInventory { rows })
-}
-
-pub(super) fn campaign_label_identity(label: &str) -> String {
-    let normalized = compact_text(label).to_ascii_lowercase();
-    let mut hasher = Sha256::new();
-    hasher.update(b"interspire-stats-campaign-label-v1\0");
-    hasher.update(normalized.as_bytes());
-    format!("{:x}", hasher.finalize())
 }
 
 fn parse_stats_row_counts(row: &str) -> Option<(u64, u64, u64)> {
@@ -179,7 +169,7 @@ fn parse_count_token(token: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{campaign_label_identity, parse_stats_identity_inventory};
+    use super::parse_stats_identity_inventory;
 
     const BASE: &str = "https://example.test/admin/";
 
@@ -205,10 +195,6 @@ mod tests {
         assert_eq!(inventory.rows.len(), 2);
         assert_eq!(inventory.rows[0].stat_id, 71);
         assert_eq!(inventory.rows[0].recipients, 25);
-        assert_eq!(
-            inventory.rows[0].campaign_identity,
-            campaign_label_identity("Campaign Alpha")
-        );
         assert_eq!(inventory.rows[1].stat_id, 72);
         assert_eq!(inventory.rows[1].recipients, 1_000);
     }
@@ -231,6 +217,21 @@ mod tests {
             </table>
         "#;
         assert!(parse_stats_identity_inventory(BASE, duplicate, 25).is_err());
+    }
+
+    #[test]
+    fn rejects_non_header_rows_without_a_durable_stats_identity() {
+        for html in [
+            r#"<table><tr><td>Campaign Alpha 25 0 0</td></tr></table>"#,
+            r#"<table><tr><td>Campaign Alpha 25 0 0 <a href="index.php?Page=Stats&amp;Action=Newsletters">Export</a></td></tr></table>"#,
+            r#"<table><tr><th>Campaign</th><td>Campaign Alpha 25 0 0</td></tr></table>"#,
+        ] {
+            let err = parse_stats_identity_inventory(BASE, html, 25)
+                .expect_err("unidentified non-header Stats rows must fail closed");
+            assert!(err.to_string().contains(
+                "non-header Stats row did not expose one allowlisted durable View identity"
+            ));
+        }
     }
 
     #[test]

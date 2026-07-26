@@ -2,8 +2,7 @@ use super::{
     admin_evidence, compact_text, ensure_authenticated_html, extract_login_csrf_token, forms,
     parse_table_rows, redact_field_value, route_fingerprint,
     stats_identity::{
-        campaign_label_identity, parse_stats_identity_inventory, unique_added_stats_identity,
-        StatsIdentityInventory,
+        parse_stats_identity_inventory, unique_added_stats_identity, StatsIdentityInventory,
     },
     AdminHtmlClient,
 };
@@ -51,7 +50,6 @@ struct GuardedSendReconcileInput<'a> {
     schedule_job_ids_before: &'a BTreeSet<u64>,
     stats_before: &'a [String],
     stats_identity_before: &'a StatsIdentityInventory,
-    expected_stats_campaign_identity: &'a str,
     expected_recipient_count: u64,
     max_rows: usize,
 }
@@ -66,7 +64,6 @@ struct GuardedSendTerminalInput<'a> {
     stats_after: &'a [String],
     stats_identity_before: &'a StatsIdentityInventory,
     stats_identity_after: &'a StatsIdentityInventory,
-    expected_stats_campaign_identity: &'a str,
     expected_recipient_count: u64,
     job_id: Option<u64>,
     job_active_after: Option<bool>,
@@ -141,19 +138,6 @@ struct GuardedSendProgress {
 }
 
 impl AdminHtmlClient {
-    pub(super) fn campaign_name_identity(
-        &self,
-        campaign_id: u64,
-    ) -> Result<String, InterspireError> {
-        if campaign_id == 0 {
-            return Err(InterspireError::Safety(
-                "campaign identity requires a positive campaign id".to_string(),
-            ));
-        }
-        let html = self.get_allowed(&AdminReadPage::NewsletterEdit { id: campaign_id }.path())?;
-        campaign_name_identity_from_edit_html(&html)
-    }
-
     pub fn admin_session_probe(
         &self,
         include_send_start: bool,
@@ -1106,7 +1090,6 @@ impl AdminHtmlClient {
 
         self.login()?;
         let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
-        let expected_stats_campaign_identity = self.campaign_name_identity(request.campaign_id)?;
         let schedule_before_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
         let schedule_job_ids_before = schedule_job_ids_from_html(&schedule_before_html);
         let queue_before = parse_table_rows(&schedule_before_html, max_rows)?;
@@ -1187,7 +1170,6 @@ impl AdminHtmlClient {
             schedule_job_ids_before: &schedule_job_ids_before,
             stats_before: &stats_before,
             stats_identity_before: &stats_identity_before,
-            expected_stats_campaign_identity: &expected_stats_campaign_identity,
             expected_recipient_count: request.expected_recipient_count,
             max_rows,
         })?;
@@ -1312,7 +1294,6 @@ impl AdminHtmlClient {
 
         self.login()?;
         let max_rows = request.max_queue_rows.unwrap_or(25).clamp(1, 100);
-        let expected_stats_campaign_identity = self.campaign_name_identity(request.campaign_id)?;
         let schedule_before_html = self.get_allowed(&AdminReadPage::Schedule.path())?;
         let schedule_job_ids_before = schedule_job_ids_from_html(&schedule_before_html);
         let queue_before = parse_table_rows(&schedule_before_html, max_rows)?;
@@ -1397,7 +1378,6 @@ impl AdminHtmlClient {
             schedule_job_ids_before: &schedule_job_ids_before,
             stats_before: &stats_before,
             stats_identity_before: &stats_identity_before,
-            expected_stats_campaign_identity: &expected_stats_campaign_identity,
             expected_recipient_count: request.expected_recipient_count,
             max_rows,
         })?;
@@ -2903,7 +2883,6 @@ fn guarded_send_evidence_from_progress(
         stats_after,
         stats_identity_before: input.stats_identity_before,
         stats_identity_after,
-        expected_stats_campaign_identity: input.expected_stats_campaign_identity,
         expected_recipient_count: input.expected_recipient_count,
         job_id: progress.job_evidence.job_id,
         job_active_after,
@@ -2919,17 +2898,6 @@ fn guarded_send_evidence_from_progress(
         redirected: progress.redirected,
         reconciliation,
     }
-}
-
-fn campaign_name_identity_from_edit_html(html: &str) -> Result<String, InterspireError> {
-    let name = first_present(&parse_form_values_exact(html)?, &["name"])
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            InterspireError::Safety(
-                "campaign edit read did not expose its durable name".to_string(),
-            )
-        })?;
-    Ok(campaign_label_identity(&name))
 }
 
 fn rows_unchanged_for_send_proof(before: &[String], after: &[String]) -> bool {
@@ -2977,42 +2945,33 @@ fn guarded_send_terminal_reconciliation(
     let stats_identity_delta = stable_stats_identity_delta(input.stats_before, input.stats_after);
     let mut proof_gaps = input.proof_gaps;
     let mut notes = input.notes;
-    let bound_stats_row = match unique_added_stats_identity(
-        input.stats_identity_before,
-        input.stats_identity_after,
-    ) {
-        Ok(Some(row))
-            if row.recipients == input.expected_recipient_count
-                && row.campaign_identity == input.expected_stats_campaign_identity =>
-        {
-            Some(row)
-        }
+    match unique_added_stats_identity(input.stats_identity_before, input.stats_identity_after) {
         Ok(Some(row)) => {
             if row.recipients != input.expected_recipient_count {
                 proof_gaps.push(format!(
                     "new Stats identity {} reported {} recipients instead of the expected {}",
                     row.stat_id, row.recipients, input.expected_recipient_count
                 ));
-            }
-            if row.campaign_identity != input.expected_stats_campaign_identity {
-                proof_gaps.push(format!(
-                    "new Stats identity {} did not match the expected campaign identity",
+            } else {
+                notes.push(format!(
+                    "new Stats identity {} matched the expected aggregate recipient count",
                     row.stat_id
                 ));
             }
-            None
+            proof_gaps.push(format!(
+                "new Stats identity {} has no application-native association to the bound job; aggregate labels, counts, timing, and baseline position are nonterminal context only",
+                row.stat_id
+            ));
         }
         Ok(None) => {
             proof_gaps.push("no new durable Stats identity was observed".to_string());
-            None
         }
         Err((added, removed)) => {
             proof_gaps.push(format!(
                 "durable Stats identity reconciliation was ambiguous: {added} added and {removed} removed"
             ));
-            None
         }
-    };
+    }
 
     match stats_identity_delta {
         StableStatsIdentityDelta {
@@ -3081,29 +3040,6 @@ fn guarded_send_terminal_reconciliation(
         None if input.job_id.is_some() => proof_gaps
             .push("post-send Schedule and campaign Manage absence was not proven".to_string()),
         Some(false) | None => {}
-    }
-
-    if input.smtp_reason.is_none() && input.job_active_after == Some(false) && proof_gaps.is_empty()
-    {
-        if let (Some(job_id), Some(stats_row)) =
-            (input.job_id.filter(|job_id| *job_id > 0), bound_stats_row)
-        {
-            notes.push(
-                "terminal application processing was bound to one positive job identity and one new durable Stats identity"
-                    .to_string(),
-            );
-            return SendReconciliationReport::processed_with_bound_identity(
-                job_id,
-                stats_row.stat_id,
-                stats_row.recipients,
-                input.popup_steps,
-                input.queue_before.len(),
-                input.queue_after.len(),
-                input.stats_before.len(),
-                input.stats_after.len(),
-                notes,
-            );
-        }
     }
 
     let status = if input.smtp_reason.is_some() {
@@ -3544,7 +3480,7 @@ fn send_apply_warnings(
             "{label} final boundary was posted, but durable application identity and terminal state were not proven; observed execution or readback signals remain nonterminal"
         )],
         SendApplyStatus::Queued => vec![format!(
-            "{label} has a durable job identity, but a bound terminal Stats identity remains unproven; use the returned follow-up contract for exact readback"
+            "{label} has a durable job identity, but the bounded admin surface exposes no application-native job-to-Stats association; the returned follow-up contract remains nonterminal readback context"
         )],
         SendApplyStatus::TransportFailed => vec![format!(
             "{label} reached the guarded Interspire send loop but Interspire reported a transport failure"
@@ -4147,8 +4083,7 @@ mod tests {
     use super::super::stats_identity::{StatsIdentityInventory, StatsRowIdentity};
     use super::{
         append_csrf_pair_if_missing, campaign_body_audit_from_html, campaign_body_parts_from_html,
-        campaign_body_step1_pairs, campaign_body_step2_action_path, campaign_label_identity,
-        campaign_name_identity_from_edit_html, campaign_test_send_digest,
+        campaign_body_step1_pairs, campaign_body_step2_action_path, campaign_test_send_digest,
         campaign_test_send_has_applyable_html, campaign_test_send_report, csrf_pair,
         expected_public_subject_matches, guarded_schedule_approval_url,
         guarded_send_evidence_from_progress, guarded_send_final_form_post,
@@ -4194,8 +4129,9 @@ mod tests {
                 .map(|(index, (stat_id, recipients))| StatsRowIdentity {
                     stat_id: *stat_id,
                     row_ordinal: index + 1,
-                    row_summary: format!("Synthetic Stats row {stat_id} {recipients}"),
-                    campaign_identity: campaign_label_identity(campaign_label),
+                    row_summary: format!(
+                        "Synthetic Stats row {campaign_label} {stat_id} {recipients}"
+                    ),
                     recipients: *recipients,
                 })
                 .collect(),
@@ -4226,21 +4162,6 @@ mod tests {
         assert!(report.html_sha256.is_some());
         assert!(!serialized.contains("%%UNSUBSCRIBELINK%%"));
         assert!(!serialized.contains("<html>"));
-    }
-
-    #[test]
-    fn campaign_name_identity_uses_exact_edit_field_without_returning_name() {
-        let identity = campaign_name_identity_from_edit_html(
-            r#"<form><input name="name" value="  Campaign Alpha  "></form>"#,
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
-
-        assert_eq!(identity, campaign_label_identity("campaign alpha"));
-        assert!(!identity.contains("Campaign"));
-        assert!(campaign_name_identity_from_edit_html(
-            r#"<form><input name="subject" value="Synthetic subject"></form>"#
-        )
-        .is_err());
     }
 
     #[test]
@@ -4740,7 +4661,6 @@ mod tests {
         let queue = Vec::new();
         let stats = Vec::new();
         let stats_identity = empty_stats_identity_inventory();
-        let expected_stats_campaign_identity = campaign_label_identity("Campaign Alpha");
         let schedule_job_ids = BTreeSet::new();
         let client = super::AdminHtmlClient::new(AdminHtmlConfig {
             version: InterspireVersion::Auto,
@@ -4764,7 +4684,6 @@ mod tests {
             schedule_job_ids_before: &schedule_job_ids,
             stats_before: &stats,
             stats_identity_before: &stats_identity,
-            expected_stats_campaign_identity: &expected_stats_campaign_identity,
             expected_recipient_count: 25,
             max_rows: 25,
         };
@@ -4799,7 +4718,6 @@ mod tests {
         let queue = Vec::new();
         let stats = Vec::new();
         let stats_identity = empty_stats_identity_inventory();
-        let expected_stats_campaign_identity = campaign_label_identity("Campaign Alpha");
         let schedule_job_ids = BTreeSet::new();
         let input = GuardedSendReconcileInput {
             send_form: (
@@ -4814,7 +4732,6 @@ mod tests {
             schedule_job_ids_before: &schedule_job_ids,
             stats_before: &stats,
             stats_identity_before: &stats_identity,
-            expected_stats_campaign_identity: &expected_stats_campaign_identity,
             expected_recipient_count: 25,
             max_rows: 25,
         };
@@ -5104,7 +5021,6 @@ mod tests {
             stats_after: &stats_after,
             stats_identity_before: &stats_identity,
             stats_identity_after: &stats_identity,
-            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 999,
             job_id: Some(7001),
             job_active_after: Some(false),
@@ -5162,7 +5078,6 @@ mod tests {
             stats_after: &stats_after,
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
-            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 25,
             job_id: Some(7001),
             job_active_after: Some(false),
@@ -5206,7 +5121,6 @@ mod tests {
             stats_after: &stats_after,
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
-            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 25,
             job_id: Some(7001),
             job_active_after: Some(true),
@@ -5247,7 +5161,6 @@ mod tests {
             stats_after: &queue,
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
-            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 25,
             job_id: Some(7001),
             job_active_after: Some(false),
@@ -5264,18 +5177,18 @@ mod tests {
         assert!(report
             .proof_gaps
             .iter()
-            .any(|gap| gap.contains("did not match the expected campaign identity")));
+            .any(|gap| gap.contains("no application-native association")));
     }
 
     #[test]
-    fn guarded_send_terminal_reconciliation_reaches_bound_processed_state() {
+    fn concurrent_same_name_same_count_stats_row_remains_nonterminal() {
         let queue = Vec::new();
         let stats_before = vec![
             "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
         ];
         let stats_after = vec![
             "Campaign Alpha 'List One' July 1 2026, 11:41 am July 1 2026, 11:42 am 25 0 0 View Export Print Delete".to_string(),
-            "Campaign Beta 'List Two' July 1 2026, 11:43 am July 1 2026, 11:44 am 25 0 0 View Export Print Delete".to_string(),
+            "Campaign Alpha 'List Two' July 1 2026, 11:43 am July 1 2026, 11:44 am 25 0 0 View Export Print Delete".to_string(),
         ];
         let stats_identity_before = stats_identity_inventory(&[(70, 25)]);
         let stats_identity_after = stats_identity_inventory(&[(70, 25), (71, 25)]);
@@ -5290,7 +5203,6 @@ mod tests {
             stats_after: &stats_after,
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
-            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 25,
             job_id: Some(7001),
             job_active_after: Some(false),
@@ -5301,14 +5213,18 @@ mod tests {
             notes: Vec::new(),
         });
 
-        assert_eq!(report.status, SendApplyStatus::Processed);
-        assert!(report.terminal_application_proven());
+        assert_eq!(report.status, SendApplyStatus::Queued);
+        assert!(!report.terminal_application_proven());
         assert_eq!(report.job_id, Some(7001));
-        assert_eq!(report.stat_id, Some(71));
-        assert_eq!(report.sent_count, Some(25));
+        assert_eq!(report.stat_id, None);
+        assert_eq!(report.sent_count, None);
         assert_eq!(report.failed_count, None);
         assert_eq!(report.unsent_count, None);
-        assert!(report.follow_up_contract.is_none());
+        assert!(report.follow_up_contract.is_some());
+        assert!(report
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("no application-native association")));
     }
 
     #[test]
@@ -5324,7 +5240,6 @@ mod tests {
             stats_after: &rows,
             stats_identity_before: &empty_stats_identity_inventory(),
             stats_identity_after: &empty_stats_identity_inventory(),
-            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 25,
             job_id: None,
             job_active_after: Some(false),
@@ -5344,7 +5259,6 @@ mod tests {
             stats_after: &rows,
             stats_identity_before: &empty_stats_identity_inventory(),
             stats_identity_after: &empty_stats_identity_inventory(),
-            expected_stats_campaign_identity: &campaign_label_identity("Campaign Alpha"),
             expected_recipient_count: 25,
             job_id: Some(7001),
             job_active_after: Some(false),
@@ -5461,7 +5375,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_send_apply_warnings_name_the_missing_bound_stats_identity_for_queued_state() {
+    fn seed_send_apply_warnings_name_the_missing_native_stats_association() {
         let reconciliation = SendReconciliationReport::new(
             SendApplyStatus::Queued,
             Some(41),
@@ -5484,10 +5398,10 @@ mod tests {
 
         assert!(warnings
             .iter()
-            .any(|warning| warning.contains("bound terminal Stats identity")));
+            .any(|warning| warning.contains("no application-native job-to-Stats association")));
         assert!(warnings
             .iter()
-            .any(|warning| warning.contains("follow-up contract")));
+            .any(|warning| warning.contains("nonterminal readback context")));
         assert_eq!(reconciliation.sent_count, None);
     }
 

@@ -15,6 +15,8 @@ pub struct SendJobStatusReadbackRequest {
     pub expected_queue_total: Option<u64>,
     #[serde(default)]
     pub expected_body_sha256: Option<String>,
+    /// Diagnostic Stats identities from an earlier bounded read. Caller-supplied
+    /// baselines never authorize a terminal send outcome.
     #[serde(default)]
     pub stats_baseline_ids: Option<Vec<u64>>,
     #[serde(default)]
@@ -29,6 +31,8 @@ pub struct SendJobFollowUpContract {
     pub list_ids: Vec<u64>,
     pub expected_queue_total: u64,
     pub body_sha256: Option<String>,
+    /// Diagnostic bounded inventory carried to the next read. It does not bind
+    /// a Stats row to this job and cannot authorize terminal state.
     pub stats_baseline_ids: Vec<u64>,
     pub status_tool: String,
 }
