@@ -2368,10 +2368,7 @@ fn extract_manage_campaign_id(
             .collect::<Vec<_>>();
         candidate.set_query(None);
         candidate.query_pairs_mut().extend_pairs(retained_pairs);
-        let Ok(url) = safety::ensure_allowed_admin_get(base_url, candidate.as_str()) else {
-            continue;
-        };
-        let pairs = url.query_pairs().collect::<Vec<_>>();
+        let pairs = candidate.query_pairs().collect::<Vec<_>>();
         let is_newsletter_edit = pairs.iter().any(|(key, value)| {
             key.eq_ignore_ascii_case("Page") && value.eq_ignore_ascii_case("Newsletters")
         }) && pairs.iter().any(|(key, value)| {
@@ -2380,14 +2377,22 @@ fn extract_manage_campaign_id(
         if !is_newsletter_edit {
             continue;
         }
-        if let Some(id) = pairs
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case("id"))
-            .and_then(|(_, value)| value.parse::<u64>().ok())
-        {
-            if !ids.contains(&id) {
-                ids.push(id);
+        let url = safety::ensure_allowed_admin_get(base_url, candidate.as_str()).map_err(|_| {
+            InterspireError::Safety(
+                "campaign Manage row exposed an invalid newsletter edit identity".to_string(),
+            )
+        })?;
+        let id = match safety::classify_allowed_admin_get(&url)? {
+            AdminReadPage::NewsletterEdit { id } if id > 0 => id,
+            _ => {
+                return Err(InterspireError::Safety(
+                    "campaign Manage row did not expose a positive newsletter edit identity"
+                        .to_string(),
+                ))
             }
+        };
+        if !ids.contains(&id) {
+            ids.push(id);
         }
     }
     match ids.as_slice() {
@@ -2799,6 +2804,7 @@ fn queue_control_page_has_pagination(document: &Html) -> Result<bool, Interspire
                         key.to_ascii_lowercase().as_str(),
                         "p" | "pagenumber"
                             | "currentpage"
+                            | "displaypage"
                             | "start"
                             | "startrow"
                             | "offset"
@@ -5963,6 +5969,34 @@ mod tests {
         .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].candidate.campaign_id, Some(44));
+    }
+
+    #[test]
+    fn manage_campaign_identity_rejects_non_positive_edit_identity() {
+        for campaign_id in ["0", "test"] {
+            let html = format!(
+                r#"
+                    <table><tr>
+                      <td>Campaign Alpha</td>
+                      <td>
+                        <a href="index.php?Page=Newsletters&Action=Edit&id={campaign_id}">Edit</a>
+                        <a href="index.php?Page=Send&Action=PauseSend&Job=88">Pause</a>
+                      </td>
+                    </tr></table>
+                "#
+            );
+            let error = parse_queue_control_links(
+                "https://example.test/admin/",
+                &html,
+                25,
+                QueueControlSource::CampaignManage,
+            )
+            .expect_err("non-positive Manage campaign identity must fail closed");
+
+            assert!(error
+                .to_string()
+                .contains("invalid newsletter edit identity"));
+        }
     }
 
     #[test]

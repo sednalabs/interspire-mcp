@@ -289,6 +289,11 @@ fn validate_send_job_status_request(
             "send job status requires a positive expected campaign identity".to_string(),
         ));
     }
+    if request.expected_queue_total == Some(0) {
+        return Err(InterspireError::Safety(
+            "send job status requires a positive expected queue total".to_string(),
+        ));
+    }
     let list_ids = request
         .expected_list_ids
         .iter()
@@ -383,10 +388,16 @@ fn build_send_job_status_report_with_stats_identity(
             plan_id: link.candidate.plan_id.clone(),
         });
     }
-    let (schedule_sent, schedule_total) = row_summaries
+    let identity_verified = !matching_links.is_empty();
+    let (parsed_schedule_sent, parsed_schedule_total) = row_summaries
         .iter()
         .find_map(|row| parse_sent_total(row))
         .unwrap_or((None, None));
+    let (schedule_sent, schedule_total) = if identity_verified {
+        (parsed_schedule_sent, parsed_schedule_total)
+    } else {
+        (None, None)
+    };
     let matching_sources = matching_links
         .iter()
         .map(|link| link.candidate.source)
@@ -445,7 +456,6 @@ fn build_send_job_status_report_with_stats_identity(
         (Some(total), Some(processed)) if total >= processed => Some(total - processed),
         _ => None,
     };
-    let identity_verified = !matching_links.is_empty();
     let proven_manage_campaign_id = manage_campaign_ids.iter().flatten().next().copied();
     let campaign_id = request.expected_campaign_id.or(proven_manage_campaign_id);
     let queue_source = active_queue_source;
@@ -1133,11 +1143,24 @@ mod tests {
             stats_baseline_ids: None,
             max_rows: Some(25),
         };
+        let schedule_html = r#"
+            <table><tr>
+              <td>Job 13 In Progress (Sent to 1 / 99)</td>
+              <td><a href="index.php?Page=Schedule&Action=Pause&job=13">Pause</a></td>
+            </tr></table>
+        "#;
+        let links = super::super::parse_queue_control_links(
+            "https://example.test/admin/",
+            schedule_html,
+            25,
+            crate::response::QueueControlSource::Schedule,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         let err = build_send_job_status_report(
             &request,
             vec!["Job 13 In Progress (Sent to 1 / 99)".to_string()],
             Vec::new(),
-            Vec::new(),
+            links,
         )
         .unwrap_err();
         assert!(err.to_string().contains("expected queue total 100"));
@@ -1162,6 +1185,10 @@ mod tests {
             },
             SendJobStatusReadbackRequest {
                 expected_campaign_id: Some(0),
+                ..baseline.clone()
+            },
+            SendJobStatusReadbackRequest {
+                expected_queue_total: Some(0),
                 ..baseline.clone()
             },
             SendJobStatusReadbackRequest {
@@ -1200,7 +1227,32 @@ mod tests {
 
         assert!(!report.ok);
         assert!(!report.identity_verified);
+        assert!(!report.terminal_application_proven);
         assert!(report.follow_up_contract.is_none());
+        assert_eq!(
+            serde_json::to_value(&report.schedule).expect("serialize schedule state"),
+            serde_json::json!({
+                "matched_rows": 1,
+                "row_summaries": [
+                    "Campaign 2 Job 13 In Progress (Sent to 63 / 100)"
+                ],
+                "available_actions": [],
+                "action_plans": [],
+                "sent_count": null,
+                "total_count": null,
+                "state": "unknown"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&report.queue_counters).expect("serialize queue counters"),
+            serde_json::json!({
+                "source": "admin_html_unproven",
+                "total": null,
+                "processed": null,
+                "unprocessed": null,
+                "unavailable_reason": "authoritative terminal counters and job-to-Stats association require a reviewed application-native source"
+            })
+        );
         assert!(report
             .warnings
             .iter()

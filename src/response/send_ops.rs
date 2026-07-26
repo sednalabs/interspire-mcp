@@ -12,12 +12,14 @@ pub struct SendJobStatusReadbackRequest {
     #[serde(default)]
     pub expected_list_ids: Vec<u64>,
     #[serde(default)]
+    #[schemars(range(min = 1))]
     pub expected_queue_total: Option<u64>,
     #[serde(default)]
     pub expected_body_sha256: Option<String>,
     /// Diagnostic Stats identities from an earlier bounded read. Caller-supplied
     /// baselines never authorize a terminal send outcome.
     #[serde(default)]
+    #[schemars(length(max = 100), inner(range(min = 1)))]
     pub stats_baseline_ids: Option<Vec<u64>>,
     #[serde(default)]
     #[schemars(range(min = 1, max = 100))]
@@ -161,6 +163,7 @@ pub struct SendStopGateReadinessRequest {
     #[serde(default)]
     pub expected_list_ids: Vec<u64>,
     #[serde(default)]
+    #[schemars(range(min = 1))]
     pub expected_queue_total: Option<u64>,
     #[serde(default)]
     pub oci_ledger_preflight: Option<OciLedgerPreflightRequest>,

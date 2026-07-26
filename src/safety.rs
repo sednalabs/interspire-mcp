@@ -527,8 +527,11 @@ pub fn classify_allowed_admin_get(url: &Url) -> Result<AdminReadPage, Interspire
                 .iter()
                 .find(|(key, _)| key.eq_ignore_ascii_case("id"))
                 .and_then(|(_, value)| value.parse::<u64>().ok())
+                .filter(|id| *id > 0)
                 .ok_or_else(|| {
-                    InterspireError::Safety("newsletter edit page missing numeric id".to_string())
+                    InterspireError::Safety(
+                        "newsletter edit page missing positive numeric id".to_string(),
+                    )
                 })?;
             Ok(AdminReadPage::NewsletterEdit { id })
         }
@@ -1759,6 +1762,20 @@ mod tests {
             .ok(),
             Some(AdminReadPage::StatsNewsletterSummary { stat_id: 18 })
         );
+    }
+
+    #[test]
+    fn newsletter_edit_requires_positive_identity() {
+        for path in [
+            "index.php?Page=Newsletters&Action=Edit",
+            "index.php?Page=Newsletters&Action=Edit&id=0",
+            "index.php?Page=Newsletters&Action=Edit&id=test",
+        ] {
+            assert!(
+                classify_allowed_admin_get(&url(path)).is_err(),
+                "unexpectedly allowed {path}"
+            );
+        }
     }
 
     #[test]

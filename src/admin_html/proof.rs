@@ -70,6 +70,7 @@ struct GuardedSendTerminalInput<'a> {
     smtp_reason: Option<String>,
     popup_steps: usize,
     approved_cron_schedule: bool,
+    response_uncertain: bool,
     proof_gaps: Vec<String>,
     notes: Vec<String>,
 }
@@ -129,6 +130,7 @@ struct GuardedSendProgress {
     smtp_reason: Option<String>,
     popup_steps: usize,
     approved_cron_schedule: bool,
+    response_uncertain: bool,
     notes: Vec<String>,
     queue_after: Option<Vec<String>>,
     stats_after: Option<Vec<String>>,
@@ -1434,6 +1436,7 @@ impl AdminHtmlClient {
         let response = match dispatch(request) {
             Ok(response) => response,
             Err(_) => {
+                progress.response_uncertain = true;
                 return Ok(guarded_send_evidence_from_progress(
                     &input,
                     progress,
@@ -2069,6 +2072,8 @@ impl AdminHtmlClient {
                 )
             }
         });
+        let boundary_evidence_note =
+            guarded_send_boundary_evidence_note(reconciliation.status, "seed-send");
         SeedSendApplyReport {
             ok: sent,
             configured: true,
@@ -2107,7 +2112,7 @@ impl AdminHtmlClient {
             evidence: admin_evidence(vec![
                 "seed send apply requires INTERSPIRE_GUARDED_WRITES=1 and INTERSPIRE_SEND_CONTROLS=1".to_string(),
                 "campaign body audit and send wizard proof passed immediately before final send form post".to_string(),
-                "final send form controls were captured from the live Interspire page and posted to the guarded seed-send route".to_string(),
+                boundary_evidence_note,
             ]),
         }
     }
@@ -2154,6 +2159,8 @@ impl AdminHtmlClient {
                 )
             }
         });
+        let boundary_evidence_note =
+            guarded_send_boundary_evidence_note(reconciliation.status, "production-send");
         ProductionSendApplyReport {
             ok: sent,
             configured: true,
@@ -2194,7 +2201,7 @@ impl AdminHtmlClient {
             evidence: admin_evidence(vec![
                 "production send apply requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, and INTERSPIRE_PRODUCTION_SEND_CONTROLS=1".to_string(),
                 "campaign body audit and send wizard proof passed immediately before final send form post".to_string(),
-                "final send form controls were captured from the live Interspire page and posted to the guarded production-send route".to_string(),
+                boundary_evidence_note,
             ]),
         }
     }
@@ -2850,10 +2857,13 @@ fn guarded_send_evidence_from_progress(
 ) -> GuardedSendEvidence {
     if let Some(gap) = uncertainty_gap {
         progress.job_evidence.add_gap(gap);
-        progress.notes.push(
+        progress.notes.push(if progress.response_uncertain {
+            "request-response uncertainty was retained as a nonterminal reconciliation receipt"
+                .to_string()
+        } else {
             "post-boundary uncertainty was retained as a nonterminal reconciliation receipt"
-                .to_string(),
-        );
+                .to_string()
+        });
     }
     let queue_after = progress
         .queue_after
@@ -2889,6 +2899,7 @@ fn guarded_send_evidence_from_progress(
         smtp_reason: progress.smtp_reason,
         popup_steps: progress.popup_steps,
         approved_cron_schedule: progress.approved_cron_schedule,
+        response_uncertain: progress.response_uncertain,
         proof_gaps: progress.job_evidence.proof_gaps,
         notes: progress.notes,
     });
@@ -3042,17 +3053,24 @@ fn guarded_send_terminal_reconciliation(
         Some(false) | None => {}
     }
 
-    let status = if input.smtp_reason.is_some() {
+    let status = if input.response_uncertain {
+        SendApplyStatus::ResponseUncertain
+    } else if input.smtp_reason.is_some() {
         SendApplyStatus::TransportFailed
     } else if input.job_id.is_some() {
         SendApplyStatus::Queued
     } else {
         SendApplyStatus::Posted
     };
-    if matches!(status, SendApplyStatus::Posted) {
-        proof_gaps.push(
+    match status {
+        SendApplyStatus::ResponseUncertain => proof_gaps.push(
+            "the final request was attempted, but no HTTP response proved whether the application received it"
+                .to_string(),
+        ),
+        SendApplyStatus::Posted => proof_gaps.push(
             "final send boundary was posted without complete durable application proof".to_string(),
-        );
+        ),
+        _ => {}
     }
 
     let follow_up_contract = if matches!(status, SendApplyStatus::Queued) {
@@ -3476,6 +3494,9 @@ fn send_apply_warnings(
     external_monitoring_warning: &str,
 ) -> Vec<String> {
     let mut warnings = match reconciliation.status {
+        SendApplyStatus::ResponseUncertain => vec![format!(
+            "{label} final request was attempted, but no HTTP response proved whether the application received it; reconciliation remains response-uncertain and nonterminal"
+        )],
         SendApplyStatus::Posted => vec![format!(
             "{label} final boundary was posted, but durable application identity and terminal state were not proven; observed execution or readback signals remain nonterminal"
         )],
@@ -3503,6 +3524,20 @@ fn send_apply_warnings(
         ));
     }
     warnings
+}
+
+fn guarded_send_boundary_evidence_note(status: SendApplyStatus, route_label: &str) -> String {
+    match status {
+        SendApplyStatus::Refused => {
+            format!("no final send form request was attempted on the guarded {route_label} route")
+        }
+        SendApplyStatus::ResponseUncertain => format!(
+            "the final send form request was attempted on the guarded {route_label} route, but no HTTP response proved whether the application received it"
+        ),
+        _ => format!(
+            "final send form controls were captured from the live Interspire page and posted to the guarded {route_label} route"
+        ),
+    }
 }
 
 fn transport_failure_reason(html: &str) -> Option<String> {
@@ -4086,13 +4121,14 @@ mod tests {
         campaign_body_step1_pairs, campaign_body_step2_action_path, campaign_test_send_digest,
         campaign_test_send_has_applyable_html, campaign_test_send_report, csrf_pair,
         expected_public_subject_matches, guarded_schedule_approval_url,
-        guarded_send_evidence_from_progress, guarded_send_final_form_post,
-        guarded_send_final_form_post_for_request, guarded_send_popup_url,
-        guarded_send_terminal_reconciliation, is_guarded_send_campaign_selection_name,
-        list_ids_warning, optional_nonempty_sha256, parse_send_wizard_final_page,
-        preview_send_response_success, queue_job_has_exact_manage_campaign, recipient_count_marker,
-        rows_changed_for_send_proof, rows_unchanged_for_send_proof, schedule_job_identity_delta,
-        schedule_job_ids_from_html, seed_send_apply_warnings, selected_or_hidden_list_ids,
+        guarded_send_boundary_evidence_note, guarded_send_evidence_from_progress,
+        guarded_send_final_form_post, guarded_send_final_form_post_for_request,
+        guarded_send_popup_url, guarded_send_terminal_reconciliation,
+        is_guarded_send_campaign_selection_name, list_ids_warning, optional_nonempty_sha256,
+        parse_send_wizard_final_page, preview_send_response_success,
+        queue_job_has_exact_manage_campaign, recipient_count_marker, rows_changed_for_send_proof,
+        rows_unchanged_for_send_proof, schedule_job_identity_delta, schedule_job_ids_from_html,
+        seed_send_apply_warnings, selected_or_hidden_list_ids,
         send_apply_preflight_refusal_warnings, send_step2_action_path, sha256_hex,
         stable_stats_identity_delta, stats_rows_stable_for_no_send_proof, step4_response_summary,
         transport_failure_reason, validate_single_preview_email, GuardedSendJobEvidence,
@@ -4698,7 +4734,10 @@ mod tests {
         assert!(attempted);
         assert_eq!(evidence.status_code, None);
         assert!(!evidence.redirected);
-        assert_eq!(evidence.reconciliation.status, SendApplyStatus::Posted);
+        assert_eq!(
+            evidence.reconciliation.status,
+            SendApplyStatus::ResponseUncertain
+        );
         assert!(!evidence.reconciliation.terminal_application_proven());
         assert_eq!(evidence.reconciliation.sent_count, None);
         assert!(evidence
@@ -4711,6 +4750,20 @@ mod tests {
             .notes
             .iter()
             .any(|note| note.contains("nonterminal reconciliation receipt")));
+        let warnings = seed_send_apply_warnings(&evidence.reconciliation);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("response-uncertain")));
+        assert!(warnings.iter().all(|warning| !warning.contains("posted")));
+        assert!(evidence
+            .reconciliation
+            .proof_gaps
+            .iter()
+            .all(|gap| !gap.contains("posted")));
+        let evidence_note =
+            guarded_send_boundary_evidence_note(evidence.reconciliation.status, "seed-send");
+        assert!(evidence_note.contains("request was attempted"));
+        assert!(!evidence_note.contains("posted"));
     }
 
     #[test]
@@ -5027,6 +5080,7 @@ mod tests {
             smtp_reason: None,
             popup_steps: 2,
             approved_cron_schedule: false,
+            response_uncertain: false,
             proof_gaps: Vec::new(),
             notes: vec!["send popup loop stopped after a repeated route".to_string()],
         });
@@ -5084,6 +5138,7 @@ mod tests {
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
+            response_uncertain: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5127,6 +5182,7 @@ mod tests {
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
+            response_uncertain: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5167,6 +5223,7 @@ mod tests {
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
+            response_uncertain: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5209,6 +5266,7 @@ mod tests {
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
+            response_uncertain: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5246,6 +5304,7 @@ mod tests {
             smtp_reason: None,
             popup_steps: 0,
             approved_cron_schedule: false,
+            response_uncertain: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5265,6 +5324,7 @@ mod tests {
             smtp_reason: Some("synthetic transport failure".to_string()),
             popup_steps: 1,
             approved_cron_schedule: false,
+            response_uncertain: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });

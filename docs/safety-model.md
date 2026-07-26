@@ -330,19 +330,23 @@ explicitly approved send.
 
 Posting the final form is not considered proof of a send. Apply responses carry
 a post-send reconciliation object with the explicit status vocabulary
-`posted`, `queued`, `processed`, `transport_failed`, `delivered_unverified`,
-and `seed_proven`. After the final form post, the MCP follows only allowlisted
+`response_uncertain`, `posted`, `queued`, `processed`, `transport_failed`,
+`delivered_unverified`, and `seed_proven`. `response_uncertain` means the final
+request was attempted but no HTTP response proved whether the application
+received it; it must never be described as posted. After a confirmed final form
+post, the MCP follows only allowlisted
 Interspire popup send continuations of `Page=Send&Action=Send` with a numeric
 job identifier, including `Started=1` continuation routes, then rereads
-Schedule and Stats. `sent=true` is reserved for terminal reconciliation states,
+Schedule, newsletter Manage, and Stats. `sent=true` is reserved for terminal
+reconciliation states,
 not for HTTP 200 or 302 alone.
 
 Queued-not-proven sends may include a `follow_up_contract` with the Interspire
-job id, campaign id, list ids, expected queue total, bounded Stats identity
-baseline, and the `interspire_send_job_status_readback` tool name. That status
-tool reads only allowlisted Schedule, newsletter Manage, and Stats pages. The
-same positive job may be normalized across one bounded row on each active source
-only when every Manage row proves the intended campaign. A Schedule-only
+job id, campaign id, list ids, positive expected queue total, bounded positive
+Stats identity baseline, and the `interspire_send_job_status_readback` tool
+name. That status tool reads only allowlisted Schedule, newsletter Manage, and
+Stats pages. The same positive job may be normalized across one bounded row on
+each active source only when every Manage row proves the intended campaign. A Schedule-only
 singleton discovered after an apply cannot create job identity unless popup
 evidence already agrees or the bounded Manage inventory supplies that campaign
 association.

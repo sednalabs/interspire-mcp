@@ -1955,7 +1955,7 @@
           "expected_queue_total": {
             "default": null,
             "format": "uint64",
-            "minimum": 0,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -1976,9 +1976,10 @@
             "description": "Diagnostic Stats identities from an earlier bounded read. Caller-supplied\nbaselines never authorize a terminal send outcome.",
             "items": {
               "format": "uint64",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
+            "maxItems": 100,
             "type": [
               "array",
               "null"
@@ -2093,7 +2094,7 @@
           "expected_queue_total": {
             "default": null,
             "format": "uint64",
-            "minimum": 0,
+            "minimum": 1,
             "type": [
               "integer",
               "null"

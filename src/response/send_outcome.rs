@@ -6,6 +6,7 @@ use serde::Serialize;
 #[serde(rename_all = "snake_case")]
 pub enum SendApplyStatus {
     Refused,
+    ResponseUncertain,
     Posted,
     Queued,
     Processed,
@@ -365,13 +366,19 @@ mod tests {
     #[test]
     fn send_reconciliation_terminal_controls_preserve_nonterminal_states() {
         let refused = reconciliation(SendApplyStatus::Refused, None, None);
+        let response_uncertain = reconciliation(SendApplyStatus::ResponseUncertain, None, None);
         let posted = reconciliation(SendApplyStatus::Posted, None, None);
         let queued = reconciliation(SendApplyStatus::Queued, Some(41), None);
 
         assert_eq!(refused.status, SendApplyStatus::Refused);
+        assert_eq!(
+            response_uncertain.status,
+            SendApplyStatus::ResponseUncertain
+        );
         assert_eq!(posted.status, SendApplyStatus::Posted);
         assert_eq!(queued.status, SendApplyStatus::Queued);
         assert!(!refused.terminal_application_proven());
+        assert!(!response_uncertain.terminal_application_proven());
         assert!(!posted.terminal_application_proven());
         assert!(!queued.terminal_application_proven());
     }

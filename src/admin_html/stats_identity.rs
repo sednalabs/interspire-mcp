@@ -250,5 +250,13 @@ mod tests {
             <a class="pagination nextpage" href="index.php?Page=Stats&amp;DisplayPage=2">Next</a>
         "#;
         assert!(parse_stats_identity_inventory(BASE, paginated, 25).is_err());
+
+        let blank_icon_pagination = r#"
+            <table>
+              <tr><td>Campaign A 25 0 0 <a href="index.php?Page=Stats&amp;Action=Newsletters&amp;SubAction=Step1&amp;statid=71">View</a></td></tr>
+            </table>
+            <a href="index.php?Page=Stats&amp;DisplayPage=2"><img src="next.svg" alt=""></a>
+        "#;
+        assert!(parse_stats_identity_inventory(BASE, blank_icon_pagination, 25).is_err());
     }
 }

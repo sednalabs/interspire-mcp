@@ -113,7 +113,7 @@ automation, narrow source harvesting, and no-send proof, use
 | `interspire_queue_stats_readback` | Read | Read scheduled queue and stats rows without triggering cron. |
 | `interspire_queue_control_preview` | Read preview | Build source-bound plan IDs for cancel/delete/pause/resume actions found on Schedule or exact immediate-job actions on newsletter Manage. |
 | `interspire_queue_control_apply` | Guarded apply | Apply one acknowledged, previously previewed queue plan when write gates are enabled, then prove the transition from fresh Schedule and Manage reads. |
-| `interspire_send_job_status_readback` | Read | Read bounded Schedule/Manage/Stats context for one positive send job. Active identity requires exact queue-control routes and every Manage row must prove its exact campaign association. Stats identities and caller baselines are diagnostic only because the bounded admin surface exposes no application-native job-to-Stats association; they never authorize terminal state. |
+| `interspire_send_job_status_readback` | Read | Read bounded Schedule/Manage/Stats context for one positive send job and optional positive expected queue total. Active identity requires exact queue-control routes and every Manage row must prove its exact campaign association. Stats identities and caller baselines are bounded positive diagnostic identities only because the bounded admin surface exposes no application-native job-to-Stats association; they never authorize terminal state. |
 | `interspire_cron_readiness` | Read | Compare Interspire cron settings with Schedule-page cron detection without triggering `cron.php`. |
 | `interspire_send_stop_gate_readiness` | No-mutation proof | Combine send-job status and optional OCI ledger preflight into a hold/continue/pause recommendation; any pause still requires separate queue-control apply. |
 | `interspire_campaign_readback` | Read | Read campaign manage rows with structured campaign ids/action flags, or one campaign edit-page summary. |
@@ -521,10 +521,13 @@ that did not fail blocker gates are not fatal by themselves. Apply refuses
 before the final send boundary only for failed readiness blockers, expected
 subject or body-hash mismatches, unsafe final-form proof, missing runtime gates,
 or ledger failure. Failed post-send reconciliation is reported as a post-boundary
-non-success state, not as proof that no send boundary was attempted.
+non-success state, not as proof that no send boundary was attempted. If the
+request loses its HTTP response, the result is instead `response_uncertain`:
+the request was attempted, but the MCP does not claim that the boundary was
+posted or received by the application.
 The tools then follow the allowlisted Interspire popup send loop, reread
 Schedule, Manage, and Stats, and classify the
-result as `posted`, `queued`, `processed`, `transport_failed`,
+result as `response_uncertain`, `posted`, `queued`, `processed`, `transport_failed`,
 `delivered_unverified`, or `seed_proven`. The current bounded admin surface has
 no application-native association between a send job and a Stats row, so a
 disappearing job plus a new same-label or same-count Stats identity remains
@@ -532,9 +535,10 @@ disappearing job plus a new same-label or same-count Stats identity remains
 without native bound proof remains non-successful `posted-unproven` evidence.
 When Interspire creates a job but completion is not yet proven, the
 reconciliation object can include a `follow_up_contract` containing the job id,
-campaign id, list ids, expected queue total, bounded Stats identity baseline,
-and status tool name for `interspire_send_job_status_readback`. That baseline is
-diagnostic bounded context, not terminal authority.
+campaign id, list ids, positive expected queue total, bounded positive Stats
+identity baseline, and status tool name for
+`interspire_send_job_status_readback`. That baseline is diagnostic bounded
+context, not terminal authority.
 Production sending should still be paired with provider-side monitoring and an
 Ops work item reference.
 
