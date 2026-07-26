@@ -333,8 +333,24 @@ a post-send reconciliation object with the explicit status vocabulary
 `response_uncertain`, `posted`, `queued`, `processed`, `transport_failed`,
 `delivered_unverified`, and `seed_proven`. `response_uncertain` means the final
 request was attempted but no HTTP response proved whether the application
-received it; it must never be described as posted. After a confirmed final form
-post, the MCP follows only allowlisted
+received it; it must never be described as posted and must never authorize a
+retry or resend. On that error branch, the same invocation attempts only
+bounded authenticated Schedule, newsletter Manage, and Stats readback against
+the identity baselines captured earlier in that invocation before dispatch. The returned
+`uncertainty_recovery_contract` is closed to `hold_do_not_retry`;
+`retry_authorized`, `mutation_authorized`, and
+`terminal_success_authorized` remain false.
+
+The recovery contract carries the exact intended campaign/list/count/body
+context, bounded pre-dispatch Schedule and Stats identities, same-invocation
+capture/readback proof, readback completeness, and a closed identity state. A
+complete readback with one positive exact Manage-bound job may nest read-only
+`interspire_send_job_status_readback` context. No new job, ambiguous or unbound
+jobs, and failed, partial, paginated, or capped readback keep the hold and expose
+no automatic job follow-up. Absence is not non-receipt proof, and ambiguity
+must not be resolved through row order, labels, counts, or timing.
+
+After a confirmed final form post, the MCP follows only allowlisted
 Interspire popup send continuations of `Page=Send&Action=Send` with a numeric
 job identifier, including `Started=1` continuation routes, then rereads
 Schedule, newsletter Manage, and Stats. `sent=true` is reserved for terminal

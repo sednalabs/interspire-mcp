@@ -16,8 +16,8 @@ use crate::{
         ProductionSendApplyReport, ProductionSendApplyRequest, RenderArtifact, SeedReadinessGate,
         SeedReadinessGateReport, SeedReadinessGateRequest, SeedSendApplyReport,
         SeedSendApplyRequest, SendApplyStatus, SendJobFollowUpContract, SendReconciliationReport,
-        SendWizardReadbackReport, SendWizardReadbackRequest, MAX_SEED_SEND_RECIPIENTS,
-        PRODUCTION_SEND_CONFIRMATION_PHRASE,
+        SendUncertaintyIdentityState, SendUncertaintyRecoveryContract, SendWizardReadbackReport,
+        SendWizardReadbackRequest, MAX_SEED_SEND_RECIPIENTS, PRODUCTION_SEND_CONFIRMATION_PHRASE,
     },
     safety::{self, AdminReadPage},
 };
@@ -62,15 +62,19 @@ struct GuardedSendTerminalInput<'a> {
     queue_after: &'a [String],
     stats_before: &'a [String],
     stats_after: &'a [String],
+    schedule_job_ids_before: &'a BTreeSet<u64>,
     stats_identity_before: &'a StatsIdentityInventory,
     stats_identity_after: &'a StatsIdentityInventory,
     expected_recipient_count: u64,
+    baseline_max_rows: usize,
     job_id: Option<u64>,
     job_active_after: Option<bool>,
     smtp_reason: Option<String>,
     popup_steps: usize,
     approved_cron_schedule: bool,
     response_uncertain: bool,
+    reconciliation_readback_complete: bool,
+    job_identity_ambiguous: bool,
     proof_gaps: Vec<String>,
     notes: Vec<String>,
 }
@@ -137,6 +141,8 @@ struct GuardedSendProgress {
     stats_identity_after: Option<StatsIdentityInventory>,
     active_job_ids_after: Option<BTreeSet<u64>>,
     schedule_delta_candidate: Option<u64>,
+    reconciliation_readback_complete: bool,
+    job_identity_ambiguous: bool,
 }
 
 impl AdminHtmlClient {
@@ -1437,13 +1443,14 @@ impl AdminHtmlClient {
             Ok(response) => response,
             Err(_) => {
                 progress.response_uncertain = true;
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
-                    progress,
-                    Some(
-                        "the final request was attempted but no HTTP response was available; whether it reached the application remains uncertain",
-                    ),
-                ));
+                progress.job_evidence.add_gap(
+                    "the final request was attempted but no HTTP response was available; whether it reached the application remains uncertain",
+                );
+                progress.notes.push(
+                    "request-response uncertainty was retained as a nonterminal reconciliation receipt"
+                        .to_string(),
+                );
+                return Ok(self.complete_guarded_send_readback(&input, progress, None));
             }
         };
         let status = response.status();
@@ -1691,24 +1698,33 @@ impl AdminHtmlClient {
             }
         }
 
+        Ok(self.complete_guarded_send_readback(&input, progress, final_response_summary))
+    }
+
+    fn complete_guarded_send_readback(
+        &self,
+        input: &GuardedSendReconcileInput<'_>,
+        mut progress: GuardedSendProgress,
+        final_response_summary: Option<String>,
+    ) -> GuardedSendEvidence {
         let schedule_after_html = match self.get_allowed(&AdminReadPage::Schedule.path()) {
             Ok(html) => html,
             Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
+                return guarded_send_evidence_from_progress(
+                    input,
                     progress,
                     Some("Schedule readback was unavailable after request dispatch"),
-                ));
+                );
             }
         };
         progress.queue_after = match parse_table_rows(&schedule_after_html, input.max_rows) {
             Ok(rows) => Some(rows),
             Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
+                return guarded_send_evidence_from_progress(
+                    input,
                     progress,
                     Some("Schedule readback could not be parsed after request dispatch"),
-                ));
+                );
             }
         };
         match schedule_job_identity_delta(
@@ -1725,6 +1741,7 @@ impl AdminHtmlClient {
                 progress.schedule_delta_candidate = Some(job_id);
             }
             ScheduleJobIdentityDelta::Ambiguous { added, removed } => {
+                progress.job_identity_ambiguous = true;
                 progress.job_evidence.add_gap(format!(
                     "Schedule identity reconciliation was ambiguous: {added} added and {removed} removed"
                 ));
@@ -1734,21 +1751,21 @@ impl AdminHtmlClient {
         let stats_after_html = match self.get_allowed(&AdminReadPage::Stats.path()) {
             Ok(html) => html,
             Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
+                return guarded_send_evidence_from_progress(
+                    input,
                     progress,
                     Some("Stats readback was unavailable after request dispatch"),
-                ));
+                );
             }
         };
         progress.stats_after = match parse_table_rows(&stats_after_html, input.max_rows) {
             Ok(rows) => Some(rows),
             Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
+                return guarded_send_evidence_from_progress(
+                    input,
                     progress,
                     Some("Stats readback could not be parsed after request dispatch"),
-                ));
+                );
             }
         };
         progress.stats_identity_after = match parse_stats_identity_inventory(
@@ -1758,11 +1775,11 @@ impl AdminHtmlClient {
         ) {
             Ok(inventory) => Some(inventory),
             Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                    &input,
+                return guarded_send_evidence_from_progress(
+                    input,
                     progress,
                     Some("Stats identity readback was incomplete after request dispatch"),
-                ));
+                );
             }
         };
         let queue_inventory = match self
@@ -1770,13 +1787,13 @@ impl AdminHtmlClient {
         {
             Ok(inventory) => inventory,
             Err(_) => {
-                return Ok(guarded_send_evidence_from_progress(
-                        &input,
+                return guarded_send_evidence_from_progress(
+                        input,
                         progress,
                         Some(
                             "Schedule and campaign Manage identity readback was incomplete after request dispatch",
                         ),
-                    ));
+                    );
             }
         };
         progress.active_job_ids_after = Some(
@@ -1800,6 +1817,7 @@ impl AdminHtmlClient {
                     .job_evidence
                     .observe(Some(job_id), "bound Schedule identity delta");
             } else {
+                progress.job_identity_ambiguous = true;
                 progress.job_evidence.add_gap(
                     "a singleton Schedule identity delta lacked an exact campaign Manage association"
                         .to_string(),
@@ -1823,7 +1841,8 @@ impl AdminHtmlClient {
                     .push(format!("Final Step4 response summary: {summary}"));
             }
         }
-        Ok(guarded_send_evidence_from_progress(&input, progress, None))
+        progress.reconciliation_readback_complete = true;
+        guarded_send_evidence_from_progress(input, progress, None)
     }
 
     fn proof_post_with_page_context(
@@ -2857,13 +2876,16 @@ fn guarded_send_evidence_from_progress(
 ) -> GuardedSendEvidence {
     if let Some(gap) = uncertainty_gap {
         progress.job_evidence.add_gap(gap);
-        progress.notes.push(if progress.response_uncertain {
+        let note = if progress.response_uncertain {
             "request-response uncertainty was retained as a nonterminal reconciliation receipt"
                 .to_string()
         } else {
             "post-boundary uncertainty was retained as a nonterminal reconciliation receipt"
                 .to_string()
-        });
+        };
+        if !progress.notes.contains(&note) {
+            progress.notes.push(note);
+        }
     }
     let queue_after = progress
         .queue_after
@@ -2883,6 +2905,8 @@ fn guarded_send_evidence_from_progress(
             .as_ref()
             .is_none_or(|job_ids| job_ids.contains(&job_id))
     });
+    let job_identity_ambiguous =
+        progress.job_evidence.conflicted || progress.job_identity_ambiguous;
     let reconciliation = guarded_send_terminal_reconciliation(GuardedSendTerminalInput {
         campaign_id: input.campaign_id,
         list_ids: input.list_ids,
@@ -2891,15 +2915,19 @@ fn guarded_send_evidence_from_progress(
         queue_after,
         stats_before: input.stats_before,
         stats_after,
+        schedule_job_ids_before: input.schedule_job_ids_before,
         stats_identity_before: input.stats_identity_before,
         stats_identity_after,
         expected_recipient_count: input.expected_recipient_count,
+        baseline_max_rows: input.max_rows,
         job_id: progress.job_evidence.job_id,
         job_active_after,
         smtp_reason: progress.smtp_reason,
         popup_steps: progress.popup_steps,
         approved_cron_schedule: progress.approved_cron_schedule,
         response_uncertain: progress.response_uncertain,
+        reconciliation_readback_complete: progress.reconciliation_readback_complete,
+        job_identity_ambiguous,
         proof_gaps: progress.job_evidence.proof_gaps,
         notes: progress.notes,
     });
@@ -3063,27 +3091,64 @@ fn guarded_send_terminal_reconciliation(
         SendApplyStatus::Posted
     };
     match status {
-        SendApplyStatus::ResponseUncertain => proof_gaps.push(
-            "the final request was attempted, but no HTTP response proved whether the application received it"
-                .to_string(),
-        ),
+        SendApplyStatus::ResponseUncertain => {
+            proof_gaps.push(
+                "the final request was attempted, but no HTTP response proved whether the application received it"
+                    .to_string(),
+            );
+            proof_gaps.push(
+                "retry or resend is not authorized while request-response uncertainty remains"
+                    .to_string(),
+            );
+        }
         SendApplyStatus::Posted => proof_gaps.push(
             "final send boundary was posted without complete durable application proof".to_string(),
         ),
         _ => {}
     }
 
+    let status_follow_up = input.job_id.map(|job_id| {
+        SendJobFollowUpContract::new(
+            job_id,
+            input.campaign_id,
+            input.list_ids.to_vec(),
+            input.expected_recipient_count,
+            input.expected_body_sha256.clone(),
+        )
+        .with_stats_baseline(input.stats_identity_before.ids().into_iter().collect())
+    });
     let follow_up_contract = if matches!(status, SendApplyStatus::Queued) {
-        input.job_id.map(|job_id| {
-            SendJobFollowUpContract::new(
-                job_id,
-                input.campaign_id,
-                input.list_ids.to_vec(),
-                input.expected_recipient_count,
-                input.expected_body_sha256,
-            )
-            .with_stats_baseline(input.stats_identity_before.ids().into_iter().collect())
-        })
+        status_follow_up.clone()
+    } else {
+        None
+    };
+    let uncertainty_recovery_contract = if matches!(status, SendApplyStatus::ResponseUncertain) {
+        let identity_state = if !input.reconciliation_readback_complete {
+            SendUncertaintyIdentityState::ReadbackIncomplete
+        } else if input.job_identity_ambiguous {
+            SendUncertaintyIdentityState::AmbiguousOrUnbound
+        } else if input.job_id.is_some() {
+            SendUncertaintyIdentityState::ExactJob
+        } else {
+            SendUncertaintyIdentityState::NoNewJob
+        };
+        Some(SendUncertaintyRecoveryContract::hold(
+            input.campaign_id,
+            input.list_ids.to_vec(),
+            input.expected_recipient_count,
+            input.expected_body_sha256.clone(),
+            input.schedule_job_ids_before.iter().copied().collect(),
+            input.stats_identity_before.ids().into_iter().collect(),
+            input.baseline_max_rows,
+            input.reconciliation_readback_complete,
+            identity_state,
+            input.job_id,
+            if matches!(identity_state, SendUncertaintyIdentityState::ExactJob) {
+                status_follow_up
+            } else {
+                None
+            },
+        ))
     } else {
         None
     };
@@ -3106,6 +3171,7 @@ fn guarded_send_terminal_reconciliation(
         notes,
     )
     .with_follow_up_contract(follow_up_contract)
+    .with_uncertainty_recovery_contract(uncertainty_recovery_contract)
 }
 
 fn stats_rows_stable_for_no_send_proof(before: &[String], after: &[String]) -> bool {
@@ -3495,7 +3561,7 @@ fn send_apply_warnings(
 ) -> Vec<String> {
     let mut warnings = match reconciliation.status {
         SendApplyStatus::ResponseUncertain => vec![format!(
-            "{label} final request was attempted, but no HTTP response proved whether the application received it; reconciliation remains response-uncertain and nonterminal"
+            "{label} final request was attempted, but no HTTP response proved whether the application received it; reconciliation remains response-uncertain, so HOLD and do not retry or resend, and use only the returned bounded read-only uncertainty recovery contract"
         )],
         SendApplyStatus::Posted => vec![format!(
             "{label} final boundary was posted, but durable application identity and terminal state were not proven; observed execution or readback signals remain nonterminal"
@@ -3532,7 +3598,7 @@ fn guarded_send_boundary_evidence_note(status: SendApplyStatus, route_label: &st
             format!("no final send form request was attempted on the guarded {route_label} route")
         }
         SendApplyStatus::ResponseUncertain => format!(
-            "the final send form request was attempted on the guarded {route_label} route, but no HTTP response proved whether the application received it"
+            "the final send form request was attempted on the guarded {route_label} route, but no HTTP response proved whether the application received it; hold and do not retry or resend"
         ),
         _ => format!(
             "final send form controls were captured from the live Interspire page and posted to the guarded {route_label} route"
@@ -4140,11 +4206,24 @@ mod tests {
         redact,
         response::{
             CampaignBodyAuditReport, CampaignTestSendApplyRequest, SendApplyStatus,
-            SendReconciliationReport,
+            SendReconciliationReport, SendUncertaintyDecision, SendUncertaintyIdentityState,
+            SendUncertaintyNextAction,
         },
     };
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
     use url::Url;
+
+    const RESPONSE_LOSS_LIST_IDS: &[u64] = &[8001];
 
     fn empty_stats_identity_inventory() -> StatsIdentityInventory {
         StatsIdentityInventory { rows: Vec::new() }
@@ -4172,6 +4251,215 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ResponseLossReadbackFixture {
+        ExactJob,
+        NoNewJob,
+        AmbiguousJobs,
+        Capped,
+    }
+
+    struct ResponseLossReadbackServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        stop: Arc<AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl ResponseLossReadbackServer {
+        fn requests(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|err| panic!("response-loss request lock poisoned: {err}"))
+                .clone()
+        }
+    }
+
+    impl Drop for ResponseLossReadbackServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| panic!("response-loss fixture server thread panicked"));
+            }
+        }
+    }
+
+    fn spawn_response_loss_readback_server(
+        mode: ResponseLossReadbackFixture,
+    ) -> ResponseLossReadbackServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|err| panic!("bind failed: {err}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|err| panic!("set_nonblocking failed: {err}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|err| panic!("local_addr failed: {err}"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !thread_stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .unwrap_or_else(|err| panic!("set_read_timeout failed: {err}"));
+                        let mut buffer = [0_u8; 8192];
+                        let bytes = stream
+                            .read(&mut buffer)
+                            .unwrap_or_else(|err| panic!("fixture request read failed: {err}"));
+                        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                        thread_requests
+                            .lock()
+                            .unwrap_or_else(|err| {
+                                panic!("response-loss request lock poisoned: {err}")
+                            })
+                            .push(request.clone());
+                        write_response_loss_readback(&mut stream, &request, mode);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => panic!("response-loss fixture accept failed: {err}"),
+                }
+            }
+        });
+        ResponseLossReadbackServer {
+            base_url: format!("http://{address}/admin/"),
+            requests,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn write_response_loss_readback(
+        stream: &mut std::net::TcpStream,
+        request: &str,
+        mode: ResponseLossReadbackFixture,
+    ) {
+        let body = if request.contains("Page=Schedule") {
+            response_loss_schedule_html(mode)
+        } else if request.contains("Page=Stats") {
+            response_loss_stats_html(mode)
+        } else if request.contains("Page=Newsletters&Action=Manage") {
+            response_loss_manage_html(mode)
+        } else {
+            "<html><body>unexpected synthetic read-only request</body></html>"
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .unwrap_or_else(|err| panic!("fixture response write failed: {err}"));
+    }
+
+    fn response_loss_schedule_html(mode: ResponseLossReadbackFixture) -> &'static str {
+        match mode {
+            ResponseLossReadbackFixture::ExactJob => {
+                r#"<html><body><h1>View Scheduled Email Queue</h1><table>
+                    <tr><th>Campaign</th><th>Actions</th></tr>
+                    <tr><td>Synthetic active job</td><td><a href="index.php?Page=Schedule&Action=Pause&job=43">Pause</a></td></tr>
+                  </table></body></html>"#
+            }
+            ResponseLossReadbackFixture::AmbiguousJobs => {
+                r#"<html><body><h1>View Scheduled Email Queue</h1><table>
+                    <tr><th>Campaign</th><th>Actions</th></tr>
+                    <tr><td>Synthetic active job one</td><td><a href="index.php?Page=Schedule&Action=Pause&job=43">Pause</a></td></tr>
+                    <tr><td>Synthetic active job two</td><td><a href="index.php?Page=Schedule&Action=Pause&job=44">Pause</a></td></tr>
+                  </table></body></html>"#
+            }
+            ResponseLossReadbackFixture::NoNewJob | ResponseLossReadbackFixture::Capped => {
+                "<html><body><h1>View Scheduled Email Queue</h1><p>There are no emails currently scheduled.</p></body></html>"
+            }
+        }
+    }
+
+    fn response_loss_manage_html(mode: ResponseLossReadbackFixture) -> &'static str {
+        match mode {
+            ResponseLossReadbackFixture::ExactJob => {
+                r#"<html><body><h1>View Email Campaigns</h1><table>
+                    <tr><th>Campaign</th><th>Actions</th></tr>
+                    <tr><td>Synthetic campaign</td><td>
+                      <a href="index.php?Page=Newsletters&Action=Edit&id=9001">Edit</a>
+                      <a href="index.php?Page=Send&Action=PauseSend&Job=43">Pause</a>
+                    </td></tr>
+                  </table></body></html>"#
+            }
+            ResponseLossReadbackFixture::NoNewJob
+            | ResponseLossReadbackFixture::AmbiguousJobs
+            | ResponseLossReadbackFixture::Capped => {
+                "<html><body><h1>View Email Campaigns</h1><p>There are no email campaigns.</p></body></html>"
+            }
+        }
+    }
+
+    fn response_loss_stats_html(mode: ResponseLossReadbackFixture) -> &'static str {
+        match mode {
+            ResponseLossReadbackFixture::Capped => {
+                r#"<html><body><h1>Email Campaign Statistics</h1><table>
+                    <tr><th>Campaign</th><th>Counts</th><th>Actions</th></tr>
+                    <tr><td>Baseline Campaign</td><td>25 0 0</td><td><a href="index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=70">View</a></td></tr>
+                    <tr><td>Synthetic Campaign Two</td><td>25 0 0</td><td><a href="index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=71">View</a></td></tr>
+                    <tr><td>Synthetic Campaign Three</td><td>25 0 0</td><td><a href="index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=72">View</a></td></tr>
+                  </table></body></html>"#
+            }
+            ResponseLossReadbackFixture::ExactJob
+            | ResponseLossReadbackFixture::NoNewJob
+            | ResponseLossReadbackFixture::AmbiguousJobs => {
+                r#"<html><body><h1>Email Campaign Statistics</h1><table>
+                    <tr><th>Campaign</th><th>Counts</th><th>Actions</th></tr>
+                    <tr><td>Baseline Campaign</td><td>25 0 0</td><td><a href="index.php?Page=Stats&Action=Newsletters&SubAction=Step1&statid=70">View</a></td></tr>
+                  </table></body></html>"#
+            }
+        }
+    }
+
+    fn response_loss_input<'a>(
+        base_url: &str,
+        queue_before: &'a [String],
+        schedule_job_ids_before: &'a BTreeSet<u64>,
+        stats_before: &'a [String],
+        stats_identity_before: &'a StatsIdentityInventory,
+        max_rows: usize,
+    ) -> GuardedSendReconcileInput<'a> {
+        GuardedSendReconcileInput {
+            send_form: (
+                Url::parse(&format!("{base_url}index.php?Page=Send&Action=Step4"))
+                    .expect("synthetic send URL"),
+                Vec::new(),
+            ),
+            campaign_id: 9001,
+            list_ids: RESPONSE_LOSS_LIST_IDS,
+            expected_body_sha256: Some("synthetic-body-sha256".to_string()),
+            queue_before,
+            schedule_job_ids_before,
+            stats_before,
+            stats_identity_before,
+            expected_recipient_count: 25,
+            max_rows,
+        }
+    }
+
+    fn response_loss_client(base_url: &str) -> super::AdminHtmlClient {
+        super::AdminHtmlClient::new(AdminHtmlConfig {
+            version: InterspireVersion::Auto,
+            base_url: Some(base_url.to_string()),
+            username: Some("fixture-user".to_string()),
+            password: Some("fixture-value".to_string()),
+            cloudflare_access: crate::config::CloudflareAccessConfig::default(),
+            enrich_limit: 25,
+        })
+        .unwrap_or_else(|err| panic!("{err}"))
     }
 
     #[test]
@@ -4693,36 +4981,21 @@ mod tests {
     }
 
     #[test]
-    fn guarded_send_response_loss_exercises_attempted_send_error_branch() {
+    fn guarded_send_response_loss_reconciles_reached_request_without_retry_authority() {
+        let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::ExactJob);
         let queue = Vec::new();
-        let stats = Vec::new();
-        let stats_identity = empty_stats_identity_inventory();
+        let stats = vec!["Baseline Campaign 25 0 0 View".to_string()];
+        let stats_identity = stats_identity_inventory(&[(70, 25)]);
         let schedule_job_ids = BTreeSet::new();
-        let client = super::AdminHtmlClient::new(AdminHtmlConfig {
-            version: InterspireVersion::Auto,
-            base_url: Some("https://example.test/admin/".to_string()),
-            username: Some("fixture-user".to_string()),
-            password: Some("fixture-value".to_string()),
-            cloudflare_access: crate::config::CloudflareAccessConfig::default(),
-            enrich_limit: 25,
-        })
-        .unwrap_or_else(|err| panic!("{err}"));
-        let input = GuardedSendReconcileInput {
-            send_form: (
-                Url::parse("https://example.test/admin/index.php?Page=Send&Action=Step4")
-                    .expect("synthetic send URL"),
-                Vec::new(),
-            ),
-            campaign_id: 9001,
-            list_ids: &[8001],
-            expected_body_sha256: None,
-            queue_before: &queue,
-            schedule_job_ids_before: &schedule_job_ids,
-            stats_before: &stats,
-            stats_identity_before: &stats_identity,
-            expected_recipient_count: 25,
-            max_rows: 25,
-        };
+        let client = response_loss_client(&server.base_url);
+        let input = response_loss_input(
+            &server.base_url,
+            &queue,
+            &schedule_job_ids,
+            &stats,
+            &stats_identity,
+            25,
+        );
         let mut attempted = false;
         let evidence = client
             .post_guarded_send_and_reconcile_with_dispatch(input, |_| {
@@ -4740,6 +5013,39 @@ mod tests {
         );
         assert!(!evidence.reconciliation.terminal_application_proven());
         assert_eq!(evidence.reconciliation.sent_count, None);
+        assert_eq!(evidence.reconciliation.job_id, Some(43));
+        assert!(evidence.reconciliation.follow_up_contract.is_none());
+        let recovery = evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .as_ref()
+            .expect("response uncertainty recovery contract");
+        assert_eq!(recovery.decision, SendUncertaintyDecision::HoldDoNotRetry);
+        assert!(!recovery.retry_authorized);
+        assert!(!recovery.mutation_authorized);
+        assert!(!recovery.terminal_success_authorized);
+        assert!(recovery.baselines_authenticated);
+        assert!(recovery.baselines_captured_before_dispatch);
+        assert!(recovery.reconciliation_attempted_in_same_invocation);
+        assert!(recovery.readback_complete);
+        assert_eq!(
+            recovery.identity_state,
+            SendUncertaintyIdentityState::ExactJob
+        );
+        assert_eq!(recovery.observed_job_id, Some(43));
+        assert_eq!(
+            recovery.next_action,
+            SendUncertaintyNextAction::ReadOnlyJobStatus
+        );
+        let status_follow_up = recovery
+            .status_follow_up
+            .as_ref()
+            .expect("exact job recovery status context");
+        assert_eq!(status_follow_up.job_id, 43);
+        assert_eq!(status_follow_up.campaign_id, 9001);
+        assert_eq!(status_follow_up.list_ids, vec![8001]);
+        assert_eq!(status_follow_up.stats_baseline_ids, vec![70]);
+        assert!(recovery.guidance.contains("do not retry or resend"));
         assert!(evidence
             .reconciliation
             .proof_gaps
@@ -4764,6 +5070,163 @@ mod tests {
             guarded_send_boundary_evidence_note(evidence.reconciliation.status, "seed-send");
         assert!(evidence_note.contains("request was attempted"));
         assert!(!evidence_note.contains("posted"));
+        let requests = server.requests();
+        assert!(requests
+            .iter()
+            .any(|request| request.contains("Page=Schedule")));
+        assert!(requests
+            .iter()
+            .any(|request| request.contains("Page=Stats")));
+        assert!(requests
+            .iter()
+            .any(|request| request.contains("Page=Newsletters&Action=Manage")));
+        assert!(requests.iter().all(|request| request.starts_with("GET ")));
+        assert!(requests
+            .iter()
+            .all(|request| !request.contains("Page=Send")));
+    }
+
+    #[test]
+    fn guarded_send_response_loss_with_no_new_identity_holds_without_retry() {
+        let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::NoNewJob);
+        let queue = Vec::new();
+        let stats = vec!["Baseline Campaign 25 0 0 View".to_string()];
+        let stats_identity = stats_identity_inventory(&[(70, 25)]);
+        let schedule_job_ids = BTreeSet::new();
+        let client = response_loss_client(&server.base_url);
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(
+                    &server.base_url,
+                    &queue,
+                    &schedule_job_ids,
+                    &stats,
+                    &stats_identity,
+                    25,
+                ),
+                |_| Err::<reqwest::blocking::Response, _>(()),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            evidence.reconciliation.status,
+            SendApplyStatus::ResponseUncertain
+        );
+        assert_eq!(evidence.reconciliation.job_id, None);
+        assert!(evidence.reconciliation.follow_up_contract.is_none());
+        let recovery = evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .as_ref()
+            .expect("response uncertainty recovery contract");
+        assert!(recovery.readback_complete);
+        assert_eq!(
+            recovery.identity_state,
+            SendUncertaintyIdentityState::NoNewJob
+        );
+        assert_eq!(recovery.observed_job_id, None);
+        assert!(recovery.status_follow_up.is_none());
+        assert_eq!(
+            recovery.next_action,
+            SendUncertaintyNextAction::HoldForBoundedReadOnlyReconciliation
+        );
+        assert!(!recovery.retry_authorized);
+        assert!(recovery.guidance.contains("absence of a new identity"));
+    }
+
+    #[test]
+    fn guarded_send_response_loss_with_ambiguous_jobs_holds_without_selection() {
+        let server =
+            spawn_response_loss_readback_server(ResponseLossReadbackFixture::AmbiguousJobs);
+        let queue = Vec::new();
+        let stats = vec!["Baseline Campaign 25 0 0 View".to_string()];
+        let stats_identity = stats_identity_inventory(&[(70, 25)]);
+        let schedule_job_ids = BTreeSet::new();
+        let client = response_loss_client(&server.base_url);
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(
+                    &server.base_url,
+                    &queue,
+                    &schedule_job_ids,
+                    &stats,
+                    &stats_identity,
+                    25,
+                ),
+                |_| Err::<reqwest::blocking::Response, _>(()),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            evidence.reconciliation.status,
+            SendApplyStatus::ResponseUncertain
+        );
+        assert_eq!(evidence.reconciliation.job_id, None);
+        let recovery = evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .as_ref()
+            .expect("response uncertainty recovery contract");
+        assert!(recovery.readback_complete);
+        assert_eq!(
+            recovery.identity_state,
+            SendUncertaintyIdentityState::AmbiguousOrUnbound
+        );
+        assert!(recovery.status_follow_up.is_none());
+        assert!(!recovery.retry_authorized);
+        assert!(recovery.guidance.contains("never choose by row order"));
+        assert!(evidence
+            .reconciliation
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("2 added")));
+    }
+
+    #[test]
+    fn guarded_send_response_loss_with_capped_readback_marks_recovery_incomplete() {
+        let server = spawn_response_loss_readback_server(ResponseLossReadbackFixture::Capped);
+        let queue = Vec::new();
+        let stats = vec!["Baseline Campaign 25 0 0 View".to_string()];
+        let stats_identity = stats_identity_inventory(&[(70, 25)]);
+        let schedule_job_ids = BTreeSet::new();
+        let client = response_loss_client(&server.base_url);
+        let evidence = client
+            .post_guarded_send_and_reconcile_with_dispatch(
+                response_loss_input(
+                    &server.base_url,
+                    &queue,
+                    &schedule_job_ids,
+                    &stats,
+                    &stats_identity,
+                    3,
+                ),
+                |_| Err::<reqwest::blocking::Response, _>(()),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            evidence.reconciliation.status,
+            SendApplyStatus::ResponseUncertain
+        );
+        let recovery = evidence
+            .reconciliation
+            .uncertainty_recovery_contract
+            .as_ref()
+            .expect("response uncertainty recovery contract");
+        assert!(!recovery.readback_complete);
+        assert_eq!(
+            recovery.identity_state,
+            SendUncertaintyIdentityState::ReadbackIncomplete
+        );
+        assert!(recovery.status_follow_up.is_none());
+        assert!(!recovery.retry_authorized);
+        assert!(!recovery.mutation_authorized);
+        assert!(recovery.guidance.contains("partial or capped state"));
+        assert!(evidence
+            .reconciliation
+            .proof_gaps
+            .iter()
+            .any(|gap| gap.contains("Stats identity readback was incomplete")));
     }
 
     #[test]
@@ -5072,15 +5535,19 @@ mod tests {
             queue_after: &queue,
             stats_before: &stats_before,
             stats_after: &stats_after,
+            schedule_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &stats_identity,
             stats_identity_after: &stats_identity,
             expected_recipient_count: 999,
+            baseline_max_rows: 25,
             job_id: Some(7001),
             job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 2,
             approved_cron_schedule: false,
             response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: vec!["send popup loop stopped after a repeated route".to_string()],
         });
@@ -5130,15 +5597,19 @@ mod tests {
             queue_after: &queue,
             stats_before: &stats_before,
             stats_after: &stats_after,
+            schedule_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
             expected_recipient_count: 25,
+            baseline_max_rows: 25,
             job_id: Some(7001),
             job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
             response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5174,15 +5645,19 @@ mod tests {
             queue_after: &queue_after,
             stats_before: &stats_before,
             stats_after: &stats_after,
+            schedule_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
             expected_recipient_count: 25,
+            baseline_max_rows: 25,
             job_id: Some(7001),
             job_active_after: Some(true),
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
             response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5215,15 +5690,19 @@ mod tests {
             queue_after: &queue,
             stats_before: &queue,
             stats_after: &queue,
+            schedule_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
             expected_recipient_count: 25,
+            baseline_max_rows: 25,
             job_id: Some(7001),
             job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
             response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5258,15 +5737,19 @@ mod tests {
             queue_after: &queue,
             stats_before: &stats_before,
             stats_after: &stats_after,
+            schedule_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &stats_identity_before,
             stats_identity_after: &stats_identity_after,
             expected_recipient_count: 25,
+            baseline_max_rows: 25,
             job_id: Some(7001),
             job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 1,
             approved_cron_schedule: false,
             response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5296,15 +5779,19 @@ mod tests {
             queue_after: &rows,
             stats_before: &rows,
             stats_after: &rows,
+            schedule_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &empty_stats_identity_inventory(),
             stats_identity_after: &empty_stats_identity_inventory(),
             expected_recipient_count: 25,
+            baseline_max_rows: 25,
             job_id: None,
             job_active_after: Some(false),
             smtp_reason: None,
             popup_steps: 0,
             approved_cron_schedule: false,
             response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });
@@ -5316,15 +5803,19 @@ mod tests {
             queue_after: &rows,
             stats_before: &rows,
             stats_after: &rows,
+            schedule_job_ids_before: &BTreeSet::new(),
             stats_identity_before: &empty_stats_identity_inventory(),
             stats_identity_after: &empty_stats_identity_inventory(),
             expected_recipient_count: 25,
+            baseline_max_rows: 25,
             job_id: Some(7001),
             job_active_after: Some(false),
             smtp_reason: Some("synthetic transport failure".to_string()),
             popup_steps: 1,
             approved_cron_schedule: false,
             response_uncertain: false,
+            reconciliation_readback_complete: true,
+            job_identity_ambiguous: false,
             proof_gaps: Vec::new(),
             notes: Vec::new(),
         });

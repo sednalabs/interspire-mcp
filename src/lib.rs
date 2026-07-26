@@ -534,7 +534,7 @@ impl InterspireMcpServer {
                     .with_group("guarded-send")
                     .with_read_only(false)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Apply one explicitly acknowledged seed send after immediate readiness proof; response loss returns response_uncertain, and Schedule/Manage/Stats progress is nonterminal without native bound proof.",
+                        "Apply one explicitly acknowledged seed send after immediate readiness proof; response loss returns response_uncertain with bounded read-only hold/do-not-retry recovery, never resend authority.",
                         [
                             "interspire",
                             "seed",
@@ -548,7 +548,7 @@ impl InterspireMcpServer {
                     .with_group("guarded-send")
                     .with_read_only(false)
                     .with_discovery(ToolDiscoveryMetadata::new(
-                        "Apply an explicitly acknowledged production send after strict readiness proof; response loss returns response_uncertain, and Schedule/Manage/Stats progress is nonterminal without native bound proof.",
+                        "Apply an explicitly acknowledged production send after strict readiness proof; response loss returns response_uncertain with bounded read-only hold/do-not-retry recovery, never resend authority.",
                         [
                             "interspire",
                             "production",
@@ -1208,7 +1208,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Apply one explicitly acknowledged seed send after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. Response loss returns response_uncertain rather than posted; Schedule/Manage/Stats progress alone never proves terminal state."
+        description = "Apply one explicitly acknowledged seed send after immediate readiness proof. Requires INTERSPIRE_GUARDED_WRITES=1, INTERSPIRE_SEND_CONTROLS=1, acknowledge_seed_send=true, and a bounded expected recipient count; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. Response loss returns response_uncertain rather than posted, attempts bounded read-only Schedule/Manage/Stats reconciliation in the same invocation, and returns hold/do-not-retry recovery that never authorizes resend, mutation, or terminal success."
     )]
     fn interspire_seed_send_apply(
         &self,
@@ -1218,7 +1218,7 @@ impl InterspireMcpServer {
     }
 
     #[tool(
-        description = "Apply an explicitly acknowledged production send after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. Response loss returns response_uncertain rather than posted; Schedule/Manage/Stats progress alone never proves terminal state."
+        description = "Apply an explicitly acknowledged production send after strict immediate readiness proof. Requires guarded writes, send controls, production send controls, exact expected count, From, Reply-To, subject, HTML SHA-256, and the required confirmation phrase; when INTERSPIRE_REQUIRE_OCI_SEND_LEDGER=1, also requires verified OCI ledger preflight. Response loss returns response_uncertain rather than posted, attempts bounded read-only Schedule/Manage/Stats reconciliation in the same invocation, and returns hold/do-not-retry recovery that never authorizes resend, mutation, or terminal success."
     )]
     fn interspire_production_send_apply(
         &self,

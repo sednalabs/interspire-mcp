@@ -524,7 +524,10 @@ or ledger failure. Failed post-send reconciliation is reported as a post-boundar
 non-success state, not as proof that no send boundary was attempted. If the
 request loses its HTTP response, the result is instead `response_uncertain`:
 the request was attempted, but the MCP does not claim that the boundary was
-posted or received by the application.
+posted or received by the application. The same invocation then attempts only
+bounded authenticated Schedule, newsletter Manage, and Stats readback against
+the baselines captured earlier in that invocation before dispatch. It never
+retries the send request.
 The tools then follow the allowlisted Interspire popup send loop, reread
 Schedule, Manage, and Stats, and classify the
 result as `response_uncertain`, `posted`, `queued`, `processed`,
@@ -540,6 +543,19 @@ campaign id, list ids, positive expected queue total, bounded positive Stats
 identity baseline, and status tool name for
 `interspire_send_job_status_readback`. That baseline is diagnostic bounded
 context, not terminal authority.
+`response_uncertain` never exposes that ordinary queued `follow_up_contract`.
+Instead it returns an `uncertainty_recovery_contract` whose sole decision is
+`hold_do_not_retry`. Its `retry_authorized`, `mutation_authorized`, and
+`terminal_success_authorized` fields are always false. The contract carries the
+authenticated same-invocation pre-dispatch Schedule and Stats identity
+baselines, their row bound, the exact intended campaign/list/count/body context,
+the completeness and identity state of the immediate readback, and explicit
+read-only next-action guidance. Only a complete readback with one exactly
+Manage-bound positive job may include nested
+`interspire_send_job_status_readback` context. No identity, ambiguous or
+unbound identity, and incomplete or capped readback remain a hold with no
+automatic job selection. None of these states authorizes resend, retry, or
+terminal success.
 Current Schedule/Manage progress fields are also explicitly diagnostic:
 `terminal_authority_proven` remains false and state values use a
 `diagnostic_*` vocabulary. A reported `100 / 100` remains
