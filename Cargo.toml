@@ -19,7 +19,7 @@ mcp-toolkit-policy-core = { version = "0.1.0", git = "https://github.com/sednala
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "cookies", "rustls-tls"] }
 rmcp = { version = "=1.8.0", default-features = false, features = ["macros", "schemars", "server", "transport-io"] }
 roxmltree = "0.21.1"
-rusqlite = { version = "0.31.0", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 schemars = "1.2.1"
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive"] }
