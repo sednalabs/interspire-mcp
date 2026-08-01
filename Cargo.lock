@@ -500,9 +500,20 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "r-efi",
+ "r-efi 5.3.0",
  "wasip2",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi 6.0.0",
 ]
 
 [[package]]
@@ -783,7 +794,7 @@ dependencies = [
  "mcp-toolkit-policy-core",
  "mcp-toolkit-testing",
  "reqwest",
- "rmcp",
+ "rmcp 3.0.1",
  "roxmltree",
  "rusqlite",
  "schemars",
@@ -893,7 +904,7 @@ source = "git+https://github.com/sednalabs/mcp-toolkit-rs?rev=aa0fbced690f80f0d0
 dependencies = [
  "mcp-toolkit-core",
  "mcp-toolkit-server",
- "rmcp",
+ "rmcp 1.8.0",
 ]
 
 [[package]]
@@ -901,7 +912,7 @@ name = "mcp-toolkit-core"
 version = "0.1.0"
 source = "git+https://github.com/sednalabs/mcp-toolkit-rs?rev=aa0fbced690f80f0d04396b99f18c5fce833a73c#aa0fbced690f80f0d04396b99f18c5fce833a73c"
 dependencies = [
- "rmcp",
+ "rmcp 1.8.0",
  "serde",
  "serde_json",
 ]
@@ -945,7 +956,7 @@ name = "mcp-toolkit-server"
 version = "0.1.0"
 source = "git+https://github.com/sednalabs/mcp-toolkit-rs?rev=aa0fbced690f80f0d04396b99f18c5fce833a73c#aa0fbced690f80f0d04396b99f18c5fce833a73c"
 dependencies = [
- "rmcp",
+ "rmcp 1.8.0",
  "tokio",
 ]
 
@@ -1231,6 +1242,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
+name = "r-efi"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
 name = "rand"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1385,7 +1402,7 @@ dependencies = [
  "futures",
  "pastey",
  "pin-project-lite",
- "rmcp-macros",
+ "rmcp-macros 1.8.0",
  "schemars",
  "serde",
  "serde_json",
@@ -1396,10 +1413,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmcp"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3797d226787327b35b0b6f9e878fe55f3af2bb4daf916c0411079885454042f0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "pastey",
+ "pin-project-lite",
+ "rmcp-macros 3.1.0",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "rmcp-macros"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aad0035b69380782d78ea95b508327e6deaa2235909053e596eea8f27b5e1d5"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
+name = "rmcp-macros"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41bc748630c2be2a71b614c2f40d27bc0df0060696d224e1692c72345b7e0b79"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -2043,6 +2095,17 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+
+[[package]]
+name = "uuid"
+version = "1.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
+dependencies = [
+ "getrandom 0.4.3",
+ "js-sys",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "vcpkg"
