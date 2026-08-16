@@ -15,9 +15,17 @@ env:
   RUST_CACHE_SAVE: "true"
 
 jobs:
-  build-linux-x86_64:
-    name: Build Linux x86_64 release binary
-    runs-on: ubuntu-24.04
+  build-linux:
+    name: Build Linux ${{ matrix.arch }} release binary
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -29,7 +37,7 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
         with:
-          cache-key: binary-build
+          cache-key: binary-build-${{ matrix.arch }}
           cache-workspace-crates: "true"
           save-cache: ${{ env.RUST_CACHE_SAVE }}
 
@@ -43,15 +51,16 @@ jobs:
           mkdir -p dist
           cp target/release/interspire-mcp dist/interspire-mcp
           strip dist/interspire-mcp || true
-          tar -C dist -czf dist/interspire-mcp-linux-x86_64.tar.gz interspire-mcp
-          (cd dist && sha256sum interspire-mcp-linux-x86_64.tar.gz > interspire-mcp-linux-x86_64.tar.gz.sha256)
+          archive="interspire-mcp-linux-${{ matrix.arch }}.tar.gz"
+          tar -C dist -czf "dist/${archive}" interspire-mcp
+          (cd dist && sha256sum "${archive}" > "${archive}.sha256")
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
-          name: interspire-mcp-linux-x86_64
+          name: interspire-mcp-linux-${{ matrix.arch }}
           path: |
-            dist/interspire-mcp-linux-x86_64.tar.gz
-            dist/interspire-mcp-linux-x86_64.tar.gz.sha256
+            dist/interspire-mcp-linux-${{ matrix.arch }}.tar.gz
+            dist/interspire-mcp-linux-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7

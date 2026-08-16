@@ -171,13 +171,15 @@ edits fail closed so operators can verify each surface independently.
 For operational installs, use the hosted GitHub Actions binary artifact:
 
 - Run the manual `binary-build` workflow on the branch or SHA you want.
-- Download the `interspire-mcp-linux-x86_64` artifact from the run.
+- Download the artifact for the target host: `interspire-mcp-linux-x86_64` or
+  `interspire-mcp-linux-aarch64`.
 - Verify the downloaded checksum before installing or running the binary.
-- Extract `interspire-mcp` from `interspire-mcp-linux-x86_64.tar.gz`.
+- Extract `interspire-mcp` from the matching `.tar.gz` archive.
 
 ```bash
-sha256sum -c interspire-mcp-linux-x86_64.tar.gz.sha256
-tar -xzf interspire-mcp-linux-x86_64.tar.gz interspire-mcp
+archive=interspire-mcp-linux-aarch64.tar.gz
+sha256sum -c "${archive}.sha256"
+tar -xzf "${archive}" interspire-mcp
 install -m 0755 interspire-mcp /opt/interspire-mcp/interspire-mcp
 ```
 
